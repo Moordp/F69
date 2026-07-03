@@ -1,0 +1,13 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    uses: kris/ci-workflows/.forgejo/workflows/zig.yml@main
+    with:
+      zig_version: "0.16.0"
+      test: true
