@@ -10,7 +10,7 @@ jobs:
     runs-on: nix
     steps:
       - name: Checkout
-        uses: https://github.com/actions/checkout@v4
+        uses: http://10.30.0.24:3000/kris/checkout@v4
         with:
           submodules: recursive
       - name: zig build
