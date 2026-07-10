@@ -7,7 +7,13 @@ on:
 
 jobs:
   build:
-    uses: kris/ci-workflows/.forgejo/workflows/zig.yml@main
-    with:
-      zig_version: "0.16.0"
-      test: true
+    runs-on: nix
+    steps:
+      - name: Checkout
+        uses: https://github.com/actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: zig build
+        run: nix develop "git+http://10.30.0.24:3000/kris/ci-workflows#0-16-0" --command zci build
+      - name: zig build test
+        run: nix develop "git+http://10.30.0.24:3000/kris/ci-workflows#0-16-0" --command zci build test
