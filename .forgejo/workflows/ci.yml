@@ -14,6 +14,6 @@ jobs:
         with:
           submodules: recursive
       - name: zig build
-        run: nix develop "git+http://10.30.0.24:3000/kris/ci-workflows#0-16-0" --command zci build
+        run: nix develop --refresh "git+http://10.30.0.24:3000/kris/ci-workflows#0-16-0" --command zci build
       - name: zig build test
-        run: nix develop "git+http://10.30.0.24:3000/kris/ci-workflows#0-16-0" --command zci build test
+        run: nix develop --refresh "git+http://10.30.0.24:3000/kris/ci-workflows#0-16-0" --command zci build test
