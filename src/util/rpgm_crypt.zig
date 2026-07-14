@@ -148,3 +148,76 @@ test "decrypt handles assets shorter than the 16-byte key window" {
     defer testing.allocator.free(dec);
     try testing.expectEqualStrings(plain, dec);
 }
+
+test "fuzz: rpgm encrypt/decrypt round-trip" {
+    // Multi-call Smith stream — no hand-encoded corpus (fuzzSeed only fits
+    // single-slice harnesses); the automatic empty-input run is the replay
+    // smoke test.
+    try std.testing.fuzz({}, fuzzRpgmRoundTrip, .{});
+}
+
+fn fuzzRpgmRoundTrip(_: void, smith: *std.testing.Smith) anyerror!void {
+    var key: [KEY_LEN]u8 = undefined;
+    smith.bytes(&key);
+    var buf: [2048]u8 = undefined;
+    const n = smith.slice(&buf);
+    const plain = buf[0..n];
+    const a = std.testing.allocator;
+
+    const enc = try encrypt(a, plain, key);
+    defer a.free(enc);
+    try std.testing.expect(isEncrypted(enc));
+
+    const dec = try decrypt(a, enc, key);
+    defer a.free(dec);
+    try std.testing.expectEqualSlices(u8, plain, dec);
+}
+
+test "fuzz: rpgm parsers survive arbitrary input" {
+    try std.testing.fuzz({}, fuzzRpgmParsers, .{ .corpus = &.{
+        fuzzSeed("00112233445566778899aabbccddeeff"),
+        fuzzSeed("{\"encryptionKey\":\"00112233445566778899aabbccddeeff\"}"),
+        fuzzSeed("picture.rpgmvp"),
+    } });
+}
+
+/// Harness read-buffer length. fuzzSeed payloads must fit this, or Smith's
+/// decode silently rejects the length and replays the seed as empty.
+const FUZZ_BUF_LEN = 1024;
+
+fn fuzzRpgmParsers(_: void, smith: *std.testing.Smith) anyerror!void {
+    var buf: [FUZZ_BUF_LEN]u8 = undefined;
+    const n = smith.slice(&buf);
+    const data = buf[0..n];
+
+    _ = isEncrypted(data);
+    _ = parseKey(data);
+    _ = keyFromSystemJson(std.testing.allocator, data);
+
+    var name_buf: [FUZZ_BUF_LEN]u8 = undefined;
+    _ = decryptedName(&name_buf, data);
+
+    // decrypt on arbitrary (mostly non-encrypted) data must reject cleanly.
+    const key: [KEY_LEN]u8 = @splat(0xAA);
+    if (decrypt(std.testing.allocator, data, key)) |d| {
+        std.testing.allocator.free(d);
+    } else |_| {}
+}
+
+/// Encode one corpus entry for a testOne that makes a single smith.slice()
+/// call: 4-byte LE length prefix + payload (Smith input stream format).
+/// The payload must fit the harness read buffer (FUZZ_BUF_LEN): a longer
+/// length is rejected by Smith's decode and the seed silently replays as
+/// an empty string.
+fn fuzzSeed(comptime payload: []const u8) []const u8 {
+    comptime std.debug.assert(payload.len <= FUZZ_BUF_LEN);
+    const S = struct {
+        const entry: [4 + payload.len]u8 = blk: {
+            var e: [4 + payload.len]u8 = undefined;
+            std.mem.writeInt(u32, e[0..4], payload.len, .little);
+            @memcpy(e[4..], payload);
+            break :blk e;
+        };
+    };
+    return &S.entry;
+}
