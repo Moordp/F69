@@ -357,3 +357,66 @@ test "unsupported opcode is reported, not guessed" {
     defer arena.deinit();
     try testing.expectError(Error.Unsupported, load(arena.allocator(), &data));
 }
+
+test "fuzz: pickle.load survives arbitrary input" {
+    try std.testing.fuzz({}, fuzzPickleLoad, .{
+        .corpus = &.{
+            fuzzSeed(&.{ 0x80, 0x02, 0x7d, 0x2e }), // PROTO 2, EMPTY_DICT, STOP
+            fuzzSeed(&.{ 0x80, 0x02, 0x7d, 0x28 }), // PROTO 2, EMPTY_DICT, MARK (no STOP — loop exhaustion)
+            fuzzSeed("N."), // NONE, STOP
+            fuzzSeed(&.{0x80}), // truncated PROTO
+            // RPA-shaped index {"a.png": [(16, 100, b"")]} — exercises
+            // SHORT_BINUNICODE, SHORT_BINBYTES, TUPLE/APPENDS/SETITEMS marks.
+            fuzzSeed(&.{
+                0x80, 0x02, // PROTO 2
+                0x7d, // EMPTY_DICT
+                0x28, // MARK   (for SETITEMS)
+                0x8c, 0x05, 'a', '.', 'p', 'n', 'g', // SHORT_BINUNICODE "a.png"
+                0x5d, // EMPTY_LIST
+                0x28, // MARK   (for APPENDS)
+                0x28, // MARK   (for TUPLE)
+                0x4b, 0x10, // BININT1 16
+                0x4b, 0x64, // BININT1 100
+                0x43, 0x00, // SHORT_BINBYTES ""
+                0x74, // TUPLE  (from inner MARK)
+                0x65, // APPENDS (from list MARK)
+                0x75, // SETITEMS (from dict MARK)
+                0x2e, // STOP
+            }),
+        },
+    });
+}
+
+fn fuzzPickleLoad(_: void, smith: *std.testing.Smith) anyerror!void {
+    var buf: [FUZZ_BUF_LEN]u8 = undefined;
+    const n = smith.slice(&buf);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // Every error in pickle.Error is an expected reject; anything else
+    // (panic, overflow, OOB) is what fuzzing exists to catch.
+    _ = load(arena.allocator(), buf[0..n]) catch return;
+}
+
+/// Harness read-buffer length. fuzzSeed payloads must fit this, or Smith's
+/// decode silently rejects the length and replays the seed as empty.
+const FUZZ_BUF_LEN = 4096;
+
+/// Encode one corpus entry for a testOne that makes a single smith.slice()
+/// call: 4-byte LE length prefix + payload (Smith input stream format).
+/// The payload must fit the harness read buffer (FUZZ_BUF_LEN): a longer
+/// length is rejected by Smith's decode and the seed silently replays as
+/// an empty string.
+fn fuzzSeed(comptime payload: []const u8) []const u8 {
+    comptime std.debug.assert(payload.len <= FUZZ_BUF_LEN);
+    const S = struct {
+        const entry: [4 + payload.len]u8 = blk: {
+            var e: [4 + payload.len]u8 = undefined;
+            std.mem.writeInt(u32, e[0..4], payload.len, .little);
+            @memcpy(e[4..], payload);
+            break :blk e;
+        };
+    };
+    return &S.entry;
+}
