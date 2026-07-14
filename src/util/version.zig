@@ -377,11 +377,10 @@ pub fn canonicalize(buf: []u8, input: []const u8) ?Canonical {
 /// so each call is one probe instead of the 28-entry `eqlAsciiCase`
 /// cascade the table replaced.
 const STOP_WORDS = std.StaticStringMap(void).initComptime(.{
-    .{ "linux", {} },     .{ "windows", {} },  .{ "win", {} },     .{ "mac", {} },     .{ "macos", {} },   .{ "android", {} }, .{ "pc", {} },
-    .{ "public", {} },    .{ "patreon", {} },  .{ "steam", {} },   .{ "demo", {} },    .{ "bugfix", {} },  .{ "hotfix", {} },
-    .{ "build", {} },     .{ "release", {} },  .{ "rel", {} },     .{ "ver", {} },     .{ "version", {} },
-    .{ "x64", {} },       .{ "x86_64", {} },   .{ "x86", {} },     .{ "i686", {} },    .{ "aarch64", {} },
-    .{ "free", {} },      .{ "paid", {} },     .{ "uncensored", {} }, .{ "censored", {} },
+    .{ "linux", {} },   .{ "windows", {} }, .{ "win", {} },   .{ "mac", {} },     .{ "macos", {} },      .{ "android", {} },  .{ "pc", {} },
+    .{ "public", {} },  .{ "patreon", {} }, .{ "steam", {} }, .{ "demo", {} },    .{ "bugfix", {} },     .{ "hotfix", {} },   .{ "build", {} },
+    .{ "release", {} }, .{ "rel", {} },     .{ "ver", {} },   .{ "version", {} }, .{ "x64", {} },        .{ "x86_64", {} },   .{ "x86", {} },
+    .{ "i686", {} },    .{ "aarch64", {} }, .{ "free", {} },  .{ "paid", {} },    .{ "uncensored", {} }, .{ "censored", {} },
 });
 
 fn isStopWord(t: []const u8) bool {
@@ -448,7 +447,7 @@ fn canonicalEqual(a: Canonical, b: Canonical) bool {
     // Episodes must agree only when BOTH sides published one. One-
     // sided episodes are ignored — a torrent that strips the "Ep12"
     // prefix is still about the same release the F95 OP published.
-    if (a.episode != null and b.episode != null and a.episode.?  != b.episode.?) return false;
+    if (a.episode != null and b.episode != null and a.episode.? != b.episode.?) return false;
     if (a.suffix != b.suffix) return false;
     return coresEqual(a.core, b.core);
 }
@@ -678,4 +677,56 @@ test "satisfies: bogus term degrades to implicit-equality" {
     // real version. AND-joined: the other half is irrelevant.
     try std.testing.expect(!satisfies("0.20", "??garbage,>=0.20"));
     try std.testing.expect(!satisfies("0.19", "??garbage,>=0.20"));
+}
+
+test "fuzz: version parsers survive arbitrary input" {
+    try std.testing.fuzz({}, fuzzVersionParsers, .{ .corpus = &.{
+        fuzzSeed("My Game [v1.2.3] [Dev]"),
+        fuzzSeed("v0.10.1-beta"),
+        fuzzSeed("Game_Name-1.0-pc.zip"),
+        fuzzSeed("Ch. 5 v0.5.5a"),
+        fuzzSeed(""),
+    } });
+}
+
+/// Harness read-buffer length. fuzzSeed payloads must fit this, or Smith's
+/// decode silently rejects the length and replays the seed as empty.
+const FUZZ_BUF_LEN = 256;
+
+fn fuzzVersionParsers(_: void, smith: *std.testing.Smith) anyerror!void {
+    var buf: [FUZZ_BUF_LEN]u8 = undefined;
+    const n = smith.slice(&buf);
+    const s = buf[0..n];
+
+    _ = extractFromTitle(s);
+    _ = fromArchivePath(s);
+
+    var canon_buf: [256]u8 = undefined;
+    _ = canonicalize(&canon_buf, s);
+
+    // Reflexivity: any string must compare equal to itself. If this fires,
+    // compare() has a real ordering bug — investigate, don't weaken it.
+    try std.testing.expectEqual(std.math.Order.eq, compare(s, s));
+
+    _ = satisfies(s, ">=1.0");
+    _ = satisfies("1.0", s);
+    _ = equivalent(s, s);
+}
+
+/// Encode one corpus entry for a testOne that makes a single smith.slice()
+/// call: 4-byte LE length prefix + payload (Smith input stream format).
+/// The payload must fit the harness read buffer (FUZZ_BUF_LEN): a longer
+/// length is rejected by Smith's decode and the seed silently replays as
+/// an empty string.
+fn fuzzSeed(comptime payload: []const u8) []const u8 {
+    comptime std.debug.assert(payload.len <= FUZZ_BUF_LEN);
+    const S = struct {
+        const entry: [4 + payload.len]u8 = blk: {
+            var e: [4 + payload.len]u8 = undefined;
+            std.mem.writeInt(u32, e[0..4], payload.len, .little);
+            @memcpy(e[4..], payload);
+            break :blk e;
+        };
+    };
+    return &S.entry;
 }
