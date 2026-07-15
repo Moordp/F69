@@ -58,7 +58,7 @@ pub fn downloadsScreen(frame: *Frame) !bool {
         defer top.deinit();
         if (components.iconButton(@src(), "Back", entypo.chevron_left, .{})) state.screen = .library;
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 12, .h = 1 } });
-        dvui.label(@src(), "Downloads & Seeding", .{}, .{ .gravity_y = 0.5, .style = .highlight });
+        dvui.label(@src(), "Downloads & Seeding", .{}, .{ .gravity_y = 0.5, .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
 
         // Compute live totals across all jobs — gives the user a
@@ -325,7 +325,7 @@ fn downloadsSectionHeader(label_text: []const u8, count: u32, key: u8) void {
         .padding = .{ .x = 0, .y = 6, .w = 0, .h = 4 },
     });
     defer box.deinit();
-    comp.sectionHeader(@src(), label_text, .{ .id_extra = key, .gravity_y = 0.5, .style = .highlight });
+    comp.sectionHeader(@src(), label_text, .{ .id_extra = key, .gravity_y = 0.5, .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
     _ = dvui.spacer(@src(), .{ .id_extra = key, .min_size_content = .{ .w = 8, .h = 1 } });
     var n_buf: [16]u8 = undefined;
     const n_s = std.fmt.bufPrint(&n_buf, "({d})", .{count}) catch "(?)";
@@ -418,7 +418,7 @@ fn renderJobRow(job: downloads.Job, title: []const u8, extracting: bool, ratio_t
         const truncated = if (title.len > 80) title[0..80] else title;
         dvui.label(@src(), "{s}{s}", .{ truncated, if (title.len > 80) "…" else "" }, .{
             .gravity_y = 0.5,
-            .style = .highlight,
+            .color_text = tokens.toDvui(tokens.active.acc, dvui.Color),
         });
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
 

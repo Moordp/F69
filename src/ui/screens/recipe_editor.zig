@@ -113,7 +113,7 @@ pub fn recipeEditorScreen(frame: *Frame) !bool {
             "Set up plan · step {d} of 2 · {s}",
             .{ step_num, step_title },
         ) catch "Set up plan";
-        dvui.labelNoFmt(@src(), title, .{}, .{ .style = .highlight, .gravity_y = 0.5 });
+        dvui.labelNoFmt(@src(), title, .{}, .{ .color_text = tokens.toDvui(tokens.active.acc, dvui.Color), .gravity_y = 0.5 });
     }
     _ = dvui.separator(@src(), .{ .expand = .horizontal });
 
@@ -335,7 +335,7 @@ fn renderStepIntro(title: []const u8, help: []const u8) void {
     const title_key = std.hash.Wyhash.hash(0, title);
     dvui.labelNoFmt(@src(), title, .{}, .{
         .id_extra = title_key,
-        .style = .highlight,
+        .color_text = tokens.toDvui(tokens.active.acc, dvui.Color),
     });
     _ = dvui.spacer(@src(), .{
         .id_extra = title_key,
@@ -355,7 +355,7 @@ fn editorSectionHeader(title: []const u8) void {
     const key = std.hash.Wyhash.hash(0, title);
     _ = dvui.spacer(@src(), .{ .id_extra = key, .min_size_content = .{ .w = 1, .h = 8 } });
     dvui.labelNoFmt(@src(), title, .{}, .{
-        .style = .highlight,
+        .color_text = tokens.toDvui(tokens.active.acc, dvui.Color),
         .id_extra = key,
     });
     _ = dvui.spacer(@src(), .{ .id_extra = key, .min_size_content = .{ .w = 1, .h = 4 } });
@@ -712,7 +712,7 @@ fn renderSimulationDetail(frame: *Frame, w: *state_mod.WizardState, sim: *const 
         // relative to this root.
         _ = sim.install_dir;
         const hdr = std.fmt.bufPrint(&hdr_buf, "Game folder/{s}", .{counts_txt}) catch "Game folder/";
-        dvui.labelNoFmt(@src(), hdr, .{}, .{ .style = .highlight, .font = .theme(.mono) });
+        dvui.labelNoFmt(@src(), hdr, .{}, .{ .color_text = tokens.toDvui(tokens.active.acc, dvui.Color), .font = .theme(.mono) });
     }
 
     var scroll = dvui.scrollArea(@src(), .{}, .{
@@ -1016,7 +1016,7 @@ fn renderWizardPreviewPane(frame: *Frame, game: *const library.Game, w: *state_m
     defer scroll.deinit();
 
     // -- Archive tree (top-level entries only) --
-    dvui.labelNoFmt(@src(), "Archive contents", .{}, .{ .style = .highlight });
+    dvui.labelNoFmt(@src(), "Archive contents", .{}, .{ .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 4 } });
 
     const modfile_id = w.modfile_id_buf[0..w.modfile_id_len];
@@ -1080,7 +1080,7 @@ fn renderWizardPreviewPane(frame: *Frame, game: *const library.Game, w: *state_m
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 12 } });
 
     // -- Impact diff (existing simulation panel) --
-    dvui.labelNoFmt(@src(), "After install", .{}, .{ .style = .highlight });
+    dvui.labelNoFmt(@src(), "After install", .{}, .{ .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 4 } });
 
     // Search bar — filters the tree below by file/dir name (case-
@@ -1217,7 +1217,7 @@ fn renderWizardBlockRow(
             .min_size_content = .{ .w = 8, .h = 1 },
         });
         dvui.labelNoFmt(@src(), blockKindLabel(b.kind), .{}, .{
-            .style = .highlight,
+            .color_text = tokens.toDvui(tokens.active.acc, dvui.Color),
             .gravity_y = 0.5,
             .id_extra = idx,
         });
@@ -1401,7 +1401,7 @@ fn wizardRelationGroup(group_idx: usize, label: []const u8, bufs: [][64]u8, len:
         .id_extra = group_idx,
     });
     defer box.deinit();
-    dvui.label(@src(), "{s}:", .{label}, .{ .style = .highlight });
+    dvui.label(@src(), "{s}:", .{label}, .{ .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
     var i: usize = 0;
     while (i < len.*) : (i += 1) {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = i });
