@@ -1083,7 +1083,7 @@ pub const Library = struct {
             \\INSERT INTO play_sessions
             \\  (game_thread_id, install_id, version, started_at)
             \\VALUES (?, ?, ?, ?)
-            ,
+        ,
             .{
                 @as(i64, @intCast(args.game_thread_id)),
                 install_id_slice,
@@ -1104,7 +1104,7 @@ pub const Library = struct {
             \\FROM play_sessions
             \\WHERE game_thread_id = ?
             \\ORDER BY started_at DESC
-            ,
+        ,
             .{@as(i64, @intCast(game_thread_id))},
         ) catch return self.dbFail();
         defer rows.deinit();
@@ -1174,7 +1174,7 @@ pub const Library = struct {
         // and (conditionally) bump aggregates.
         var rows = self.conn.inner.rows(
             \\SELECT game_thread_id, started_at FROM play_sessions WHERE id = ?
-            ,
+        ,
             .{args.session_id},
         ) catch return self.dbFail();
         defer rows.deinit();
@@ -1190,7 +1190,7 @@ pub const Library = struct {
             \\UPDATE play_sessions
             \\SET ended_at = ?, duration_s = ?, counts_as_played = ?
             \\WHERE id = ?
-            ,
+        ,
             .{
                 args.ended_at,
                 duration_s,
@@ -1205,7 +1205,7 @@ pub const Library = struct {
                 \\SET total_playtime_s = total_playtime_s + ?,
                 \\    last_played_at   = ?
                 \\WHERE f95_thread_id = ?
-                ,
+            ,
                 .{
                     duration_s,
                     args.ended_at,
@@ -1229,7 +1229,7 @@ pub const Library = struct {
         // Read current value.
         var rows = self.conn.inner.rows(
             \\SELECT last_played_version FROM games WHERE f95_thread_id = ?
-            ,
+        ,
             .{@as(i64, @intCast(game_thread_id))},
         ) catch return self.dbFail();
         defer rows.deinit();
@@ -1241,7 +1241,7 @@ pub const Library = struct {
 
         self.conn.inner.exec(
             \\UPDATE games SET last_played_version = ? WHERE f95_thread_id = ?
-            ,
+        ,
             .{ version, @as(i64, @intCast(game_thread_id)) },
         ) catch return self.dbFail();
     }
@@ -2346,4 +2346,11 @@ test "library: setLastPlayedVersionIfNewer — older does NOT regress" {
     const g = (try lib.getGame(1)).?;
     defer lib.freeGame(g);
     try std.testing.expectEqualStrings("0.2", g.last_played_version.?);
+}
+
+// Pull nested tests into this module's test binary (same idiom as
+// downloads.zig / importers.zig roots).
+test {
+    _ = @import("domain.zig");
+    _ = @import("errors.zig");
 }

@@ -51,3 +51,17 @@ pub const parseGameFromBytes = zon.parseGameFromBytes;
 pub const parseModFromBytes = zon.parseModFromBytes;
 pub const saveGame = zon.saveGame;
 pub const saveMod = zon.saveMod;
+
+// Pull nested tests into this module's test binary. Without these
+// references the compiler only analyzes the re-exported symbols above,
+// so nested `test` blocks would silently no-op (same idiom as
+// downloads.zig / importers.zig roots).
+test {
+    _ = @import("derive.zig");
+    _ = @import("domain.zig");
+    _ = @import("errors.zig");
+    _ = @import("preset.zig");
+    _ = @import("repository.zig");
+    _ = @import("validator.zig");
+    _ = @import("zon_loader.zig");
+}

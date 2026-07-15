@@ -60,3 +60,12 @@ pub const translateTags = map.translateTags;
 pub const encodeDownloadLinks = map.encodeDownloadLinks;
 pub const buildDownloadsMd = map.buildDownloadsMd;
 pub const buildThreadInfoMd = map.buildThreadInfoMd;
+
+// Pull nested tests into this module's test binary (same idiom as
+// downloads.zig / importers.zig roots).
+test {
+    _ = @import("client.zig");
+    _ = @import("errors.zig");
+    _ = @import("mapping.zig");
+    _ = @import("tag_table.zig");
+}
