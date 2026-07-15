@@ -746,10 +746,9 @@ fn looksLikeCategoryPrefix(token: []const u8) bool {
 fn looksLikeStatus(token: []const u8) bool {
     const words = [_][]const u8{
         "Completed", "Complete",
-        "Abandoned",
-        "Onhold",  "On hold",  "On-hold",
-        "Ongoing",
-        "Demo",
+        "Abandoned", "Onhold",
+        "On hold",   "On-hold",
+        "Ongoing",   "Demo",
         "Final",
     };
     for (words) |w| {
@@ -767,20 +766,29 @@ fn looksLikeStatus(token: []const u8) bool {
 /// `"ue"` which the original cascade also never accepted.
 const ENGINE_TOKENS = std.StaticStringMap(void).initComptime(.{
     .{ "renpy", {} },
-    .{ "rpgm", {} },              .{ "rpgmaker", {} },
-    .{ "rpgmmv", {} },            .{ "rpgmakermv", {} },
-    .{ "rpgmmz", {} },            .{ "rpgmakermz", {} },
-    .{ "rpgmvx", {} },            .{ "rpgmakervx", {} },            .{ "rpgmakervxace", {} },
+    .{ "rpgm", {} },
+    .{ "rpgmaker", {} },
+    .{ "rpgmmv", {} },
+    .{ "rpgmakermv", {} },
+    .{ "rpgmmz", {} },
+    .{ "rpgmakermz", {} },
+    .{ "rpgmvx", {} },
+    .{ "rpgmakervx", {} },
+    .{ "rpgmakervxace", {} },
     .{ "unity", {} },
-    .{ "unreal", {} },            .{ "unrealengine", {} },
+    .{ "unreal", {} },
+    .{ "unrealengine", {} },
     .{ "html", {} },
     .{ "flash", {} },
     .{ "java", {} },
-    .{ "wolfrpg", {} },           .{ "wolfrpgeditor", {} },
+    .{ "wolfrpg", {} },
+    .{ "wolfrpgeditor", {} },
     .{ "qsp", {} },
-    .{ "tyranobuilder", {} },     .{ "tyrano", {} },
+    .{ "tyranobuilder", {} },
+    .{ "tyrano", {} },
     .{ "twine", {} },
-    .{ "others", {} },            .{ "other", {} },
+    .{ "others", {} },
+    .{ "other", {} },
 });
 
 /// Match common F95 engine bracket tokens. Engine.fromBracket has the
@@ -1184,13 +1192,13 @@ const MAX_SECTION_LEN: usize = 32 * 1024;
 /// the OP. These are bold labels XenForo authors use to structure
 /// posts — the section continues until the next one.
 const SECTION_HEADERS = [_][]const u8{
-    "Overview",      "Description",  "Story",    "Plot",
-    "Updated",       "Thread Updated", "Game Updated",
-    "Release Date",  "Developer",    "Publisher", "Censored", "Censorship",
-    "Version",       "OS",           "Language", "Genre",     "Tags",
-    "Installation",  "Install",      "Walkthrough", "Notes",
-    "Changelog",     "Change Log",   "Change-log",
-    "DOWNLOAD",      "Download",     "Downloads",
+    "Overview",  "Description",    "Story",        "Plot",
+    "Updated",   "Thread Updated", "Game Updated", "Release Date",
+    "Developer", "Publisher",      "Censored",     "Censorship",
+    "Version",   "OS",             "Language",     "Genre",
+    "Tags",      "Installation",   "Install",      "Walkthrough",
+    "Notes",     "Changelog",      "Change Log",   "Change-log",
+    "DOWNLOAD",  "Download",       "Downloads",
 };
 
 fn extractOverview(alloc: std.mem.Allocator, html: []const u8) !?[]u8 {
@@ -1223,7 +1231,7 @@ fn extractDownloadsSection(alloc: std.mem.Allocator, html: []const u8) !?[]u8 {
         return null;
     };
     const headers = [_][]const u8{
-        "DOWNLOAD", "Download", "Downloads", "Download Link", "Download Links",
+        "DOWNLOAD",  "Download", "Downloads", "Download Link", "Download Links",
         "DOWNLOADS",
     };
     const start = locateHeaderRelaxed(op, &headers) orelse {
@@ -1235,8 +1243,14 @@ fn extractDownloadsSection(alloc: std.mem.Allocator, html: []const u8) !?[]u8 {
     // Step past whatever caps the header text — typically `</b>` or
     // a `:` or just the closing punctuation. We're permissive
     // because the header may not have a colon at all.
+    // The colon must cap the header text itself: only accept it when it
+    // appears before the next `<`. A colonless bold header followed by a
+    // bold platform label (`<b>DOWNLOAD</b><br><b>WINDOWS:</b>`) otherwise
+    // gets its first label swallowed by the 32-byte window.
     if (std.mem.indexOfPos(u8, op, content_start, ":")) |colon| {
-        if (colon > content_start and colon - content_start < 32) content_start = colon + 1;
+        const lt = std.mem.indexOfScalarPos(u8, op, content_start, '<');
+        const colon_caps_header = lt == null or colon < lt.?;
+        if (colon_caps_header and colon > content_start and colon - content_start < 32) content_start = colon + 1;
     }
     if (content_start < op.len and op[content_start] == '<') {
         if (std.mem.indexOfScalarPos(u8, op, content_start, '>')) |gt| {
