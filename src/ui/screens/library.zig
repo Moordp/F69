@@ -1321,6 +1321,19 @@ fn goDetail(state: anytype, g: *const library.Game) void {
     state.selected_thread = g.f95_thread_id;
 }
 
+/// Identity-keyed click surface filling a list-table cell. Grid cells are
+/// keyed by (col,row) POSITION, so a press captured on row N resolves
+/// against whatever game sits at N when the button is released — if a
+/// background sync bumps the filter cache mid-click, the click opens the
+/// WRONG game (field report). Keying the click surface by thread id makes
+/// a mid-reorder release match nothing: a harmless no-op instead.
+fn rowHit(src: std.builtin.SourceLocation, thread_id: u64) *dvui.BoxWidget {
+    return dvui.box(src, .{ .dir = .horizontal }, .{
+        .id_extra = thread_id,
+        .expand = .both,
+    });
+}
+
 fn renderListTable(frame: *Frame, games: []const library.Game, filtered: []const u32) void {
     const state = frame.state;
     const now_s: i64 = std.Io.Clock.Timestamp.now(frame.io, .real).raw.toSeconds();
@@ -1372,10 +1385,22 @@ fn renderListTable(frame: *Frame, games: []const library.Game, filtered: []const
             var cell = grid.bodyCell(@src(), cell_num, .{});
             defer cell.deinit();
             {
+                // Per-game tag ("row-<thread_id>") for the GUI driver
+                // (mirrors "card-<id>").
+                var row_tag_buf: [32]u8 = undefined;
+                const row_tag = std.fmt.bufPrint(&row_tag_buf, "row-{d}", .{g.f95_thread_id}) catch "row";
+                // Click surface keyed by the game's identity, NOT the grid
+                // cell: bodyCell ids are (col,row) positional, so a press
+                // captured on row N resolves against whatever game sits at
+                // N when the button is released — a background sync bumping
+                // the filter cache mid-click made clicks open the WRONG
+                // game (field report). With the game id in the widget id, a
+                // mid-reorder release matches nothing: harmless no-op.
                 var nrow = dvui.box(@src(), .{ .dir = .horizontal }, .{
                     .id_extra = g.f95_thread_id,
-                    .expand = .horizontal,
+                    .expand = .both,
                     .gravity_y = 0.5,
+                    .tag = row_tag,
                 });
                 defer nrow.deinit();
 
@@ -1461,14 +1486,16 @@ fn renderListTable(frame: *Frame, games: []const library.Game, filtered: []const
                         .corner_radius = .all(2),
                     });
                 }
+                if (dvui.clicked(nrow.data(), .{})) goDetail(state, g);
             }
-            if (dvui.clicked(cell.data(), .{})) goDetail(state, g);
         }
         // Engine
         {
             defer cell_num.col_num += 1;
             var cell = grid.bodyCell(@src(), cell_num, .{});
             defer cell.deinit();
+            var hit = rowHit(@src(), g.f95_thread_id);
+            defer hit.deinit();
             if (g.engine != .unknown) {
                 const fill = components.engineBadgeColor(g.engine);
                 comp.chip(@src(), .{
@@ -1486,13 +1513,15 @@ fn renderListTable(frame: *Frame, games: []const library.Game, filtered: []const
                     .corner_radius = .all(3),
                 });
             }
-            if (dvui.clicked(cell.data(), .{})) goDetail(state, g);
+            if (dvui.clicked(hit.data(), .{})) goDetail(state, g);
         }
         // Rating (5 stars, filled to the rounded score)
         {
             defer cell_num.col_num += 1;
             var cell = grid.bodyCell(@src(), cell_num, .{});
             defer cell.deinit();
+            var hit = rowHit(@src(), g.f95_thread_id);
+            defer hit.deinit();
             if (g.rating) |r| {
                 var srow = dvui.box(@src(), .{ .dir = .horizontal }, .{
                     .id_extra = g.f95_thread_id,
@@ -1513,35 +1542,41 @@ fn renderListTable(frame: *Frame, games: []const library.Game, filtered: []const
                     });
                 }
             }
-            if (dvui.clicked(cell.data(), .{})) goDetail(state, g);
+            if (dvui.clicked(hit.data(), .{})) goDetail(state, g);
         }
         // Version
         {
             defer cell_num.col_num += 1;
             var cell = grid.bodyCell(@src(), cell_num, .{});
             defer cell.deinit();
+            var hit = rowHit(@src(), g.f95_thread_id);
+            defer hit.deinit();
             dvui.labelNoFmt(@src(), g.latest_version orelse "", .{}, .{ .gravity_y = 0.5, .color_text = style.labelDim() });
-            if (dvui.clicked(cell.data(), .{})) goDetail(state, g);
+            if (dvui.clicked(hit.data(), .{})) goDetail(state, g);
         }
         // Updated
         {
             defer cell_num.col_num += 1;
             var cell = grid.bodyCell(@src(), cell_num, .{});
             defer cell.deinit();
+            var hit = rowHit(@src(), g.f95_thread_id);
+            defer hit.deinit();
             var ub: [16]u8 = undefined;
             const us = reltime.ago(now_s, g.last_updated_at orelse 0, &ub);
             dvui.labelNoFmt(@src(), us, .{}, .{ .gravity_y = 0.5, .color_text = style.labelDim() });
-            if (dvui.clicked(cell.data(), .{})) goDetail(state, g);
+            if (dvui.clicked(hit.data(), .{})) goDetail(state, g);
         }
         // Played (relative time of the last launch)
         {
             defer cell_num.col_num += 1;
             var cell = grid.bodyCell(@src(), cell_num, .{});
             defer cell.deinit();
+            var hit = rowHit(@src(), g.f95_thread_id);
+            defer hit.deinit();
             var pb: [16]u8 = undefined;
             const ps = if (g.last_played_at) |lp| reltime.ago(now_s, lp, &pb) else "—";
             dvui.labelNoFmt(@src(), ps, .{}, .{ .gravity_y = 0.5, .color_text = style.labelDim() });
-            if (dvui.clicked(cell.data(), .{})) goDetail(state, g);
+            if (dvui.clicked(hit.data(), .{})) goDetail(state, g);
         }
         // Action: ▶ play when installed, ⬇ download otherwise (Design-B row button).
         {
