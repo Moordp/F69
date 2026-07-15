@@ -38,7 +38,29 @@ pub const DEFAULT_DB_BASENAME = "db.sqlite3";
 /// Read every game row from the F95Checker SQLite db at `db_path`.
 /// Returns a `Bundle` owning every string via an arena. Caller frees
 /// with `bundle.deinit()`.
+/// True when `<db_path>-wal` exists and is non-empty — the strongest
+/// libc-only signal that the source app has the DB open right now (a
+/// cleanly-closed sqlite checkpoints and truncates its WAL). A read-only
+/// open of a hot-WAL DB sees a stale snapshot, which is the leading
+/// theory for the field report of imports needing several repeats.
+fn walIsHot(db_path: []const u8) bool {
+    var buf: [1024]u8 = undefined;
+    const wal = std.fmt.bufPrintZ(&buf, "{s}-wal", .{db_path}) catch return false;
+    const f = std.c.fopen(wal.ptr, "rb") orelse return false;
+    defer _ = std.c.fclose(f);
+    // Non-empty ⟺ at least one byte readable (no fseek binding in std.c).
+    var byte: [1]u8 = undefined;
+    return std.c.fread(&byte, 1, 1, f) == 1;
+}
+
 pub fn loadFromDb(alloc: std.mem.Allocator, db_path: []const u8) imp.Error!imp.Bundle {
+    if (walIsHot(db_path)) {
+        log.warn(
+            "{s} has a non-empty WAL — F95Checker looks like it's still running. " ++
+                "This import may see a stale snapshot; close F95Checker and re-import if games are missing.",
+            .{db_path},
+        );
+    }
     var conn = dbu.Conn.open(db_path, alloc, .{ .readonly = true, .create = false }) catch return imp.Error.OpenFailed;
     defer conn.close();
 
@@ -60,15 +82,29 @@ pub fn loadFromDb(alloc: std.mem.Allocator, db_path: []const u8) imp.Error!imp.B
     , .{}) catch return imp.Error.ParseFailed;
     defer rows.deinit();
 
+    // Per-run accounting: makes a partial import diagnosable from the log
+    // (field report: imports sometimes need repeating; the counts tell us
+    // whether rows were missing at READ time or lost downstream).
+    var rows_read: usize = 0;
+    var skipped_bad_id: usize = 0;
+    var skipped_nameless: usize = 0;
+
     while (rows.next()) |r| {
+        rows_read += 1;
         const id_i: i64 = r.int(0);
-        if (id_i <= 0) continue;
+        if (id_i <= 0) {
+            skipped_bad_id += 1;
+            log.info("import skip: row with non-positive id {d}", .{id_i});
+            continue;
+        }
         const thread_id: u64 = @intCast(id_i);
 
         const name = (dupeNullable(aalloc, r.nullableText(1)) catch return imp.Error.OutOfMemory) orelse {
             // Skipping nameless rows keeps malformed source data from
             // polluting the import; F95Checker shouldn't emit them but
             // tests have seen broken installs.
+            skipped_nameless += 1;
+            log.info("import skip: nameless row id {d}", .{id_i});
             continue;
         };
 
@@ -129,6 +165,10 @@ pub fn loadFromDb(alloc: std.mem.Allocator, db_path: []const u8) imp.Error!imp.B
             .completion_status = completion,
         }) catch return imp.Error.OutOfMemory;
     }
+
+    log.info("import read: {d} rows -> {d} games ({d} bad-id, {d} nameless skipped) from {s}", .{
+        rows_read, rows_read - skipped_bad_id - skipped_nameless, skipped_bad_id, skipped_nameless, db_path,
+    });
 
     const games = out.toOwnedSlice(aalloc) catch return imp.Error.OutOfMemory;
     return .{ .arena = arena, .games = games };
@@ -641,4 +681,32 @@ test "extractLinuxPath: pulls value for key \"2\"" {
 test "extractLinuxPath: missing key returns null" {
     const out = try extractLinuxPath(testing.allocator, "{}");
     try testing.expectEqual(@as(?[]u8, null), out);
+}
+
+test "walIsHot: nonexistent sidecar means cold" {
+    try testing.expect(!walIsHot("/nonexistent/db.sqlite3"));
+}
+
+test "walIsHot: non-empty -wal sidecar means hot" {
+    var env = try test_env.TestEnv.init(testing.allocator, "f95checker-wal");
+    defer env.deinit();
+    const db = try env.path("db.sqlite3");
+    defer testing.allocator.free(db);
+    const wal = try std.fmt.allocPrintSentinel(testing.allocator, "{s}-wal", .{db}, 0);
+    defer testing.allocator.free(wal);
+
+    // Empty sidecar (checkpointed WAL after clean close) — cold.
+    {
+        const f = std.c.fopen(wal.ptr, "wb") orelse return error.SkipZigTest;
+        _ = std.c.fclose(f);
+    }
+    try testing.expect(!walIsHot(db));
+
+    // Non-empty sidecar — the source app likely has the DB open.
+    {
+        const f = std.c.fopen(wal.ptr, "wb") orelse return error.SkipZigTest;
+        _ = std.c.fwrite("x", 1, 1, f);
+        _ = std.c.fclose(f);
+    }
+    try testing.expect(walIsHot(db));
 }
