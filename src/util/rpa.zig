@@ -182,9 +182,13 @@ test "loadIndex succeeds on the comptime valid archive (fuzz seed sanity)" {
     try testing.expectEqualStrings("a.rpy", entries[0].name);
     try testing.expectEqual(@as(u64, 16), entries[0].offset);
     try testing.expectEqual(@as(u64, 100), entries[0].length);
+    try testing.expectEqualStrings("", entries[0].prefix);
 }
 
 test "fuzz: rpa header and index parsers survive arbitrary input" {
+    // Seed 1's offset 0x2c lands in-bounds inside the garbage tail, so it
+    // reaches the Decompress branch instead of dying at BadHeader; seed 2's
+    // offset 16 points back into its own header line for the same reason.
     try std.testing.fuzz({}, fuzzRpa, .{ .corpus = &.{
         fuzzSeed("RPA-3.0 000000000000002c deadbeef\nGARBAGE-INDEX-BYTES"),
         fuzzSeed("RPA-2.0 0000000000000010\n"),
@@ -206,7 +210,15 @@ fn fuzzRpa(_: void, smith: *std.testing.Smith) anyerror!void {
     // Whole blob as an archive: header line + compressed pickle index.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    _ = loadIndex(arena.allocator(), data) catch return; // rpa.Error = expected reject
+    const entries = loadIndex(arena.allocator(), data) catch return; // rpa.Error = expected reject
+    // Touch every returned slice so a bogus-but-mapped entry (bad name or
+    // prefix construction) trips safety checks instead of passing unread.
+    for (entries) |e| {
+        std.mem.doNotOptimizeAway(e.name);
+        std.mem.doNotOptimizeAway(e.prefix);
+        if (e.name.len > 0) std.mem.doNotOptimizeAway(e.name[e.name.len - 1]);
+        if (e.prefix.len > 0) std.mem.doNotOptimizeAway(e.prefix[e.prefix.len - 1]);
+    }
 }
 
 /// Harness read-buffer length. fuzzSeed payloads must fit this, or Smith's
