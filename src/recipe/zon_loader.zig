@@ -287,3 +287,55 @@ test "saveGame round-trip" {
     try std.testing.expectEqualStrings(original.version, parsed.recipe.version);
     try std.testing.expectEqual(original.engine, parsed.recipe.engine);
 }
+
+test "fuzz: recipe zon parsers survive arbitrary source" {
+    try std.testing.fuzz({}, fuzzZonParsers, .{ .corpus = &.{
+        fuzzSeed(".{}"),
+        fuzzSeed(".{ .id = \"x\", .name = \"y\" }"),
+        fuzzSeed(".{ .id ="),
+        fuzzSeed("\x00\x01garbage"),
+    } });
+}
+
+fn fuzzZonParsers(_: void, smith: *std.testing.Smith) anyerror!void {
+    var raw: [FUZZ_BUF_LEN]u8 = undefined;
+    const n = smith.slice(&raw);
+    // fromSliceAlloc needs a sentinel-terminated slice; re-terminate the
+    // fuzz bytes in a buffer with one spare byte.
+    var buf: [FUZZ_BUF_LEN + 1]u8 = undefined;
+    @memcpy(buf[0..n], raw[0..n]);
+    buf[n] = 0;
+    const src: [:0]const u8 = buf[0..n :0];
+
+    if (parseGameFromBytes(std.testing.allocator, src)) |parsed| {
+        var p = parsed;
+        p.deinit();
+    } else |_| {}
+
+    if (parseModFromBytes(std.testing.allocator, src)) |parsed| {
+        var p = parsed;
+        p.deinit();
+    } else |_| {}
+}
+
+/// Harness read-buffer length. fuzzSeed payloads must fit this, or Smith's
+/// decode silently rejects the length and replays the seed as empty.
+const FUZZ_BUF_LEN = 2048;
+
+/// Encode one corpus entry for a testOne that makes a single smith.slice()
+/// call: 4-byte LE length prefix + payload (Smith input stream format).
+/// The payload must fit the harness read buffer (FUZZ_BUF_LEN): a longer
+/// length is rejected by Smith's decode and the seed silently replays as
+/// an empty string.
+fn fuzzSeed(comptime payload: []const u8) []const u8 {
+    comptime std.debug.assert(payload.len <= FUZZ_BUF_LEN);
+    const S = struct {
+        const entry: [4 + payload.len]u8 = blk: {
+            var e: [4 + payload.len]u8 = undefined;
+            std.mem.writeInt(u32, e[0..4], payload.len, .little);
+            @memcpy(e[4..], payload);
+            break :blk e;
+        };
+    };
+    return &S.entry;
+}
