@@ -31,10 +31,10 @@ pub const Match = struct {
 /// Aligned with `folder_scan.TAIL_NOISE` but kept independent so the
 /// match-side rules can evolve without touching the scanner.
 const TAIL_NOISE = [_][]const u8{
-    "pc",      "linux",   "win",     "windows", "mac",     "macos",  "android",
-    "ios",     "final",   "market",  "steam",   "wip",     "eng",    "rus",
-    "jpn",     "multi5",  "premium", "ver",     "beta",    "alpha",  "demo",
-    "complete","completed", "the",   "a",       "an",
+    "pc",       "linux",     "win",     "windows", "mac",  "macos", "android",
+    "ios",      "final",     "market",  "steam",   "wip",  "eng",   "rus",
+    "jpn",      "multi5",    "premium", "ver",     "beta", "alpha", "demo",
+    "complete", "completed", "the",     "a",       "an",
 };
 
 fn isTailNoise(tok: []const u8) bool {
@@ -406,4 +406,46 @@ test "isSeriesSibling: unrelated names → not a sibling" {
 
 test "isSeriesSibling: bare-number variants" {
     try testing.expect(isSeriesSibling("AdventureGame 1", "AdventureGame 2"));
+}
+
+test "fuzz: name matching invariants hold on arbitrary input" {
+    // Multi-call Smith stream — no hand-encoded corpus (the 4-byte-LE
+    // fuzzSeed format only fits single-slice harnesses); the automatic
+    // empty-input run is the replay smoke test.
+    try std.testing.fuzz({}, fuzzNameMatch, .{});
+}
+
+fn fuzzNameMatch(_: void, smith: *std.testing.Smith) anyerror!void {
+    // 300-byte inputs deliberately exceed score()'s internal 128-byte
+    // normalise buffers to exercise the too-long rejection path.
+    var a_buf: [300]u8 = undefined;
+    const a_len = smith.slice(&a_buf);
+    var b_buf: [300]u8 = undefined;
+    const b_len = smith.slice(&b_buf);
+    const a = a_buf[0..a_len];
+    const b = b_buf[0..b_len];
+
+    var norm_buf: [512]u8 = undefined;
+    if (normalise(&norm_buf, a)) |norm| _ = stripChapterSuffix(norm);
+
+    // score is a similarity in [0, 1].
+    const s = score(a, b);
+    try std.testing.expect(s >= 0.0);
+    try std.testing.expect(s <= 1.0);
+
+    // Self-match is exact (1.0) or degenerate (0.0 when normalise
+    // rejects/empties) — nothing in between.
+    const self_score = score(a, a);
+    try std.testing.expect(self_score == 0.0 or self_score == 1.0);
+
+    var key_buf: [512]u8 = undefined;
+    _ = seriesKey(&key_buf, a);
+    _ = isSeriesSibling(a, b);
+
+    const candidates = [_]Candidate{
+        .{ .thread_id = 1, .name = b },
+    };
+    if (bestMatch(a, &candidates)) |m| {
+        try std.testing.expect(m.score >= MATCH_THRESHOLD);
+    }
 }
