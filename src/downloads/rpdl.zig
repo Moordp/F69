@@ -559,3 +559,28 @@ test "fetchTorrent: empty token rejected without network" {
         fetchTorrent(std.testing.allocator, undefined, "", 42),
     );
 }
+
+test "fuzz: pickBestMatch survives arbitrary titles and names" {
+    // Multi-call Smith stream — fuzzSeed corpus only fits single-slice
+    // harnesses; the automatic empty-input run is the replay smoke test.
+    try std.testing.fuzz({}, fuzzPickBestMatch, .{});
+}
+
+fn fuzzPickBestMatch(_: void, smith: *std.testing.Smith) anyerror!void {
+    var name_buf: [200]u8 = undefined;
+    const name_len = smith.slice(&name_buf);
+    var title_a: [300]u8 = undefined;
+    const title_a_len = smith.slice(&title_a);
+    var title_b: [300]u8 = undefined;
+    const title_b_len = smith.slice(&title_b);
+    var ver_buf: [64]u8 = undefined;
+    const ver_len = smith.slice(&ver_buf);
+
+    const results = [_]TorrentMatch{
+        .{ .id = 1, .title = title_a[0..title_a_len], .file_size = 0, .seeders = smith.value(u8), .leechers = 0, .upload_date = "2026-01-01T00:00:00Z" },
+        .{ .id = 2, .title = title_b[0..title_b_len], .file_size = 0, .seeders = smith.value(u8), .leechers = 0, .upload_date = "2025-12-31T00:00:00Z" },
+    };
+    _ = pickBestMatch(&results, name_buf[0..name_len], ver_buf[0..ver_len]);
+    _ = pickBestMatch(&results, name_buf[0..name_len], null);
+    _ = pickBestMatch(&.{}, name_buf[0..name_len], null);
+}
