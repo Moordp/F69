@@ -84,7 +84,7 @@ pub fn build(b: *std.Build) void {
     // static everything" build would need static overrides for each
     // (similar to dav1d-static); deferred until the Windows port
     // forces the issue.
-    util_archive_mod.linkSystemLibrary("z", .{});      // gzip
+    util_archive_mod.linkSystemLibrary("z", .{}); // gzip
     // bzip2's SONAME splits across distros — libbz2.so.1.0 on
     // Debian/Ubuntu (and the GH-Actions release builder), libbz2.so.1
     // on Fedora/Bazzite. A dynamic link bakes the build-host soname
@@ -93,11 +93,11 @@ pub fn build(b: *std.Build) void {
     // binary then carries no libbz2 dependency at all. Needs libbz2.a:
     // Debian/Fedora -dev packages ship it; nix uses `bzip2-static`.
     util_archive_mod.linkSystemLibrary("bz2", .{ .preferred_link_mode = .static }); // bzip2
-    util_archive_mod.linkSystemLibrary("lzma", .{});   // xz
-    util_archive_mod.linkSystemLibrary("zstd", .{});   // zstd in .7z/.zip
-    util_archive_mod.linkSystemLibrary("lz4", .{});    // lz4 filter
+    util_archive_mod.linkSystemLibrary("lzma", .{}); // xz
+    util_archive_mod.linkSystemLibrary("zstd", .{}); // zstd in .7z/.zip
+    util_archive_mod.linkSystemLibrary("lz4", .{}); // lz4 filter
     util_archive_mod.linkSystemLibrary("nettle", .{}); // AES / SHA / HMAC
-    util_archive_mod.linkSystemLibrary("xml2", .{});   // .xar metadata
+    util_archive_mod.linkSystemLibrary("xml2", .{}); // .xar metadata
     // POSIX ACL restore — no POSIX ACLs and no mingw libacl on Windows; libarchive
     // built for mingw doesn't reference the acl symbols, so skip the link there.
     if (target.result.os.tag != .windows) util_archive_mod.linkSystemLibrary("acl", .{}); // POSIX ACL restore
@@ -388,8 +388,6 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
-
-
     // ----- distribution targets -----
     //
     // Each named step is a custom Step.MakeFn callback that runs at
@@ -425,9 +423,9 @@ pub fn build(b: *std.Build) void {
     const packages_step = b.step("packages", "Build every distribution target");
 
     inline for (.{
-        .{ .kind = DistKind.aur,   .name = "aur",   .desc = "Generate Arch PKGBUILD (zig-out/aur/) — add -Dcontainer-build=true to also build .pkg.tar.zst" },
-        .{ .kind = DistKind.deb,   .name = "deb",   .desc = "Generate Debian source pkg (zig-out/debian/) — container build incomplete" },
-        .{ .kind = DistKind.rpm,   .name = "rpm",   .desc = "Generate RPM spec (zig-out/rpm/) — container build untested" },
+        .{ .kind = DistKind.aur, .name = "aur", .desc = "Generate Arch PKGBUILD (zig-out/aur/) — add -Dcontainer-build=true to also build .pkg.tar.zst" },
+        .{ .kind = DistKind.deb, .name = "deb", .desc = "Generate Debian source pkg (zig-out/debian/) — container build incomplete" },
+        .{ .kind = DistKind.rpm, .name = "rpm", .desc = "Generate RPM spec (zig-out/rpm/) — container build untested" },
         .{ .kind = DistKind.flake, .name = "flake", .desc = "Sanity-check flake.nix (nix flake check)" },
     }) |t| {
         const dist = DistStep.create(b, t.kind, version, enable_container);
@@ -441,7 +439,7 @@ pub fn build(b: *std.Build) void {
     // has_side_effects suppresses cache for the sub-build because it
     // writes into the same zig-out/bin/ the outer step post-processes.
     inline for (.{
-        .{ .kind = DistKind.portable_full, .name = "portable",      .desc = "Portable bundle with libs (zig-out/bin/)" },
+        .{ .kind = DistKind.portable_full, .name = "portable", .desc = "Portable bundle with libs (zig-out/bin/)" },
         .{ .kind = DistKind.portable_slim, .name = "portable-slim", .desc = "Portable bundle WITHOUT libs (zig-out/portable-slim/)" },
     }) |t| {
         const sub_build = b.addSystemCommand(&.{"zig"});
@@ -618,21 +616,16 @@ pub fn build(b: *std.Build) void {
     }
 
     const test_targets = [_]*std.Build.Module{
-        exe_mod,           ui_tokens_mod,     ui_sortx_mod,     ui_columns_mod,  util_argv_mod,
-        util_reltime_mod,  ui_comp_mod,       ui_theme_store_mod,  util_ratelimit_mod,
-        ui_engine_palette_mod, dl_aria2_args_mod, dl_rpc_mod, dl_jobs_mod, dl_ws_mod,
-        dl_transport_mod, dl_http_mod, util_notify_mod, util_rpgm_crypt_mod, util_rpa_mod,
-        library_mod,       recipe_mod,        resolver_mod,    f95_mod_,
-        f95_indexer_mod,
-        downloads_mod,     installer_mod,     convert_mod,     sandbox_mod,
-        server_mod,        ui_mod,            config_mod,      image_mod,
-        importers_mod,     compat_mod,
-        util_paths_mod,    util_kahn_mod,     util_db_mod,
-        util_crash_mod,    util_version_mod,
-        util_renpy_mod,    util_atomic_io_mod, util_domain_mod,
-        util_http_mod,     util_proc_mod,      util_setting_mod,
-        util_test_env_mod,
-        file_picker_mod,   util_archive_mod,
+        exe_mod,            ui_tokens_mod,   ui_sortx_mod,        ui_columns_mod,     util_argv_mod,
+        util_reltime_mod,   ui_comp_mod,     ui_theme_store_mod,  util_ratelimit_mod, ui_engine_palette_mod,
+        dl_aria2_args_mod,  dl_rpc_mod,      dl_jobs_mod,         dl_ws_mod,          dl_transport_mod,
+        dl_http_mod,        util_notify_mod, util_rpgm_crypt_mod, util_rpa_mod,       library_mod,
+        recipe_mod,         resolver_mod,    f95_mod_,            f95_indexer_mod,    downloads_mod,
+        installer_mod,      convert_mod,     sandbox_mod,         server_mod,         ui_mod,
+        config_mod,         image_mod,       importers_mod,       compat_mod,         util_paths_mod,
+        util_kahn_mod,      util_db_mod,     util_crash_mod,      util_version_mod,   util_renpy_mod,
+        util_atomic_io_mod, util_domain_mod, util_http_mod,       util_proc_mod,      util_setting_mod,
+        util_test_env_mod,  file_picker_mod, util_archive_mod,
     };
     const test_step = b.step("test", "Run unit tests");
     for (test_targets) |m| {
@@ -826,8 +819,7 @@ fn prefetchNwjs(b: *std.Build, versions_csv: []const u8) !void {
         try cwd.createDirPath(io, dest);
         runQuiet(b, &.{
             "tar", "-xzf", tar_path,
-            "-C",  dest,
-            "--strip-components=1",
+            "-C",  dest,   "--strip-components=1",
         }) catch |e| {
             std.log.warn("prefetch-nwjs: nwjs-{s} extract failed: {s}", .{ ver, @errorName(e) });
             // Half-extracted dir is worse than nothing — wipe it so
@@ -962,6 +954,23 @@ fn makeFlake(b: *std.Build) !void {
 //
 // Slim mode: copy binary to zig-out/portable-slim/, write run.sh + DEPS.md.
 // User installs deps via their distro package manager.
+
+/// glibc-family + gcc-runtime sonames that get quarantined into
+/// lib/glibc/: safe (required, even) on hosts older than the build,
+/// poison on newer hosts where the system graphics stack expects the
+/// system's own private symbols.
+fn isGlibcFamily(base: []const u8) bool {
+    const prefixes = [_][]const u8{
+        "ld-linux",        "libc.so",      "libm.so",      "libpthread.so",
+        "libdl.so",        "librt.so",     "libresolv.so", "libutil.so",
+        "libnsl.so",       "libanl.so",    "libnss_",      "libmvec.so",
+        "libBrokenLocale", "libthread_db", "libgcc_s.so",  "libstdc++.so",
+    };
+    for (prefixes) |p| {
+        if (std.mem.startsWith(u8, base, p)) return true;
+    }
+    return false;
+}
 
 fn makePortable(b: *std.Build, mode: PortableMode) !void {
     const alloc = b.allocator;
@@ -1100,6 +1109,13 @@ fn makePortable(b: *std.Build, mode: PortableMode) !void {
     // Step 3: patchelf RUNPATHs. Binary gets $ORIGIN/lib; each bundled
     // .so gets $ORIGIN. The loader itself doesn't use RUNPATH, so skip.
     try runQuiet(b, &.{ "patchelf", "--set-rpath", "$ORIGIN/lib", bin_src });
+    // Same interpreter repoint as slim: with the standard PT_INTERP the
+    // binary can be exec'd DIRECTLY on hosts whose glibc is >= the
+    // bundled one (run.sh's system-glibc mode); bundled mode is
+    // unaffected because it invokes the loader explicitly.
+    runQuiet(b, &.{ "patchelf", "--set-interpreter", "/lib64/ld-linux-x86-64.so.2", bin_src }) catch |e| {
+        std.log.warn("portable: patchelf --set-interpreter failed ({s}) — system-glibc mode won't work off NixOS", .{@errorName(e)});
+    };
     var dir = try cwd.openDir(io, lib_dir, .{ .iterate = true });
     defer dir.close(io);
     var walker = dir.iterate();
@@ -1111,8 +1127,40 @@ fn makePortable(b: *std.Build, mode: PortableMode) !void {
         runQuiet(b, &.{ "patchelf", "--set-rpath", "$ORIGIN", full }) catch {};
     }
 
-    // Step 4: launcher.
-    try writeFileEnsureDir(b, run_sh_path, RUN_SH_FULL, true);
+    // Step 3b: quarantine the glibc family (+ gcc runtime) into
+    // lib/glibc/. They must NOT be reachable through lib/ (the binary's
+    // RUNPATH), or system-glibc mode would still load the bundled libc
+    // and re-create the CachyOS breakage. Bundled mode adds lib/glibc
+    // to LD_LIBRARY_PATH explicitly.
+    const glibc_dir = try std.fmt.allocPrint(alloc, "{s}/glibc", .{lib_dir});
+    defer alloc.free(glibc_dir);
+    try cwd.createDirPath(io, glibc_dir);
+    {
+        var mv_dir = try cwd.openDir(io, lib_dir, .{ .iterate = true });
+        defer mv_dir.close(io);
+        var mv = mv_dir.iterate();
+        while (try mv.next(io)) |entry| {
+            if (entry.kind != .file) continue;
+            if (!isGlibcFamily(entry.name)) continue;
+            const from = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ lib_dir, entry.name });
+            defer alloc.free(from);
+            const to = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ glibc_dir, entry.name });
+            defer alloc.free(to);
+            try cwd.rename(from, cwd, to, io);
+        }
+    }
+
+    // Step 4: launcher, with the bundled glibc version stamped in so the
+    // runtime loader choice can compare against the host's.
+    const glibc_ver = blk: {
+        const out = runCapture(b, &.{ "getconf", "GNU_LIBC_VERSION" }) catch break :blk "2.39";
+        var tok = std.mem.tokenizeAny(u8, out, " \n\t");
+        _ = tok.next(); // "glibc"
+        break :blk tok.next() orelse "2.39";
+    };
+    const run_sh = try std.mem.replaceOwned(u8, alloc, RUN_SH_FULL, "@BUNDLED_GLIBC@", glibc_ver);
+    defer alloc.free(run_sh);
+    try writeFileEnsureDir(b, run_sh_path, run_sh, true);
 
     // Step 5: project-root convenience launcher. A thin delegator so
     // `./run.sh` from the repo root just execs the bundle's launcher.
@@ -1322,7 +1370,11 @@ fn buildInContainer(b: *std.Build, distro: Distro, version: []const u8) !void {
     const engine = findContainerEngine(b) orelse {
         std.log.info("{s}: no podman/docker on PATH — manifest only (no .{s} built)", .{
             @tagName(distro),
-            switch (distro) { .aur => "pkg.tar.zst", .deb => "deb", .rpm => "rpm" },
+            switch (distro) {
+                .aur => "pkg.tar.zst",
+                .deb => "deb",
+                .rpm => "rpm",
+            },
         });
         return;
     };
@@ -1333,7 +1385,11 @@ fn buildInContainer(b: *std.Build, distro: Distro, version: []const u8) !void {
     defer b.allocator.free(tarball_rel);
 
     const work_dir = try std.fmt.allocPrint(b.allocator, "zig-out/{s}/work", .{
-        switch (distro) { .aur => "aur", .deb => "debian", .rpm => "rpm" },
+        switch (distro) {
+            .aur => "aur",
+            .deb => "debian",
+            .rpm => "rpm",
+        },
     });
     defer b.allocator.free(work_dir);
 
@@ -1411,13 +1467,11 @@ fn buildInContainer(b: *std.Build, distro: Distro, version: []const u8) !void {
     std.log.info("{s}: building inside {s} ({s})…", .{ @tagName(distro), image, engine });
 
     const argv = [_][]const u8{
-        engine, "run", "--rm",
-        "-v",   mount_arg,
-        "-e",   version_env,
-        "-e",   uid_env,
-        "-e",   gid_env,
-        "-w",   "/work",
-        image,  "bash",
+        engine,                        "run",     "--rm",
+        "-v",                          mount_arg, "-e",
+        version_env,                   "-e",      uid_env,
+        "-e",                          gid_env,   "-w",
+        "/work",                       image,     "bash",
         "/work/build-in-container.sh",
     };
     const result = std.process.run(b.allocator, b.graph.io, .{
@@ -1485,14 +1539,10 @@ fn gitArchive(b: *std.Build, version: []const u8, out_path: []const u8) !void {
     // so we don't loop our own staging dir back into the tarball.
     const result = try std.process.run(b.allocator, b.graph.io, .{
         .argv = &.{
-            "tar", "-czf", out_path,
-            "--exclude=./.git",
-            "--exclude=./.zig-cache",
-            "--exclude=./zig-out",
-            "--exclude=./dist",
-            "--exclude=./.direnv",
-            "--transform", transform,
-            ".",
+            "tar",              "-czf",                   out_path,
+            "--exclude=./.git", "--exclude=./.zig-cache", "--exclude=./zig-out",
+            "--exclude=./dist", "--exclude=./.direnv",    "--transform",
+            transform,          ".",
         },
     });
     defer b.allocator.free(result.stdout);
@@ -2097,7 +2147,41 @@ const RUN_SH_FULL =
     \\fi
     \\export __EGL_VENDOR_LIBRARY_DIRS
     \\
-    \\exec "$DIR/lib/ld-linux-x86-64.so.2" "$DIR/f69" "$@"
+    \\# Loader choice. The bundled glibc (lib/glibc/) only helps hosts OLDER
+    \\# than the build's — on a same-or-newer host, mixing our old glibc with
+    \\# the system's graphics stack breaks (drivers want GLIBC_PRIVATE /
+    \\# newer GCC_* symbols the bundled runtime doesn't have; field-reported
+    \\# on CachyOS). So: run against the SYSTEM glibc whenever it is >= the
+    \\# bundled version and the ABI-standard loader exists; keep only the
+    \\# app libs (lib/) on LD_LIBRARY_PATH there. F69_FORCE_BUNDLED_LIBC=1
+    \\# forces the old behavior for weird hosts.
+    \\BUNDLED_GLIBC=@BUNDLED_GLIBC@
+    \\use_bundled=1
+    \\if [ -z "${F69_FORCE_BUNDLED_LIBC:-}" ] && [ -e /lib64/ld-linux-x86-64.so.2 ]; then
+    \\    # Parameter expansion, NOT `set --`: that would clobber "$@" and
+    \\    # leak "glibc X.Y" into the app's argv.
+    \\    SYS_GLIBC=$(getconf GNU_LIBC_VERSION 2>/dev/null || true)
+    \\    SYS_GLIBC=${SYS_GLIBC#glibc }
+    \\    case "$SYS_GLIBC" in
+    \\        [0-9]*.[0-9]*)
+    \\            bmaj=${BUNDLED_GLIBC%%.*}; bmin=${BUNDLED_GLIBC#*.}; bmin=${bmin%%.*}
+    \\            smaj=${SYS_GLIBC%%.*};     smin=${SYS_GLIBC#*.};     smin=${smin%%.*}
+    \\            if [ "$smaj" -gt "$bmaj" ] || { [ "$smaj" -eq "$bmaj" ] && [ "$smin" -ge "$bmin" ]; }; then
+    \\                use_bundled=0
+    \\            fi
+    \\            ;;
+    \\    esac
+    \\fi
+    \\
+    \\if [ "$use_bundled" = 1 ]; then
+    \\    # Old host: bundled glibc + loader carry the day.
+    \\    LD_LIBRARY_PATH="$DIR/lib/glibc:$LD_LIBRARY_PATH"
+    \\    export LD_LIBRARY_PATH
+    \\    exec "$DIR/lib/glibc/ld-linux-x86-64.so.2" "$DIR/f69" "$@"
+    \\else
+    \\    # Same-or-newer host: system glibc/loader; bundled app libs only.
+    \\    exec "$DIR/f69" "$@"
+    \\fi
     \\
 ;
 

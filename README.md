@@ -57,7 +57,16 @@ sudo apt install ./f69-*-debian-x86_64.deb
 
 ### Linux — portable (any distro)
 
-- **Full bundle** (`f69-*-linux-portable-x86_64.tar.gz`) — carries its own libraries; runs on any glibc distro. Only needs your GPU's Vulkan driver + `aria2` for downloads.
+**Which download?**
+
+| Your distro | Pick |
+|---|---|
+| Arch / CachyOS / EndeavourOS (rolling) | AUR package (`packaging/aur/`) or the **slim** bundle |
+| Debian / Ubuntu / Mint (stable, older libs) | **Full** bundle |
+| Fedora and other current distros | native package, else **full** bundle |
+| NixOS | full bundle, or build from source |
+
+- **Full bundle** (`f69-*-linux-portable-x86_64.tar.gz`) — carries its own libraries **including a fallback glibc**. The launcher compares glibc versions at startup: on hosts with a same-or-newer glibc it runs against the *system* runtime (bundled one stays quarantined in `lib/glibc/`), on older hosts it falls back to the bundled one — so it no longer conflicts with the system graphics stack on rolling distros. `F69_FORCE_BUNDLED_LIBC=1` forces the fallback. Only needs your GPU's Vulkan driver + `aria2` for downloads.
 - **Slim bundle** (`f69-*-linux-slim-x86_64.tar.gz`) — smaller; uses your system's libraries (install the deps below first).
 
 ```sh
