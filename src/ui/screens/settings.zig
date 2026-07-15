@@ -40,7 +40,7 @@ pub fn settingsScreen(frame: *Frame) !bool {
         defer top.deinit();
         if (components.iconButton(@src(), "Back", entypo.chevron_left, .{})) state.screen = .library;
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 12, .h = 1 } });
-        dvui.label(@src(), "Settings", .{}, .{ .gravity_y = 0.5, .style = .highlight });
+        dvui.label(@src(), "Settings", .{}, .{ .gravity_y = 0.5, .color_text = dcol(tokens.active.acc) });
     }
     _ = dvui.separator(@src(), .{ .expand = .horizontal });
 
@@ -192,7 +192,7 @@ fn renderCatPresets(frame: *Frame) void {
 /// frame so changes show instantly.
 fn renderSettingsAppearance(frame: *Frame) void {
     var changed = false;
-    dvui.label(@src(), "Theme", .{}, .{ .style = .highlight });
+    dvui.label(@src(), "Theme", .{}, .{ .color_text = dcol(tokens.active.acc) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
     {
         const labels = [_][]const u8{ "Console", "Obsidian", "Midnight", "Paper" };
@@ -284,7 +284,7 @@ fn renderCatGamesLaunch(frame: *Frame) void {
 /// detail-page dropdown can override this.
 fn renderAutoUpdateDefaultSection(frame: *Frame) void {
     const state = frame.state;
-    dvui.label(@src(), "On new versions", .{}, .{ .style = .highlight });
+    dvui.label(@src(), "On new versions", .{}, .{ .color_text = dcol(tokens.active.acc) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
     if (toggleRow(1, state.auto_update_default, "Auto-download updates on batch sync", "When sync finds a newer version, download + install it automatically. Only from Sync All / scheduled checks, never a single-game sync. Manual installs without a recipe are skipped — they need a fresh archive.")) {
         state.auto_update_default = !state.auto_update_default;
@@ -301,7 +301,7 @@ fn renderAutoUpdateDefaultSection(frame: *Frame) void {
 /// recorded counts_as_played values are not retroactively recalculated.
 fn renderMinSessionSecondsSection(frame: *Frame) void {
     const state = frame.state;
-    dvui.label(@src(), "Minimum play session length", .{}, .{ .style = .highlight });
+    dvui.label(@src(), "Minimum play session length", .{}, .{ .color_text = dcol(tokens.active.acc) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     components.settingsHelpText(
         "A launch only counts as 'played' if the game ran for at least this many seconds. " ++
@@ -334,7 +334,7 @@ fn renderMinSessionSecondsSection(frame: *Frame) void {
 /// SandboxOverride wins over this — only `.use_default` consults it.
 fn renderSandboxDefaultSection(frame: *Frame) void {
     const state = frame.state;
-    dvui.label(@src(), "Sandbox", .{}, .{ .style = .highlight });
+    dvui.label(@src(), "Sandbox", .{}, .{ .color_text = dcol(tokens.active.acc) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
     if (toggleRow(3, state.sandbox_default, "Sandbox games by default", "bwrap on Linux, Sandboxie on Windows. Each game's detail page can override with always / never. Falls back to unsandboxed when unavailable.")) {
         state.sandbox_default = !state.sandbox_default;
@@ -458,7 +458,7 @@ fn relocateGamesFolder(frame: *Frame) void {
 /// because Convert pulls SDKs and can be slow.
 fn renderAutoConvertSection(frame: *Frame) void {
     const state = frame.state;
-    dvui.label(@src(), "After install", .{}, .{ .style = .highlight });
+    dvui.label(@src(), "After install", .{}, .{ .color_text = dcol(tokens.active.acc) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
     if (toggleRow(4, state.auto_convert, "Convert new installs automatically", "When a download extracts, run Convert (Ren'Py / RPGM Win→Linux). Needs a recipe with a `convert_linux` block — games without one need manual Convert.")) {
         state.auto_convert = !state.auto_convert;
@@ -482,7 +482,7 @@ fn renderCatUpdates(frame: *Frame) void {
     settingsSectionDivider(12);
     renderParallelismSection(frame);
     settingsSectionDivider(4);
-    dvui.label(@src(), "Network", .{}, .{ .style = .highlight });
+    dvui.label(@src(), "Network", .{}, .{ .color_text = dcol(tokens.active.acc) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     var rl_buf: [32]u8 = undefined;
     const rl = std.fmt.bufPrint(&rl_buf, "{d} ms", .{frame.info.rate_limit_ms}) catch "?";
@@ -501,7 +501,7 @@ fn renderCatUpdates(frame: *Frame) void {
 /// keeping metadata refreshes fast.
 fn renderParallelismSection(frame: *Frame) void {
     const state = frame.state;
-    dvui.label(@src(), "Parallelism", .{}, .{ .style = .highlight });
+    dvui.label(@src(), "Parallelism", .{}, .{ .color_text = dcol(tokens.active.acc) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     components.settingsHelpText(
         "How many refresh workers run at the same time. Sync workers fetch metadata " ++
@@ -581,7 +581,7 @@ fn renderParallelismSection(frame: *Frame) void {
 /// pointer events meant for the dropdown.
 fn renderRefreshBackendSection(frame: *Frame) void {
     const state = frame.state;
-    dvui.label(@src(), "Refresh backend", .{}, .{ .style = .highlight });
+    dvui.label(@src(), "Refresh backend", .{}, .{ .color_text = dcol(tokens.active.acc) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
 
     // Dropdown row — label + dropdown side-by-side, clearly above any
@@ -632,7 +632,7 @@ fn renderSettingsAccounts(frame: *Frame) void {
 
 /// Library tab — portable paths, library statistics, mod section.
 fn renderSettingsLibrary(frame: *Frame) void {
-    dvui.label(@src(), "Paths", .{}, .{ .style = .highlight });
+    dvui.label(@src(), "Paths", .{}, .{ .color_text = dcol(tokens.active.acc) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     var row_id: u32 = 0;
     settingsRow(&row_id, "Database", frame.info.db_path);
@@ -657,7 +657,7 @@ fn renderSettingsLibrary(frame: *Frame) void {
 
     settingsSectionDivider(4);
 
-    dvui.label(@src(), "Statistics", .{}, .{ .style = .highlight });
+    dvui.label(@src(), "Statistics", .{}, .{ .color_text = dcol(tokens.active.acc) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
 
     const stats = libraryStats(frame.games);
@@ -679,9 +679,13 @@ fn renderSettingsLibrary(frame: *Frame) void {
         "Ren'Py {d} \xC2\xB7 RPGM {d}/{d}/{d} \xC2\xB7 Unity {d} \xC2\xB7 Unreal {d} \xC2\xB7 HTML {d} \xC2\xB7 Wolf {d} \xC2\xB7 ? {d}",
         .{
             stats.engine_renpy,
-            stats.engine_rpgm_mv,    stats.engine_rpgm_mz,    stats.engine_rpgm_vx,
-            stats.engine_unity,      stats.engine_unreal,
-            stats.engine_html,       stats.engine_wolf_rpg,
+            stats.engine_rpgm_mv,
+            stats.engine_rpgm_mz,
+            stats.engine_rpgm_vx,
+            stats.engine_unity,
+            stats.engine_unreal,
+            stats.engine_html,
+            stats.engine_wolf_rpg,
             stats.engine_unknown,
         },
     ) catch "?");
@@ -712,7 +716,7 @@ fn renderSettingsLibrary(frame: *Frame) void {
 /// FUSE NTFS). No background-job machinery needed.
 fn renderEngineReanalyseSection(frame: *Frame) void {
     const state = frame.state;
-    dvui.label(@src(), "Engine labels", .{}, .{ .style = .highlight });
+    dvui.label(@src(), "Engine labels", .{}, .{ .color_text = dcol(tokens.active.acc) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     components.settingsHelpText(
         "Walks each installed game, probes the on-disk files, and updates the engine label when the bracket-derived guess from F95's title turns out to be wrong. Skips games with no install.",
@@ -772,7 +776,7 @@ fn renderImportModePicker(state: *State) void {
 
 fn renderSettingsImport(frame: *Frame) void {
     const state = frame.state;
-    dvui.label(@src(), "Import library", .{}, .{ .style = .highlight });
+    dvui.label(@src(), "Import library", .{}, .{ .color_text = dcol(tokens.active.acc) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     components.settingsHelpText(
         "Bring in games + installs from F95Checker or xLibrary. Existing entries in this library are skipped. " ++
@@ -863,7 +867,7 @@ fn renderImportBanner(frame: *Frame) void {
 
     var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
     defer line.deinit();
-    dvui.labelNoFmt(@src(), hdr, .{}, .{ .gravity_y = 0.5, .style = .highlight });
+    dvui.labelNoFmt(@src(), hdr, .{}, .{ .gravity_y = 0.5, .color_text = dcol(tokens.active.acc) });
 
     _ = dvui.spacer(@src(), .{ .expand = .horizontal });
     if (style.button(@src(), "Cancel", .{}, .{ .style = .err, .gravity_y = 0.5 })) {
@@ -891,7 +895,7 @@ fn renderImportBanner(frame: *Frame) void {
 fn renderSettingsDownloads(frame: *Frame) void {
     const state = frame.state;
 
-    dvui.label(@src(), "aria2 RPC port", .{}, .{ .style = .highlight });
+    dvui.label(@src(), "aria2 RPC port", .{}, .{ .color_text = dcol(tokens.active.acc) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     components.settingsHelpText(
         "TCP port for the local aria2 daemon's JSON-RPC. Leave blank or 0 to let aria2 pick a random " ++
@@ -958,7 +962,7 @@ fn renderSettingsDownloads(frame: *Frame) void {
     settingsSectionDivider(7);
 
     // ----- BitTorrent seed-ratio target -----
-    dvui.label(@src(), "Seed ratio", .{}, .{ .style = .highlight });
+    dvui.label(@src(), "Seed ratio", .{}, .{ .color_text = dcol(tokens.active.acc) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     components.settingsHelpText(
         "How much each completed torrent uploads before aria2 stops seeding. 2.0× is the RPDL community " ++
@@ -1022,7 +1026,7 @@ fn renderSettingsDownloads(frame: *Frame) void {
 
     // ----- BitTorrent seed-time cap -----
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 12 } });
-    dvui.label(@src(), "Seed time", .{}, .{ .style = .highlight });
+    dvui.label(@src(), "Seed time", .{}, .{ .color_text = dcol(tokens.active.acc) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     components.settingsHelpText(
         "Optional cap on how long each completed torrent keeps seeding, in minutes. 0 = no time cap " ++
@@ -1082,7 +1086,7 @@ fn setAria2SeedRatioMsg(state: *State, msg: []const u8) void {
 /// don't auto-fetch.
 fn renderTagsRefreshSection(frame: *Frame) void {
     const state = frame.state;
-    dvui.label(@src(), "Tags", .{}, .{ .style = .highlight });
+    dvui.label(@src(), "Tags", .{}, .{ .color_text = dcol(tokens.active.acc) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     components.settingsHelpText(
         "Scrapes F95's tag index for the sidebar include/exclude checkboxes. Tags rarely change — refresh once in a while.",
@@ -1127,7 +1131,7 @@ fn renderTagsRefreshSection(frame: *Frame) void {
 /// Delete button for user-authored entries. Built-ins are read-only
 /// — they ship with the binary and are restored every launch.
 fn renderSettingsModPresets(frame: *Frame) void {
-    dvui.label(@src(), "Mod-install presets", .{}, .{ .style = .highlight });
+    dvui.label(@src(), "Mod-install presets", .{}, .{ .color_text = dcol(tokens.active.acc) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     components.settingsHelpText(
         "Presets match an archive's file layout to an install recipe so f69 can pick the right " ++
@@ -1181,7 +1185,7 @@ fn renderSettingsModPresets(frame: *Frame) void {
             {
                 var hdr = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
                 defer hdr.deinit();
-                dvui.labelNoFmt(@src(), p.name, .{}, .{ .style = .highlight });
+                dvui.labelNoFmt(@src(), p.name, .{}, .{ .color_text = dcol(tokens.active.acc) });
                 _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
                 const tag: []const u8 = if (from_user) "[user]" else "[built-in]";
                 dvui.labelNoFmt(@src(), tag, .{}, .{
@@ -1228,7 +1232,7 @@ fn renderSettingsModPresets(frame: *Frame) void {
 /// (no in-app editor yet). The list documents what each strategy
 /// does so users can see WHY their game converts the way it does.
 fn renderSettingsConvertPresets(frame: *Frame) void {
-    dvui.label(@src(), "Convert-strategy presets", .{}, .{ .style = .highlight });
+    dvui.label(@src(), "Convert-strategy presets", .{}, .{ .color_text = dcol(tokens.active.acc) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     components.settingsHelpText(
         "Presets bind a game engine to a Win->Linux conversion strategy (Ren'Py SDK overlay, " ++
@@ -1274,7 +1278,7 @@ fn renderSettingsConvertPresets(frame: *Frame) void {
         {
             var hdr = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
             defer hdr.deinit();
-            dvui.labelNoFmt(@src(), p.name, .{}, .{ .style = .highlight });
+            dvui.labelNoFmt(@src(), p.name, .{}, .{ .color_text = dcol(tokens.active.acc) });
             _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
             const tag: []const u8 = if (from_user) "[user]" else "[built-in]";
             dvui.labelNoFmt(@src(), tag, .{}, .{
@@ -1307,7 +1311,7 @@ fn renderSettingsConvertPresets(frame: *Frame) void {
 
 /// About tab — diagnostics link + version blurb.
 fn renderSettingsAbout(frame: *Frame) void {
-    dvui.label(@src(), "Version", .{}, .{ .style = .highlight });
+    dvui.label(@src(), "Version", .{}, .{ .color_text = dcol(tokens.active.acc) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     var row_id: u32 = 0;
     var ver_buf: [48]u8 = undefined;
@@ -1341,7 +1345,7 @@ fn settingsSectionDivider(key: u64) void {
 /// persistence step debounces to disk via `persistUiScaleIfDirty`.
 fn renderUiScaleSection(frame: *Frame) void {
     const state = frame.state;
-    dvui.label(@src(), "UI scale", .{}, .{ .style = .highlight });
+    dvui.label(@src(), "UI scale", .{}, .{ .color_text = dcol(tokens.active.acc) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     components.settingsHelpText(
         "Bigger or smaller text, icons, paddings. Applies live; saved on release.",
@@ -1384,7 +1388,7 @@ fn renderUiScaleSection(frame: *Frame) void {
 /// to disk so a slider drag isn't a write storm.
 fn renderAutoCheckSection(frame: *Frame) void {
     const state = frame.state;
-    dvui.label(@src(), "Update checks", .{}, .{ .style = .highlight });
+    dvui.label(@src(), "Update checks", .{}, .{ .color_text = dcol(tokens.active.acc) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     components.settingsHelpText(
         "Walks F95's latest-updates pages since the last check; mismatched games get queued for a sync.",
@@ -1452,7 +1456,7 @@ fn renderAutoCheckSection(frame: *Frame) void {
 }
 
 fn renderDiagnosticsLink(frame: *Frame) void {
-    dvui.label(@src(), "Diagnostics", .{}, .{ .style = .highlight });
+    dvui.label(@src(), "Diagnostics", .{}, .{ .color_text = dcol(tokens.active.acc) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     dvui.label(@src(), "Engine probes, runtime info, and sandbox state.", .{}, .{});
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
@@ -1464,7 +1468,7 @@ fn renderDiagnosticsLink(frame: *Frame) void {
 fn renderBrowserSection(frame: *Frame) void {
     const state = frame.state;
 
-    dvui.label(@src(), "Browser", .{}, .{ .style = .highlight });
+    dvui.label(@src(), "Browser", .{}, .{ .color_text = dcol(tokens.active.acc) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     components.settingsHelpText("Used to open F95 thread links from the detail screen.");
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
@@ -1509,14 +1513,14 @@ fn renderBrowserSection(frame: *Frame) void {
     }
     if (!state.browser_msg.isEmpty()) {
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 4 } });
-        dvui.labelNoFmt(@src(), state.browserMsg(), .{}, .{ .style = .highlight });
+        dvui.labelNoFmt(@src(), state.browserMsg(), .{}, .{ .color_text = dcol(tokens.active.acc) });
     }
 }
 
 fn renderF95Account(frame: *Frame) void {
     const state = frame.state;
 
-    dvui.label(@src(), "F95Zone account", .{}, .{ .style = .highlight });
+    dvui.label(@src(), "F95Zone account", .{}, .{ .color_text = dcol(tokens.active.acc) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
 
     // Status line.
@@ -1528,7 +1532,7 @@ fn renderF95Account(frame: *Frame) void {
         .err => "error",
     };
     const status_opts: dvui.Options = switch (state.login_status) {
-        .logged_in => .{ .style = .highlight },
+        .logged_in => .{ .color_text = dcol(tokens.active.acc) },
         .err => .{ .style = .err },
         else => .{},
     };
@@ -1579,7 +1583,7 @@ fn renderF95Account(frame: *Frame) void {
 fn renderRpdlAccount(frame: *Frame) void {
     const state = frame.state;
 
-    dvui.label(@src(), "RPDL account (dl.rpdl.net)", .{}, .{ .style = .highlight });
+    dvui.label(@src(), "RPDL account (dl.rpdl.net)", .{}, .{ .color_text = dcol(tokens.active.acc) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
 
     const status_text = switch (state.rpdl_status) {
@@ -1590,7 +1594,7 @@ fn renderRpdlAccount(frame: *Frame) void {
         .err => "error",
     };
     const status_opts: dvui.Options = switch (state.rpdl_status) {
-        .logged_in => .{ .style = .highlight },
+        .logged_in => .{ .color_text = dcol(tokens.active.acc) },
         .err => .{ .style = .err },
         else => .{},
     };
