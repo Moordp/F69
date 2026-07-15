@@ -90,27 +90,74 @@ pub fn doDeleteUniversalMod(frame: *Frame, id: i64, modfile_path: []const u8) vo
 /// opted out): registers its modfile as a managed modfile on each game (with
 /// auto-preset detection), so it shows up + applies through the normal
 /// per-game mod flow. Idempotent — re-running just no-ops on duplicates.
+/// Outcome counts for one applyUniversalMod sweep. `describe` renders the
+/// user-facing toast; per-game skip reasons are logged at the call site so
+/// the "f69 tells you why" promise holds for universal mods too — the old
+/// silent `continue`s read as "mods don't get installed" in the field.
+pub const ApplyTally = struct {
+    applied: usize = 0,
+    wrong_engine: usize = 0,
+    engine_unknown: usize = 0,
+    opted_out: usize = 0,
+    failed: usize = 0,
+
+    pub fn describe(self: ApplyTally, buf: []u8) []const u8 {
+        var w: std.Io.Writer = .fixed(buf);
+        w.print("Universal mod available on {d} game(s)", .{self.applied}) catch return "Applied.";
+        const parts = [_]struct { n: usize, label: []const u8 }{
+            .{ .n = self.wrong_engine, .label = "other engine" },
+            .{ .n = self.engine_unknown, .label = "engine unknown" },
+            .{ .n = self.opted_out, .label = "opted out" },
+            .{ .n = self.failed, .label = "failed" },
+        };
+        var first = true;
+        for (parts) |p| {
+            if (p.n == 0) continue;
+            w.print("{s}{d} {s}", .{ if (first) " — skipped: " else ", ", p.n, p.label }) catch return "Applied.";
+            first = false;
+        }
+        w.print(".", .{}) catch return "Applied.";
+        return w.buffered();
+    }
+};
+
 pub fn applyUniversalMod(frame: *Frame, mod_id: i64, engine: library.Engine, modfile_path: []const u8) void {
     const alloc = frame.lib.alloc;
     const ma = installer.mod_archives;
-    var applied: usize = 0;
+    var tally = ApplyTally{};
     for (frame.games) |*g| {
-        if (g.engine != engine) continue;
-        if (frame.lib.isUniversalModDisabled(g.f95_thread_id, mod_id) catch false) continue;
-        const res = ma.addForGame(alloc, frame.io, frame.info.mod_archives_dir, g.f95_thread_id, modfile_path) catch continue;
+        if (g.engine == .unknown) {
+            tally.engine_unknown += 1;
+            log.info("universal mod {d}: skip tid={d} '{s}' — engine unknown (sync the game or set its engine to include it)", .{ mod_id, g.f95_thread_id, g.name });
+            continue;
+        }
+        if (g.engine != engine) {
+            tally.wrong_engine += 1;
+            continue;
+        }
+        if (frame.lib.isUniversalModDisabled(g.f95_thread_id, mod_id) catch false) {
+            tally.opted_out += 1;
+            log.info("universal mod {d}: skip tid={d} '{s}' — opted out for this game", .{ mod_id, g.f95_thread_id, g.name });
+            continue;
+        }
+        const res = ma.addForGame(alloc, frame.io, frame.info.mod_archives_dir, g.f95_thread_id, modfile_path) catch |e| {
+            tally.failed += 1;
+            log.warn("universal mod {d}: tid={d} '{s}' — addForGame failed: {s}", .{ mod_id, g.f95_thread_id, g.name, @errorName(e) });
+            continue;
+        };
         switch (res) {
             .added => |m| {
                 ma.freeModfile(alloc, m);
-                applied += 1;
+                tally.applied += 1;
             },
             .duplicate => |d| {
                 ma.freeModfile(alloc, d.existing);
-                applied += 1;
+                tally.applied += 1;
             },
         }
     }
-    var buf: [96]u8 = undefined;
-    frame.state.notifyOk(std.fmt.bufPrint(&buf, "Universal mod available on {d} game(s).", .{applied}) catch "Applied.");
+    var buf: [160]u8 = undefined;
+    frame.state.notifyOk(tally.describe(&buf));
 }
 
 fn copyFile(io: Io, alloc: std.mem.Allocator, src: []const u8, dest: []const u8) !void {
@@ -122,4 +169,28 @@ fn copyFile(io: Io, alloc: std.mem.Allocator, src: []const u8, dest: []const u8)
     var fw = f.writer(io, &wbuf);
     try fw.interface.writeAll(bytes);
     try fw.interface.flush();
+}
+
+test "ApplyTally.describe: all applied — plain count, no skip tail" {
+    var buf: [160]u8 = undefined;
+    const t = ApplyTally{ .applied = 3 };
+    try std.testing.expectEqualStrings("Universal mod available on 3 game(s).", t.describe(&buf));
+}
+
+test "ApplyTally.describe: skips are itemized so 0 applied is never a mystery" {
+    var buf: [160]u8 = undefined;
+    const t = ApplyTally{ .applied = 0, .wrong_engine = 5, .engine_unknown = 2, .opted_out = 1, .failed = 1 };
+    try std.testing.expectEqualStrings(
+        "Universal mod available on 0 game(s) — skipped: 5 other engine, 2 engine unknown, 1 opted out, 1 failed.",
+        t.describe(&buf),
+    );
+}
+
+test "ApplyTally.describe: only the skip reasons that occurred are listed" {
+    var buf: [160]u8 = undefined;
+    const t = ApplyTally{ .applied = 2, .engine_unknown = 3 };
+    try std.testing.expectEqualStrings(
+        "Universal mod available on 2 game(s) — skipped: 3 engine unknown.",
+        t.describe(&buf),
+    );
 }
