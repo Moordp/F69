@@ -347,3 +347,41 @@ test "collectFromPage extracts new + dedupes across calls" {
     try std.testing.expectEqual(@as(usize, 3), out.items.len);
     try std.testing.expectEqualStrings("333", out.items[2].thread_id);
 }
+
+test "fuzz: bookmark page parsers survive arbitrary input" {
+    try std.testing.fuzz({}, fuzzBookmarkParsers, .{ .corpus = &.{
+        fuzzSeed("<a href=\"/bookmarks?page=17\">17</a>"),
+        fuzzSeed("/threads/some-game.12345/"),
+        fuzzSeed("page="),
+    } });
+}
+
+fn fuzzBookmarkParsers(_: void, smith: *std.testing.Smith) anyerror!void {
+    var buf: [FUZZ_BUF_LEN]u8 = undefined;
+    const n = smith.slice(&buf);
+    const src = buf[0..n];
+    _ = extractTotalPages(src);
+    _ = parseTrailingId(src);
+}
+
+/// Harness read-buffer length. fuzzSeed payloads must fit this, or Smith's
+/// decode silently rejects the length and replays the seed as empty.
+const FUZZ_BUF_LEN = 4096;
+
+/// Encode one corpus entry for a testOne that makes a single smith.slice()
+/// call: 4-byte LE length prefix + payload (Smith input stream format).
+/// The payload must fit the harness read buffer (FUZZ_BUF_LEN): a longer
+/// length is rejected by Smith's decode and the seed silently replays as
+/// an empty string.
+fn fuzzSeed(comptime payload: []const u8) []const u8 {
+    comptime std.debug.assert(payload.len <= FUZZ_BUF_LEN);
+    const S = struct {
+        const entry: [4 + payload.len]u8 = blk: {
+            var e: [4 + payload.len]u8 = undefined;
+            std.mem.writeInt(u32, e[0..4], payload.len, .little);
+            @memcpy(e[4..], payload);
+            break :blk e;
+        };
+    };
+    return &S.entry;
+}

@@ -317,3 +317,46 @@ test "canonicalUrl" {
     var buf: [128]u8 = undefined;
     try std.testing.expectEqualStrings("https://f95zone.to/threads/thread.12345/", try canonicalUrl(&buf, "12345"));
 }
+
+test "fuzz: url parsers survive arbitrary input" {
+    try std.testing.fuzz({}, fuzzUrlParsers, .{ .corpus = &.{
+        fuzzSeed("https://f95zone.to/threads/name.12345/"),
+        fuzzSeed("threads/.1/"),
+        fuzzSeed("12345"),
+    } });
+}
+
+fn fuzzUrlParsers(_: void, smith: *std.testing.Smith) anyerror!void {
+    var buf: [FUZZ_BUF_LEN]u8 = undefined;
+    const n = smith.slice(&buf);
+    const src = buf[0..n];
+
+    _ = extractThreadId(src);
+
+    // canonicalUrl treats src as a thread id; error (NoSpaceLeft) is an
+    // expected reject for oversized ids.
+    var url_buf: [FUZZ_BUF_LEN + 64]u8 = undefined;
+    _ = canonicalUrl(&url_buf, src) catch {};
+}
+
+/// Harness read-buffer length. fuzzSeed payloads must fit this, or Smith's
+/// decode silently rejects the length and replays the seed as empty.
+const FUZZ_BUF_LEN = 1024;
+
+/// Encode one corpus entry for a testOne that makes a single smith.slice()
+/// call: 4-byte LE length prefix + payload (Smith input stream format).
+/// The payload must fit the harness read buffer (FUZZ_BUF_LEN): a longer
+/// length is rejected by Smith's decode and the seed silently replays as
+/// an empty string.
+fn fuzzSeed(comptime payload: []const u8) []const u8 {
+    comptime std.debug.assert(payload.len <= FUZZ_BUF_LEN);
+    const S = struct {
+        const entry: [4 + payload.len]u8 = blk: {
+            var e: [4 + payload.len]u8 = undefined;
+            std.mem.writeInt(u32, e[0..4], payload.len, .little);
+            @memcpy(e[4..], payload);
+            break :blk e;
+        };
+    };
+    return &S.entry;
+}
