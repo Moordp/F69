@@ -184,6 +184,15 @@ pub const Client = struct {
             .response_writer = &aw.writer,
             .headers = .{ .user_agent = .{ .override = USER_AGENT } },
             .extra_headers = extra_headers,
+            // No keep-alive for CDN image bursts: Cloudflare closes pooled
+            // connections between our GETs, and reusing a dead pooled
+            // connection can panic inside std.http.Client.fetch (null
+            // req.connection on the flush path — reported from the field,
+            // user crash in indexerWorker cover fetch). A fresh connection
+            // per CDN request removes that path; forum-domain requests are
+            // 1.5s-rate-limited anyway, so pooling bought nothing there
+            // either.
+            .keep_alive = false,
         }) catch |e| {
             log.warn("GET network error ({s}): {s}", .{ @errorName(e), url });
             return errs.Error.NetworkError;
@@ -238,6 +247,10 @@ pub const Client = struct {
             .response_writer = &aw.writer,
             .headers = .{ .user_agent = .{ .override = USER_AGENT } },
             .extra_headers = extra_headers,
+            // Same rationale as getOnce: the POST-payload path in
+            // std.http.Client.fetch flushes `req.connection.?` directly, so
+            // a dead pooled connection is a panic, not an error.
+            .keep_alive = false,
         }) catch |e| {
             log.warn("POST network error ({s}): {s}", .{ @errorName(e), url });
             return errs.Error.NetworkError;
