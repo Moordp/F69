@@ -1,0 +1,60 @@
+# Maintainer: dplover25
+#
+# Builds f69 from source against the SYSTEM toolchain + glibc — the
+# supported route on Arch-family distros (CachyOS, EndeavourOS, ...).
+# The prebuilt portable bundle carries its own glibc and breaks when the
+# system graphics stack (Vulkan ICD, Wayland/EGL) expects newer private
+# symbols; a local build sidesteps the whole class.
+#
+# Zig package deps (dvui, zqlite, websocket + transitive) are pinned by
+# content hash in build.zig.zon and pre-fetched into a build-local cache
+# in prepare() — that is the only step that touches the network beyond
+# source=().
+
+pkgname=f69
+pkgver=0.10.1
+pkgrel=1
+pkgdesc="F95Zone-focused game library, download and mod manager (Zig + dvui)"
+arch=('x86_64')
+url="https://github.com/Moordp/F69"
+license=('MIT')
+depends=(
+  'vulkan-icd-loader'   # SDL_GPU backend — an actual driver (mesa) must be present
+  'wayland'
+  'libxkbcommon'
+  'libdecor'
+  'libx11' 'libxext' 'libxcursor' 'libxi' 'libxrandr'
+  'dbus'
+  'libarchive'
+  'libavif' 'dav1d'     # static preferred, dynamic fallback on Arch
+  'nettle' 'libxml2' 'zstd' 'lz4' 'xz' 'zlib' 'bzip2' 'acl'
+)
+makedepends=('zig>=0.16.0' 'pkgconf')
+optdepends=(
+  'aria2: automatic downloads (rpdl / donor DDL)'
+  'bubblewrap: sandboxed game launches'
+)
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP') # pin after first `updpkgsums` run against the tag tarball
+
+prepare() {
+  cd "F69-$pkgver"
+  # Hash-pinned fetch of the FULL dependency tree (incl. lazy transitive
+  # deps) into a build-local cache — build()/package() then need no
+  # network, so clean-chroot builds (extra-x86_64-build) work.
+  zig build --fetch=all --global-cache-dir "$srcdir/zig-global-cache"
+}
+
+build() {
+  cd "F69-$pkgver"
+  zig build -Dgui=true -Doptimize=ReleaseSafe \
+    --global-cache-dir "$srcdir/zig-global-cache"
+}
+
+package() {
+  cd "F69-$pkgver"
+  # `zig build install` also lays down share/applications/f69.desktop and
+  # the scalable icon, so the app shows up in launchers.
+  zig build install -Dgui=true -Doptimize=ReleaseSafe \
+    --global-cache-dir "$srcdir/zig-global-cache" --prefix "$pkgdir/usr"
+}
