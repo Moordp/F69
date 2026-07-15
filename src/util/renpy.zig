@@ -153,3 +153,48 @@ test "parseVersionTuple: no marker → null" {
     const got = try parseVersionTuple(testing.allocator, "nothing");
     try testing.expect(got == null);
 }
+
+test "fuzz: renpy version parsers survive arbitrary file content" {
+    try std.testing.fuzz({}, fuzzRenpyParsers, .{ .corpus = &.{
+        fuzzSeed("version = u'7.6.1.23060707'\n"),
+        fuzzSeed("version_tuple = (7, 5, 3, vc_version)\n"),
+        fuzzSeed("version = "),
+    } });
+}
+
+fn fuzzRenpyParsers(_: void, smith: *std.testing.Smith) anyerror!void {
+    var buf: [FUZZ_BUF_LEN]u8 = undefined;
+    const n = smith.slice(&buf);
+    const content = buf[0..n];
+    const a = std.testing.allocator;
+
+    if (parseVcVersion(content)) |raw| {
+        // Borrowed slice of `content`; feeding it on covers takeMajMinPatch
+        // with fuzz-shaped raw versions, mirroring detectVersion's flow.
+        const v = try takeMajMinPatch(a, raw);
+        a.free(v);
+    }
+    if (try parseVersionTuple(a, content)) |v| a.free(v);
+}
+
+/// Harness read-buffer length. fuzzSeed payloads must fit this, or Smith's
+/// decode silently rejects the length and replays the seed as empty.
+const FUZZ_BUF_LEN = 2048;
+
+/// Encode one corpus entry for a testOne that makes a single smith.slice()
+/// call: 4-byte LE length prefix + payload (Smith input stream format).
+/// The payload must fit the harness read buffer (FUZZ_BUF_LEN): a longer
+/// length is rejected by Smith's decode and the seed silently replays as
+/// an empty string.
+fn fuzzSeed(comptime payload: []const u8) []const u8 {
+    comptime std.debug.assert(payload.len <= FUZZ_BUF_LEN);
+    const S = struct {
+        const entry: [4 + payload.len]u8 = blk: {
+            var e: [4 + payload.len]u8 = undefined;
+            std.mem.writeInt(u32, e[0..4], payload.len, .little);
+            @memcpy(e[4..], payload);
+            break :blk e;
+        };
+    };
+    return &S.entry;
+}
