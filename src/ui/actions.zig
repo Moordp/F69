@@ -284,3 +284,22 @@ pub const closeWizard = mods.closeWizard;
 pub const wizardAddBlock = mods.wizardAddBlock;
 pub const wizardRemoveBlock = mods.wizardRemoveBlock;
 pub const wizardSave = mods.wizardSave;
+
+// Pull nested tests into this module's test binary. The re-exports above
+// only analyze the referenced symbols, so nested `test` blocks would
+// silently no-op (same idiom as downloads.zig / importers.zig roots).
+test {
+    _ = @import("actions/auth.zig");
+    _ = @import("actions/bookmarks.zig");
+    _ = @import("actions/common.zig");
+    _ = @import("actions/downloads.zig");
+    _ = @import("actions/imports.zig");
+    _ = @import("actions/installer.zig");
+    _ = @import("actions/launch.zig");
+    _ = @import("actions/mods.zig");
+    _ = @import("actions/renpy_tools.zig");
+    _ = @import("actions/rpgm_tools.zig");
+    _ = @import("actions/sync.zig");
+    _ = @import("actions/tags.zig");
+    _ = @import("actions/universal_mods.zig");
+}
