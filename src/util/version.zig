@@ -270,6 +270,17 @@ pub fn equivalent(a: []const u8, b: []const u8) bool {
     return canonicalEqual(ca, cb);
 }
 
+/// True when `latest` is a genuinely newer release than `installed`.
+/// Equivalence wins over ordering: F95 routinely reformats a version
+/// string without shipping a new build ("1.0" → "Final v1.0" when a
+/// game completes), and `compare`'s lexical fallback would read that
+/// as an upgrade. Callers deciding "update available" / "installed is
+/// current" must use this, not raw `compare`.
+pub fn hasNewer(latest: []const u8, installed: []const u8) bool {
+    if (equivalent(latest, installed)) return false;
+    return compare(latest, installed) == .gt;
+}
+
 /// Parse `input` into a Canonical, writing the lowercased text into
 /// `buf` (Canonical.core borrows from this buffer; keep `buf` alive
 /// while the returned Canonical is in use). Returns null when `input`
@@ -499,6 +510,27 @@ test "equivalent: different numeric segments" {
     try std.testing.expect(!equivalent("1.2.3", "1.2.4"));
     try std.testing.expect(!equivalent("1.2", "1.3"));
     try std.testing.expect(!equivalent("2.0", "1.0"));
+}
+
+test "hasNewer: cosmetic reformat of the same release is not an update" {
+    // Field report: after a sync, installed games showed as forgotten /
+    // update-available. F95 reformats version strings without shipping a
+    // build; the completion rename is the worst offender — raw compare()
+    // reads "Final v1.0" as lexically newer than "1.0".
+    try std.testing.expect(!hasNewer("Final v1.0", "1.0"));
+    try std.testing.expect(!hasNewer("v0.5.5a", "0.5.5a"));
+    try std.testing.expect(!hasNewer("0.5.5a Linux", "0.5.5a"));
+    try std.testing.expect(!hasNewer("Ch. 5 v0.5.5", "0.5.5"));
+    try std.testing.expect(!hasNewer("V1.2 Patreon", "v1.2"));
+    try std.testing.expect(!hasNewer("1.2.0", "1.2"));
+}
+
+test "hasNewer: real upgrades still detected, downgrades are not updates" {
+    try std.testing.expect(hasNewer("0.6", "0.5.5a"));
+    try std.testing.expect(hasNewer("v1.1", "1.0"));
+    try std.testing.expect(hasNewer("Ch. 6 v0.6", "Ch. 5 v0.5"));
+    try std.testing.expect(!hasNewer("1.0", "1.1"));
+    try std.testing.expect(!hasNewer("0.5.5a", "0.5.5a"));
 }
 
 test "equivalent: empty strings" {

@@ -444,7 +444,7 @@ const OVERSCAN_ROWS: usize = 2;
 fn hasUnplayedUpdate(g: *const library.Game, install_v: ?[]const u8) bool {
     const inst_v = install_v orelse return false;
     if (g.last_played_version) |lpv| {
-        return version_mod.compare(inst_v, lpv) == .gt;
+        return version_mod.hasNewer(inst_v, lpv);
     }
     return true; // installed but never played → counts as unplayed update
 }
@@ -455,7 +455,10 @@ fn hasUnplayedUpdate(g: *const library.Game, install_v: ?[]const u8) bool {
 fn hasUpdateAvailable(g: *const library.Game, install_v: ?[]const u8) bool {
     const inst_v = install_v orelse return false;
     const latest = g.latest_version orelse return false;
-    return version_mod.compare(latest, inst_v) == .gt;
+    // hasNewer, not compare: F95 reformats version strings without shipping
+    // a new build ("1.0" → "Final v1.0"); equivalence must win or every
+    // completed game shows a phantom UPDATE after sync.
+    return version_mod.hasNewer(latest, inst_v);
 }
 
 /// Virtualize the library scroll: only emit cards/rows for the
@@ -580,7 +583,6 @@ fn renderVirtualizedList(frame: *Frame, games: []const library.Game, query: []co
             .min_size_content = .{ .w = 1, .h = bot_spacer_h },
         });
     }
-
 }
 
 /// Small dim uppercase sidebar group header (STATUS / UPDATES / ENGINE / TAGS).
@@ -653,7 +655,6 @@ fn sidebar(frame: *Frame) void {
         .expand = .vertical,
     });
     defer side.deinit();
-
 
     var scroll = dvui.scrollArea(@src(), .{}, .{
         .expand = .both,
@@ -857,7 +858,8 @@ fn sidebar(frame: *Frame) void {
             @as([]const u8, "Tags");
         if (dvui.expander(@src(), lbl, .{}, .{ .expand = .horizontal })) {
             if (state.tags_master.len == 0) {
-                dvui.label(@src(),
+                dvui.label(
+                    @src(),
                     "Master tag list not refreshed yet. Open Settings → Library → Tags → Refresh.",
                     .{},
                     .{ .color_text = style.labelDim() },
@@ -977,7 +979,8 @@ fn renderTagCheckboxFilter(state: *State) void {
     const filter = sliceUntilNul(&state.tags_filter_buf);
 
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 4 } });
-    dvui.label(@src(),
+    dvui.label(
+        @src(),
         "Click to cycle: off → include → exclude → off",
         .{},
         .{ .color_text = style.labelDim() },
@@ -1744,15 +1747,17 @@ fn renderListThumb(bytes_opt: ?[]const u8, thread_id: u64) void {
     const h: f32 = 40;
     if (bytes_opt) |bytes| {
         _ = dvui.image(@src(), .{
-            .source = .{ .imageFile = .{
-                .bytes = bytes,
-                .name = "list-thumb",
-                // cover_cache slots get evicted+repopulated on
-                // re-sync. Allocator may hand back the same ptr,
-                // dvui's default `.ptr` invalidation would serve the
-                // stale GPU texture. Hash bytes instead.
-                .invalidation = .bytes,
-            } },
+            .source = .{
+                .imageFile = .{
+                    .bytes = bytes,
+                    .name = "list-thumb",
+                    // cover_cache slots get evicted+repopulated on
+                    // re-sync. Allocator may hand back the same ptr,
+                    // dvui's default `.ptr` invalidation would serve the
+                    // stale GPU texture. Hash bytes instead.
+                    .invalidation = .bytes,
+                },
+            },
             .shrink = .ratio,
         }, .{
             .id_extra = thread_id,
@@ -2287,7 +2292,7 @@ fn gameLessThan(ctx: SortCtx, a: library.Game, b: library.Game) bool {
             // them at the bottom of the visible list.
             if (va == null and vb == null) break :blk a.f95_thread_id < b.f95_thread_id;
             if (va == null) break :blk false; // a is null → a is "max", sinks
-            if (vb == null) break :blk true;  // b is null → a beats it
+            if (vb == null) break :blk true; // b is null → a beats it
             const ord = version_mod.compare(va.?, vb.?);
             if (ord == .eq) break :blk a.f95_thread_id < b.f95_thread_id;
             break :blk if (asc) ord == .lt else ord == .gt;
