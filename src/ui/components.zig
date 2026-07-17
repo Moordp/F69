@@ -829,7 +829,7 @@ pub fn renderSyncRecapPopup(frame: *Frame) void {
         const msg = std.fmt.bufPrint(&msg_buf, "{d} game{s} updated", .{
             entries.len, if (entries.len == 1) "" else "s",
         }) catch "";
-        dvui.labelNoFmt(@src(), msg, .{}, .{ .style = .highlight });
+        dvui.labelNoFmt(@src(), msg, .{}, .{ .color_text = td(tokens.active.acc) });
     }
 
     _ = dvui.separator(@src(), .{ .expand = .horizontal });
@@ -877,7 +877,7 @@ pub fn renderSyncRecapPopup(frame: *Frame) void {
             dvui.labelNoFmt(@src(), e.name, .{}, .{
                 .id_extra = e.thread_id,
                 .expand = .horizontal,
-                .style = .highlight,
+                .color_text = td(tokens.active.acc),
             });
 
             _ = dvui.spacer(@src(), .{ .id_extra = e.thread_id, .min_size_content = .{ .w = 1, .h = 4 } });
@@ -908,7 +908,7 @@ pub fn renderSyncRecapPopup(frame: *Frame) void {
                 dvui.labelNoFmt(@src(), e.new_version, .{}, .{
                     .id_extra = e.thread_id +% 1, // disambiguate from old_version label above
                     .gravity_y = 0.5,
-                    .style = .highlight,
+                    .color_text = td(tokens.active.acc),
                 });
                 if (e.auto_downloaded) {
                     _ = dvui.spacer(@src(), .{ .id_extra = e.thread_id, .min_size_content = .{ .w = 10, .h = 1 } });
