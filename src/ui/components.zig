@@ -125,10 +125,11 @@ pub fn engineBadgeColor(e: library.Engine) dvui.Color {
     return .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a };
 }
 
-/// dvui fill/border/text colors for a tag chip (stable per tag name).
+/// dvui fill/border/text colors for a tag chip. `override_rgb` (0xRRGGBB)
+/// is the user's chosen color when set; otherwise the stable per-name hue.
 pub const TagChipColors = struct { fill: dvui.Color, border: dvui.Color, text: dvui.Color };
-pub fn tagChipColors(tag: []const u8) TagChipColors {
-    const c = engine_palette.tagChip(tag);
+pub fn tagChipColors(tag: []const u8, override_rgb: ?u32) TagChipColors {
+    const c = if (override_rgb) |rgb| engine_palette.tagChipFromRgb(rgb) else engine_palette.tagChip(tag);
     const cv = struct {
         fn f(x: anytype) dvui.Color {
             return .{ .r = x.r, .g = x.g, .b = x.b, .a = x.a };

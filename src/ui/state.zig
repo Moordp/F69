@@ -731,6 +731,14 @@ pub const State = struct {
     edit_dev_buf: [128]u8 = [_]u8{0} ** 128,
     edit_ver_buf: [64]u8 = [_]u8{0} ** 64,
     edit_engine_idx: usize = 0,
+
+    /// User tag-color overrides (tag -> 0xRRGGBB), loaded lazily from the DB
+    /// and rebuilt (freed + null) after an edit. Freed at shutdown in ui.zig.
+    tag_colors: ?std.StringHashMap(u32) = null,
+    /// Tag whose color picker is open (NUL-terminated; empty = none).
+    tag_color_editing: [128]u8 = [_]u8{0} ** 128,
+    /// Working HSV bound to the open color picker.
+    tag_color_hsv: dvui.Color.HSV = .{},
     /// Thread-id the per-detail-page state is currently scoped to.
     /// `detailScreen` compares this against `selected_thread` each
     /// frame and, on mismatch, resets per-page UI state via
@@ -1870,6 +1878,12 @@ pub const State = struct {
     pub fn manageRenameSlice(self: *const State) []const u8 {
         const end = std.mem.indexOfScalar(u8, &self.manage_rename_buf, 0) orelse self.manage_rename_buf.len;
         return self.manage_rename_buf[0..end];
+    }
+
+    /// Override color (0xRRGGBB) for `tag`, or null for the auto hue.
+    pub fn tagColorFor(self: *const State, tag: []const u8) ?u32 {
+        const m = self.tag_colors orelse return null;
+        return m.get(tag);
     }
 
     /// Active arming target for the preset-delete two-click. Empty

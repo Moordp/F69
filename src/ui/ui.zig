@@ -275,6 +275,7 @@ pub fn runMainLoop(
         actions.freeTagsMaster(lib.alloc, &state);
         if (state.sync_queue) |q| lib.alloc.free(q);
         if (state.rpdl_token) |t| lib.alloc.free(t);
+        if (state.tag_colors) |*m| library.freeTagColors(m);
     }
 
     // Wire the download poller's UI wake-up: when the background aria2 poller

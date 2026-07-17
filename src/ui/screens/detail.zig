@@ -159,7 +159,7 @@ pub fn detailScreen(frame: *Frame) !bool {
             .padding = .{ .x = 16, .y = 4, .w = 16, .h = 4 },
         });
         defer tag_box.deinit();
-        renderTagChips(game.tags);
+        renderTagChips(frame, game.tags);
     }
 
     _ = dvui.separator(@src(), .{ .expand = .horizontal });
@@ -3116,7 +3116,10 @@ fn renderCoverThumb(bytes_opt: ?[]const u8, thread_id: u64) void {
     defer thumb.deinit();
 }
 
-fn renderTagChips(tags: []const []const u8) void {
+fn renderTagChips(frame: *Frame, tags: []const []const u8) void {
+    const state = frame.state;
+    ensureTagColors(frame);
+
     var flex = dvui.flexbox(@src(), .{ .justify_content = .start }, .{
         .expand = .horizontal,
     });
@@ -3126,10 +3129,10 @@ fn renderTagChips(tags: []const []const u8) void {
     const small = body.withSize(body.size * 0.75);
     for (tags, 0..) |tag, i| {
         if (!isPrintableTag(tag)) continue;
-        // Stable per-tag color (F95Checker-style): each tag gets its own
-        // hue derived from its name, so chips are individually
-        // distinguishable at a glance instead of one uniform accent wash.
-        const tc = components.tagChipColors(tag);
+        // F95Checker-style per-tag color: a stable hue per tag name by
+        // default, overridable by the user (click a chip to pick a color).
+        const override = state.tagColorFor(tag);
+        const tc = components.tagChipColors(tag, override);
         var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .id_extra = i,
             .background = true,
@@ -3140,8 +3143,71 @@ fn renderTagChips(tags: []const []const u8) void {
             .color_fill = tc.fill,
             .color_border = tc.border,
         });
-        defer chip.deinit();
         dvui.labelNoFmt(@src(), tag, .{}, .{ .font = small, .color_text = tc.text });
+        const clicked = dvui.clicked(chip.data(), .{});
+        chip.deinit();
+        if (clicked) openTagColorEditor(state, tag, tc.border);
+    }
+
+    renderTagColorPicker(frame);
+}
+
+/// Lazily load the tag-color override map on first use.
+fn ensureTagColors(frame: *Frame) void {
+    if (frame.state.tag_colors != null) return;
+    frame.state.tag_colors = frame.lib.loadTagColors(frame.lib.alloc) catch null;
+}
+
+/// Rebuild the override map after an edit so chips reflect the change.
+fn reloadTagColors(frame: *Frame) void {
+    if (frame.state.tag_colors) |*m| library.freeTagColors(m);
+    frame.state.tag_colors = frame.lib.loadTagColors(frame.lib.alloc) catch null;
+}
+
+fn openTagColorEditor(state: *state_mod.State, tag: []const u8, current: dvui.Color) void {
+    @memset(&state.tag_color_editing, 0);
+    const n = @min(tag.len, state.tag_color_editing.len - 1);
+    @memcpy(state.tag_color_editing[0..n], tag[0..n]);
+    state.tag_color_hsv = dvui.Color.HSV.fromColor(current);
+}
+
+/// Color-picker popup for the tag whose chip was clicked. Save writes a
+/// user override; Reset clears it back to the auto hue.
+fn renderTagColorPicker(frame: *Frame) void {
+    const state = frame.state;
+    const tag = nulSlice(&state.tag_color_editing);
+    if (tag.len == 0) return;
+
+    var open: bool = true;
+    var win = dvui.floatingWindow(@src(), .{ .open_flag = &open }, .{ .min_size_content = .{ .w = 320, .h = 340 } });
+    defer {
+        win.deinit();
+        if (!open) @memset(&state.tag_color_editing, 0);
+    }
+    var hbuf: [160]u8 = undefined;
+    const hdr = std.fmt.bufPrint(&hbuf, "Tag color — {s}", .{tag}) catch "Tag color";
+    _ = dvui.windowHeader(hdr, "", &open);
+
+    var box = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both, .padding = .{ .x = 12, .y = 12, .w = 12, .h = 12 } });
+    defer box.deinit();
+
+    _ = dvui.colorPicker(@src(), .{ .hsv = &state.tag_color_hsv, .sliders = .hsv }, .{});
+
+    var btns = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .padding = .{ .x = 0, .y = 8, .w = 0, .h = 0 } });
+    defer btns.deinit();
+    if (components.iconButton(@src(), "Reset to auto", entypo.cycle, .{})) {
+        frame.lib.setTagColor(tag, null) catch |e| state.notifyErr(@errorName(e));
+        reloadTagColors(frame);
+        open = false;
+    }
+    _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+    if (components.iconButton(@src(), "Save", entypo.check, .{ .style = .highlight })) {
+        const c = state.tag_color_hsv.toColor();
+        var hex: [6]u8 = undefined;
+        _ = std.fmt.bufPrint(&hex, "{x:0>2}{x:0>2}{x:0>2}", .{ c.r, c.g, c.b }) catch {};
+        frame.lib.setTagColor(tag, &hex) catch |e| state.notifyErr(@errorName(e));
+        reloadTagColors(frame);
+        open = false;
     }
 }
 

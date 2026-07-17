@@ -271,6 +271,40 @@ pub const Library = struct {
             return errs.Error.DatabaseError;
     }
 
+    /// Set (or clear, when `color` is null) a user override for a tag's
+    /// chip color. `color` is a 6-hex "RRGGBB" string.
+    pub fn setTagColor(self: *Library, tag: []const u8, color: ?[]const u8) errs.Error!void {
+        if (color) |c|
+            self.conn.inner.exec("INSERT OR REPLACE INTO tag_colors (tag, color) VALUES (?, ?)", .{ tag, c }) catch return self.dbFail()
+        else
+            self.conn.inner.exec("DELETE FROM tag_colors WHERE tag = ?", .{tag}) catch return self.dbFail();
+    }
+
+    /// Load all tag-color overrides into a `tag -> 0xRRGGBB` map. Keys are
+    /// alloc-owned; free with `freeTagColors`.
+    pub fn loadTagColors(self: *Library, alloc: std.mem.Allocator) errs.Error!std.StringHashMap(u32) {
+        var map = std.StringHashMap(u32).init(alloc);
+        errdefer freeTagColors(&map);
+        var rows = self.conn.inner.rows("SELECT tag, color FROM tag_colors", .{}) catch return self.dbFail();
+        defer rows.deinit();
+        while (rows.next()) |r| {
+            const packed_rgb = parseHexColor(r.text(1)) orelse continue;
+            const key = alloc.dupe(u8, r.text(0)) catch return errs.Error.OutOfMemory;
+            map.put(key, packed_rgb) catch {
+                alloc.free(key);
+                return errs.Error.OutOfMemory;
+            };
+        }
+        return map;
+    }
+
+    /// Free the alloc-owned keys of a map from `loadTagColors`, then the map.
+    pub fn freeTagColors(map: *std.StringHashMap(u32)) void {
+        var it = map.keyIterator();
+        while (it.next()) |k| map.allocator.free(k.*);
+        map.deinit();
+    }
+
     pub fn setLabelColor(self: *Library, id: i64, color: ?[]const u8) errs.Error!void {
         self.conn.inner.exec("UPDATE user_labels SET color = ? WHERE id = ?", .{ color, id }) catch
             return errs.Error.DatabaseError;
@@ -1305,6 +1339,12 @@ pub const Library = struct {
     }
 };
 
+/// Parse a 6-hex "RRGGBB" string into packed 0xRRGGBB. Null if malformed.
+fn parseHexColor(s: []const u8) ?u32 {
+    if (s.len != 6) return null;
+    return std.fmt.parseInt(u32, s, 16) catch null;
+}
+
 // ----- migrations -----
 
 const Migration = struct {
@@ -1600,6 +1640,17 @@ const migrations = [_]Migration{
         .id = 21,
         .sql =
         \\ALTER TABLE universal_mods ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;
+        ,
+    },
+    .{
+        .id = 22,
+        .sql =
+        // User overrides for tag-chip colors (F95Checker-style). `color`
+        // is a 6-hex "RRGGBB" string; absence of a row means auto (hash).
+        \\CREATE TABLE IF NOT EXISTS tag_colors (
+        \\  tag   TEXT PRIMARY KEY,
+        \\  color TEXT NOT NULL
+        \\);
         ,
     },
 };
@@ -1898,6 +1949,27 @@ test "library: backupTo produces a populated snapshot" {
     defer restored.freeGames(games);
     try std.testing.expectEqual(@as(usize, 1), games.len);
     try std.testing.expectEqualStrings("Backup Me", games[0].name);
+}
+
+test "library: tag color override round-trip" {
+    const gpa = std.testing.allocator;
+    var lib = try Library.open(gpa, ":memory:");
+    defer lib.close();
+
+    try lib.setTagColor("Corruption", "ff8800");
+    {
+        var m = try lib.loadTagColors(gpa);
+        defer Library.freeTagColors(&m);
+        try std.testing.expectEqual(@as(?u32, 0xff8800), m.get("Corruption"));
+        try std.testing.expectEqual(@as(usize, 1), m.count());
+    }
+    // Clearing removes the override.
+    try lib.setTagColor("Corruption", null);
+    {
+        var m = try lib.loadTagColors(gpa);
+        defer Library.freeTagColors(&m);
+        try std.testing.expectEqual(@as(usize, 0), m.count());
+    }
 }
 
 test "library: install round-trip + latestInstallForGame" {

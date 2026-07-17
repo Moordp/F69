@@ -24,12 +24,51 @@ pub const TagChip = struct { fill: Color, border: Color, text: Color };
 /// same hue, tuned for the dark UI (dark saturated fill, brighter border,
 /// light readable text). A per-tag user override could layer on top later.
 pub fn tagChip(tag: []const u8) TagChip {
-    const hue: f32 = @floatFromInt(std.hash.Wyhash.hash(0x7a9, tag) % 360);
+    return tagChipFromHue(tagHue(tag));
+}
+
+/// The auto hue (0–360) a tag maps to by default.
+pub fn tagHue(tag: []const u8) f32 {
+    return @floatFromInt(std.hash.Wyhash.hash(0x7a9, tag) % 360);
+}
+
+/// Chip colors for a given hue — the shared dark-theme treatment used by
+/// both the auto (hashed) hue and a user override, so overridden chips
+/// stay as readable and consistent as the defaults.
+pub fn tagChipFromHue(hue: f32) TagChip {
     return .{
         .fill = hslToRgb(hue, 0.45, 0.16),
         .border = hslToRgb(hue, 0.55, 0.42),
         .text = hslToRgb(hue, 0.55, 0.82),
     };
+}
+
+/// Chip colors for a user override packed as 0xRRGGBB — the chosen color
+/// sets the hue; the standard treatment keeps it readable on the dark UI.
+pub fn tagChipFromRgb(packed_rgb: u32) TagChip {
+    const r: u8 = @intCast((packed_rgb >> 16) & 0xff);
+    const g: u8 = @intCast((packed_rgb >> 8) & 0xff);
+    const b: u8 = @intCast(packed_rgb & 0xff);
+    return tagChipFromHue(rgbToHue(r, g, b));
+}
+
+fn rgbToHue(r8: u8, g8: u8, b8: u8) f32 {
+    const r: f32 = @as(f32, @floatFromInt(r8)) / 255.0;
+    const g: f32 = @as(f32, @floatFromInt(g8)) / 255.0;
+    const b: f32 = @as(f32, @floatFromInt(b8)) / 255.0;
+    const mx = @max(r, @max(g, b));
+    const mn = @min(r, @min(g, b));
+    const d = mx - mn;
+    if (d == 0) return 0;
+    var h: f32 = if (mx == r)
+        @mod((g - b) / d, 6.0)
+    else if (mx == g)
+        (b - r) / d + 2.0
+    else
+        (r - g) / d + 4.0;
+    h *= 60.0;
+    if (h < 0) h += 360.0;
+    return h;
 }
 
 fn hslToRgb(h_deg: f32, s: f32, l: f32) Color {
