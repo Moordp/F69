@@ -32,6 +32,7 @@ pub const tags = @import("tags.zig");
 /// Donor (Tier 1) DDL helpers — POST /sam/dddl.php and resolve the
 /// short-lived signed URL. Caller frees the returned slice.
 pub const donor_ddl = @import("donor_ddl.zig");
+pub const rss = @import("rss.zig");
 
 // Pull nested tests into this module's test binary. Without these
 // references the compiler only analyzes the re-exported symbols above,
@@ -44,6 +45,7 @@ test {
     _ = @import("domain.zig");
     _ = @import("donor_ddl.zig");
     _ = @import("errors.zig");
+    _ = @import("rss.zig");
     _ = @import("service.zig");
     _ = @import("tags.zig");
     _ = @import("thread.zig");
