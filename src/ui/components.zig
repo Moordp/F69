@@ -125,6 +125,18 @@ pub fn engineBadgeColor(e: library.Engine) dvui.Color {
     return .{ .r = c.r, .g = c.g, .b = c.b, .a = c.a };
 }
 
+/// dvui fill/border/text colors for a tag chip (stable per tag name).
+pub const TagChipColors = struct { fill: dvui.Color, border: dvui.Color, text: dvui.Color };
+pub fn tagChipColors(tag: []const u8) TagChipColors {
+    const c = engine_palette.tagChip(tag);
+    const cv = struct {
+        fn f(x: anytype) dvui.Color {
+            return .{ .r = x.r, .g = x.g, .b = x.b, .a = x.a };
+        }
+    }.f;
+    return .{ .fill = cv(c.fill), .border = cv(c.border), .text = cv(c.text) };
+}
+
 /// Toolbar icon size — pinned to the global style so every icon
 /// button matches every text button / dropdown / text entry.
 const ICON_SIZE: dvui.Size = style.icon_size;

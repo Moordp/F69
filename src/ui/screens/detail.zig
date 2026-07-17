@@ -3126,6 +3126,10 @@ fn renderTagChips(tags: []const []const u8) void {
     const small = body.withSize(body.size * 0.75);
     for (tags, 0..) |tag, i| {
         if (!isPrintableTag(tag)) continue;
+        // Stable per-tag color (F95Checker-style): each tag gets its own
+        // hue derived from its name, so chips are individually
+        // distinguishable at a glance instead of one uniform accent wash.
+        const tc = components.tagChipColors(tag);
         var chip = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .id_extra = i,
             .background = true,
@@ -3133,13 +3137,11 @@ fn renderTagChips(tags: []const []const u8) void {
             .corner_radius = style.corner_radius,
             .padding = .{ .x = 4, .y = 0, .w = 4, .h = 0 },
             .margin = .{ .x = 0, .y = 0, .w = 2, .h = 2 },
-            // Theme-driven accent wash + accent border — retints with the
-            // theme set in Settings (was a hardcoded maroon).
-            .color_fill = tokens.toDvui(tokens.active.acc_wash, dvui.Color),
-            .color_border = tokens.toDvui(tokens.active.acc, dvui.Color),
+            .color_fill = tc.fill,
+            .color_border = tc.border,
         });
         defer chip.deinit();
-        dvui.labelNoFmt(@src(), tag, .{}, .{ .font = small, .color_text = tokens.toDvui(tokens.active.ink2, dvui.Color) });
+        dvui.labelNoFmt(@src(), tag, .{}, .{ .font = small, .color_text = tc.text });
     }
 }
 

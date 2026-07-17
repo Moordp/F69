@@ -16,6 +16,57 @@ inline fn rgb(r: u8, g: u8, b: u8) Color {
     return .{ .r = r, .g = g, .b = b, .a = 0xff };
 }
 
+/// Fill / border / text colors for one tag chip.
+pub const TagChip = struct { fill: Color, border: Color, text: Color };
+
+/// Stable per-tag chip colors derived from the tag name — F95Checker's
+/// "colorful tags" look with zero config: the same tag always maps to the
+/// same hue, tuned for the dark UI (dark saturated fill, brighter border,
+/// light readable text). A per-tag user override could layer on top later.
+pub fn tagChip(tag: []const u8) TagChip {
+    const hue: f32 = @floatFromInt(std.hash.Wyhash.hash(0x7a9, tag) % 360);
+    return .{
+        .fill = hslToRgb(hue, 0.45, 0.16),
+        .border = hslToRgb(hue, 0.55, 0.42),
+        .text = hslToRgb(hue, 0.55, 0.82),
+    };
+}
+
+fn hslToRgb(h_deg: f32, s: f32, l: f32) Color {
+    const c = (1.0 - @abs(2.0 * l - 1.0)) * s;
+    const hp = h_deg / 60.0;
+    const x = c * (1.0 - @abs(@mod(hp, 2.0) - 1.0));
+    const m = l - c / 2.0;
+    var r: f32 = 0;
+    var g: f32 = 0;
+    var b: f32 = 0;
+    if (hp < 1.0) {
+        r = c;
+        g = x;
+    } else if (hp < 2.0) {
+        r = x;
+        g = c;
+    } else if (hp < 3.0) {
+        g = c;
+        b = x;
+    } else if (hp < 4.0) {
+        g = x;
+        b = c;
+    } else if (hp < 5.0) {
+        r = x;
+        b = c;
+    } else {
+        r = c;
+        b = x;
+    }
+    return .{
+        .r = @intFromFloat(@round((r + m) * 255.0)),
+        .g = @intFromFloat(@round((g + m) * 255.0)),
+        .b = @intFromFloat(@round((b + m) * 255.0)),
+        .a = 0xff,
+    };
+}
+
 /// Accent color for an engine's badge/chip. Hues are spread around the
 /// wheel for separability while keeping a loose nod to each engine's
 /// branding (Ren'Py teal, HTML5 orange, Java amber, Unity graphite…).
@@ -58,6 +109,18 @@ fn redmean(a: Color, b: Color) f64 {
     const dg = af(a.g) - af(b.g);
     const db = af(a.b) - af(b.b);
     return @sqrt((2.0 + rmean / 256.0) * dr * dr + 4.0 * dg * dg + (2.0 + (255.0 - rmean) / 256.0) * db * db);
+}
+
+test "tagChip is stable per tag and varies across tags" {
+    const a = tagChip("Corruption");
+    const b = tagChip("Corruption");
+    try std.testing.expectEqual(a.fill.r, b.fill.r);
+    try std.testing.expectEqual(a.fill.g, b.fill.g);
+    try std.testing.expectEqual(a.border.b, b.border.b);
+    const c = tagChip("Sandbox");
+    try std.testing.expect(a.fill.r != c.fill.r or a.fill.g != c.fill.g or a.fill.b != c.fill.b);
+    // Text stays light (readable on the dark fill).
+    try std.testing.expect(a.text.r > 0x90 or a.text.g > 0x90 or a.text.b > 0x90);
 }
 
 test "every engine badge color is perceptually distinct" {
