@@ -50,6 +50,10 @@ pub fn engineShortLabel(e: library.Engine) []const u8 {
         .qsp => "QSP",
         .tyranobuilder => "Tyrano",
         .twine => "Twine",
+        .adrift => "ADRIFT",
+        .rags => "RAGS",
+        .tads => "TADS",
+        .webgl => "WebGL",
         .other => "Other",
         .unknown => "?",
     };

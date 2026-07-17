@@ -34,6 +34,10 @@ pub fn badgeColor(e: library.Engine) Color {
         .qsp => rgb(0x9E, 0x2E, 0x8A), // magenta
         .tyranobuilder => rgb(0xD4, 0xC0, 0x17), // gold
         .twine => rgb(0x8F, 0xC7, 0x3E), // lime
+        .adrift => rgb(0x45, 0x6B, 0x7A), // steel
+        .rags => rgb(0xE0, 0x8A, 0x6E), // coral
+        .tads => rgb(0x8A, 0x8A, 0x2E), // olive
+        .webgl => rgb(0x1B, 0xC5, 0xD4), // aqua
         .other => rgb(0x8A, 0x8A, 0x8A), // grey
         .unknown => rgb(0x6F, 0x6F, 0x6F), // grey (gated off in UI)
     };
@@ -59,9 +63,10 @@ fn redmean(a: Color, b: Color) f64 {
 test "every engine badge color is perceptually distinct" {
     // All real engines (`unknown` is gated off in the UI, so skip it).
     const engines = [_]library.Engine{
-        .renpy,  .rpgm_mv, .rpgm_mz, .rpgm_vx,        .unity,
-        .unreal, .html,    .flash,   .java,           .wolf_rpg,
-        .qsp,    .tyranobuilder,     .twine,          .other,
+        .renpy,  .rpgm_mv,       .rpgm_mz, .rpgm_vx, .unity,
+        .unreal, .html,          .flash,   .java,    .wolf_rpg,
+        .qsp,    .tyranobuilder, .twine,   .other,   .adrift,
+        .rags,   .tads,          .webgl,
     };
     // Empirically, ~13 = the old palette's tightest pair (mv vs html);
     // a comfortable "tell them apart at chip scale" floor sits near 80.

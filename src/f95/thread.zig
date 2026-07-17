@@ -787,6 +787,10 @@ const ENGINE_TOKENS = std.StaticStringMap(void).initComptime(.{
     .{ "tyranobuilder", {} },
     .{ "tyrano", {} },
     .{ "twine", {} },
+    .{ "adrift", {} },
+    .{ "rags", {} },
+    .{ "tads", {} },
+    .{ "webgl", {} },
     .{ "others", {} },
     .{ "other", {} },
 });

@@ -30,10 +30,10 @@ pub fn engineFromTypeInt(t: u32) library.Engine {
         6 => .java,
         22 => .wolf_rpg,
         10 => .qsp,
-        21 => .other, // WebGL — engine-agnostic
-        2 => .other, // ADRIFT
-        11 => .other, // RAGS
-        16 => .other, // Tads
+        21 => .webgl,
+        2 => .adrift,
+        11 => .rags,
+        16 => .tads,
         9 => .other, // Others (F95Checker bucket)
         else => .unknown, // Misc / Tool / Mod / Comics / GIF / etc.
     };
