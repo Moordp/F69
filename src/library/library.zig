@@ -716,6 +716,42 @@ pub const Library = struct {
         try self.upsertGame(game);
     }
 
+    /// Manual edit of a game's identity fields — for orphaned imports or
+    /// non-F95 games the scraper can't fill in. `name` is required; empty
+    /// `developer`/`version` clear the field to null. Mirrors applyScrape's
+    /// per-field dup/free ownership, then upserts.
+    pub fn setGameInfo(
+        self: *Library,
+        game: *dom.Game,
+        name: []const u8,
+        developer: []const u8,
+        version: []const u8,
+        engine: dom.Engine,
+    ) errs.Error!void {
+        if (name.len > 0) {
+            const dup = self.alloc.dupe(u8, name) catch return errs.Error.OutOfMemory;
+            self.alloc.free(game.name);
+            game.name = dup;
+        }
+        try replaceOptional(self, &game.developer, developer);
+        try replaceOptional(self, &game.latest_version, version);
+        game.engine = engine;
+        try self.upsertGame(game);
+    }
+
+    /// Set a `?[]const u8` field to an alloc-owned copy of `src`, or null
+    /// when `src` is empty. Frees the previous value.
+    fn replaceOptional(self: *Library, target: *?[]const u8, src: []const u8) errs.Error!void {
+        if (src.len == 0) {
+            if (target.*) |old| self.alloc.free(old);
+            target.* = null;
+        } else {
+            const dup = self.alloc.dupe(u8, src) catch return errs.Error.OutOfMemory;
+            if (target.*) |old| self.alloc.free(old);
+            target.* = dup;
+        }
+    }
+
     pub fn ratingStats(self: *Library) errs.Error!struct { mean: f32, count: u32 } {
         var rows = self.conn.inner.rows(
             \\SELECT COALESCE(AVG(rating), 3.5), COUNT(rating)

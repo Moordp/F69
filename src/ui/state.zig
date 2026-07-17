@@ -722,6 +722,15 @@ pub const State = struct {
     /// Text-entry buffer for the rename modal. NUL-terminated;
     /// `manualInstallNameSlice`-style trimmed reads.
     manage_rename_buf: [64]u8 = [_]u8{0} ** 64,
+    /// Manual "edit game details" form (detail screen). Non-null thread-id
+    /// means the form is open for that game; the buffers are seeded from the
+    /// game when it opens. NUL-terminated. `edit_engine_idx` indexes
+    /// `EDITABLE_ENGINES` in detail.zig.
+    edit_details_for: ?u64 = null,
+    edit_name_buf: [256]u8 = [_]u8{0} ** 256,
+    edit_dev_buf: [128]u8 = [_]u8{0} ** 128,
+    edit_ver_buf: [64]u8 = [_]u8{0} ** 64,
+    edit_engine_idx: usize = 0,
     /// Thread-id the per-detail-page state is currently scoped to.
     /// `detailScreen` compares this against `selected_thread` each
     /// frame and, on mismatch, resets per-page UI state via

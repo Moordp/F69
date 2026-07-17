@@ -687,6 +687,107 @@ fn renderLabelsRow(frame: *Frame, game: *library.Game) void {
     }
 }
 
+/// User-selectable engines for the manual "edit details" form — every
+/// real engine plus `other`, excluding the `unknown` sentinel.
+const EDITABLE_ENGINES = [_]library.Engine{
+    .renpy,  .rpgm_mv,       .rpgm_mz, .rpgm_vx, .unity,
+    .unreal, .html,          .flash,   .java,    .wolf_rpg,
+    .qsp,    .tyranobuilder, .twine,   .adrift,  .rags,
+    .tads,   .webgl,         .other,
+};
+
+fn engineEditLabels() []const []const u8 {
+    const S = struct {
+        const labels = blk: {
+            var l: [EDITABLE_ENGINES.len][]const u8 = undefined;
+            for (EDITABLE_ENGINES, 0..) |e, i| l[i] = components.engineShortLabel(e);
+            break :blk l;
+        };
+    };
+    return &S.labels;
+}
+
+fn engineIndex(e: library.Engine) usize {
+    for (EDITABLE_ENGINES, 0..) |cand, i| if (cand == e) return i;
+    return EDITABLE_ENGINES.len - 1; // .other
+}
+
+/// Trimmed view of a NUL-terminated text-entry buffer.
+fn nulSlice(buf: []const u8) []const u8 {
+    const end = std.mem.indexOfScalar(u8, buf, 0) orelse buf.len;
+    return std.mem.trim(u8, buf[0..end], " \t\r\n");
+}
+
+/// Seed the edit-form buffers from the game's current fields and open it.
+fn openDetailEdit(state: *state_mod.State, game: *const library.Game) void {
+    @memset(&state.edit_name_buf, 0);
+    @memset(&state.edit_dev_buf, 0);
+    @memset(&state.edit_ver_buf, 0);
+    const nn = @min(game.name.len, state.edit_name_buf.len - 1);
+    @memcpy(state.edit_name_buf[0..nn], game.name[0..nn]);
+    if (game.developer) |d| {
+        const dn = @min(d.len, state.edit_dev_buf.len - 1);
+        @memcpy(state.edit_dev_buf[0..dn], d[0..dn]);
+    }
+    if (game.latest_version) |v| {
+        const vn = @min(v.len, state.edit_ver_buf.len - 1);
+        @memcpy(state.edit_ver_buf[0..vn], v[0..vn]);
+    }
+    state.edit_engine_idx = engineIndex(game.engine);
+    state.edit_details_for = game.f95_thread_id;
+}
+
+/// Manual edit form for a game's identity fields (name/dev/version/engine).
+/// Shown in place of the byline while `state.edit_details_for` matches.
+fn renderDetailEditForm(frame: *Frame, game: *library.Game) void {
+    const state = frame.state;
+    var box = dvui.box(@src(), .{ .dir = .vertical }, .{
+        .id_extra = game.f95_thread_id ^ 0xED,
+        .expand = .horizontal,
+        .padding = .{ .x = 0, .y = 9, .w = 0, .h = 9 },
+        .border = .{ .x = 0, .y = 1, .w = 0, .h = 1 },
+        .color_border = style.borderColor(),
+    });
+    defer box.deinit();
+
+    editField(@src(), "Name", &state.edit_name_buf);
+    editField(@src(), "Developer", &state.edit_dev_buf);
+    editField(@src(), "Version", &state.edit_ver_buf);
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .padding = .{ .x = 0, .y = 3, .w = 0, .h = 3 } });
+        defer row.deinit();
+        dvui.label(@src(), "Engine", .{}, .{ .min_size_content = .{ .w = 90, .h = 26 }, .gravity_y = 0.5, .color_text = style.labelDim() });
+        var picked: usize = state.edit_engine_idx;
+        if (style.dropdown(@src(), engineEditLabels(), .{ .choice = &picked }, .{}, .{ .gravity_y = 0.5, .min_size_content = .{ .w = 200, .h = 26 } })) {
+            state.edit_engine_idx = picked;
+        }
+    }
+    {
+        var btns = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .padding = .{ .x = 0, .y = 6, .w = 0, .h = 0 } });
+        defer btns.deinit();
+        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+        if (components.iconButton(@src(), "Cancel", entypo.cross, .{})) {
+            state.edit_details_for = null;
+        }
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
+        if (components.iconButton(@src(), "Save", entypo.check, .{ .style = .highlight })) {
+            const eng = EDITABLE_ENGINES[@min(state.edit_engine_idx, EDITABLE_ENGINES.len - 1)];
+            saveOrToast(frame, "game", frame.lib.setGameInfo(game, nulSlice(&state.edit_name_buf), nulSlice(&state.edit_dev_buf), nulSlice(&state.edit_ver_buf), eng));
+            state.game_edit_gen +%= 1; // in-place edit → refresh the library filter cache
+            state.edit_details_for = null;
+        }
+    }
+}
+
+/// One labelled text-entry row in the edit form.
+fn editField(src: std.builtin.SourceLocation, label: []const u8, buf: []u8) void {
+    var row = dvui.box(src, .{ .dir = .horizontal }, .{ .expand = .horizontal, .padding = .{ .x = 0, .y = 3, .w = 0, .h = 3 } });
+    defer row.deinit();
+    dvui.label(@src(), "{s}", .{label}, .{ .min_size_content = .{ .w = 90, .h = 26 }, .gravity_y = 0.5, .color_text = style.labelDim() });
+    const te = style.textEntry(@src(), .{ .text = .{ .buffer = buf } }, .{ .expand = .horizontal, .min_size_content = .{ .w = 240, .h = 26 }, .gravity_y = 0.5 });
+    te.deinit();
+}
+
 /// Read-only game facts (Overview tab): version · developer · last-updated ·
 /// last-synced + Sync now.
 /// One mono fact in the About byline: `LABEL value`, with a right divider.
@@ -710,6 +811,10 @@ fn bylineItem(label: []const u8, value: []const u8, acc: bool) void {
 /// layout A), replacing the old vertical key/value grid.
 fn renderDetailFacts(frame: *Frame, game: *library.Game) void {
     const t = tokens.active;
+    if (frame.state.edit_details_for == game.f95_thread_id) {
+        renderDetailEditForm(frame, game);
+        return;
+    }
     var bar = dvui.flexbox(@src(), .{ .justify_content = .start }, .{
         .id_extra = game.f95_thread_id ^ 0xF9,
         .expand = .horizontal,
@@ -742,6 +847,12 @@ fn renderDetailFacts(frame: *Frame, game: *library.Game) void {
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
         if (components.iconButton(@src(), "Sync now", entypo.cycle, .{ .style = .control, .gravity_y = 0.5, .padding = .{ .x = 6, .y = 2, .w = 6, .h = 2 } })) {
             actions.syncGame(frame, game);
+        }
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
+        // Manual edit — for orphaned imports / non-F95 games the scraper
+        // can't fill in (name/developer/version/engine).
+        if (components.iconButton(@src(), "Edit", entypo.pencil, .{ .style = .control, .gravity_y = 0.5, .padding = .{ .x = 6, .y = 2, .w = 6, .h = 2 } })) {
+            openDetailEdit(frame.state, game);
         }
     }
 }
