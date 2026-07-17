@@ -1855,6 +1855,11 @@ fn filterSignature(state: *const State, query: []const u8, games: []const librar
     hasher.update(std.mem.asBytes(&state.filter_status_changed));
     hasher.update(std.mem.asBytes(&state.filter_update_available));
     hasher.update(std.mem.asBytes(&state.snapshot_install_gen));
+    // In-place game edits (e.g. status change from the detail screen) bump
+    // this so the cached filtered slice is rebuilt immediately — otherwise an
+    // edit that changes a game's filter membership wouldn't show until an
+    // unrelated signature input happened to change.
+    hasher.update(std.mem.asBytes(&state.game_edit_gen));
     // Label filter — selected ids. (Re-assigning a label to a game while the
     // filter is active needs a manual refresh; the common case of toggling
     // the selection is covered here.)

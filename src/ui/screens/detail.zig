@@ -782,6 +782,10 @@ fn renderGameConfig(frame: *Frame, game: *library.Game) void {
         })) {
             game.completion_status = @enumFromInt(picked);
             saveOrToast(frame, "game", frame.lib.upsertGame(game));
+            // In-place edit: force the library filter cache to re-evaluate so
+            // a status change drops the game out of an active status filter
+            // this frame instead of lingering until an unrelated refresh.
+            frame.state.game_edit_gen +%= 1;
         }
     }
     {
@@ -2151,7 +2155,6 @@ fn renderActionRow(frame: *Frame, game: *library.Game) void {
     // to the top-bar ⋯; Convert + Fix Compat + engine tools to the Tools tab.)
 }
 
-
 /// Engine tools — operate on the SELECTED install (Tools tab, under the
 /// version picker): Win→Linux convert, host-compat fix, per-engine helpers.
 fn renderEngineTools(frame: *Frame, game: *library.Game) void {
@@ -2742,14 +2745,16 @@ fn renderRibbonThumb(bytes_opt: ?[]const u8, idx: usize, is_active: bool, thread
         dvui.Color{ .r = 0x5C, .g = 0x2A, .b = 0x3D };
 
     if (bytes_opt) |bytes| {
-        const source: dvui.ImageSource = .{ .imageFile = .{
-            .bytes = bytes,
-            .name = "ribbon-thumb",
-            // Thumb-strip slots are freed when switching games; the
-            // allocator may hand back the same pointer for the new
-            // game's thumbs. Hash bytes so dvui detects the change.
-            .invalidation = .bytes,
-        } };
+        const source: dvui.ImageSource = .{
+            .imageFile = .{
+                .bytes = bytes,
+                .name = "ribbon-thumb",
+                // Thumb-strip slots are freed when switching games; the
+                // allocator may hand back the same pointer for the new
+                // game's thumbs. Hash bytes so dvui detects the change.
+                .invalidation = .bytes,
+            },
+        };
         const natural = dvui.imageSize(source) catch dvui.Size{ .w = 16, .h = 9 };
         const aspect_min = scaleToAspectMin(natural);
         const wd = dvui.image(@src(), .{
@@ -2886,14 +2891,16 @@ fn renderSlideImage(frame: *Frame, bytes_opt: ?[]const u8, idx: usize, thread_id
     _ = frame;
     const id_extra: usize = (@as(usize, @intCast(thread_id)) << 8) | (idx & 0xff);
     if (bytes_opt) |bytes| {
-        const source: dvui.ImageSource = .{ .imageFile = .{
-            .bytes = bytes,
-            .name = "carousel",
-            // Multi-slot slide cache holds each idx in its own slot
-            // with a stable ptr across frames — default `.ptr`
-            // invalidation is safe and avoids hashing the full
-            // screenshot per frame.
-        } };
+        const source: dvui.ImageSource = .{
+            .imageFile = .{
+                .bytes = bytes,
+                .name = "carousel",
+                // Multi-slot slide cache holds each idx in its own slot
+                // with a stable ptr across frames — default `.ptr`
+                // invalidation is safe and avoids hashing the full
+                // screenshot per frame.
+            },
+        };
         const natural = dvui.imageSize(source) catch dvui.Size{ .w = 16, .h = 9 };
         const aspect_min = scaleToAspectMin(natural);
         const wd = dvui.image(@src(), .{
@@ -2930,16 +2937,18 @@ fn renderSlideImage(frame: *Frame, bytes_opt: ?[]const u8, idx: usize, thread_id
 fn renderCover(bytes_opt: ?[]const u8) void {
     if (bytes_opt) |bytes| {
         _ = dvui.image(@src(), .{
-            .source = .{ .imageFile = .{
-                .bytes = bytes,
-                .name = "cover",
-                // Multi-slot slide cache: slot 0 holds the full-size
-                // cover bytes at a stable ptr for the duration of
-                // this game's detail page. Default `.ptr`
-                // invalidation is safe — game-switch wipes the slot
-                // before the next allocation, evicting dvui's cache
-                // entry alongside.
-            } },
+            .source = .{
+                .imageFile = .{
+                    .bytes = bytes,
+                    .name = "cover",
+                    // Multi-slot slide cache: slot 0 holds the full-size
+                    // cover bytes at a stable ptr for the duration of
+                    // this game's detail page. Default `.ptr`
+                    // invalidation is safe — game-switch wipes the slot
+                    // before the next allocation, evicting dvui's cache
+                    // entry alongside.
+                },
+            },
             .shrink = .ratio,
         }, .{
             .min_size_content = .{ .w = 220, .h = 320 },
@@ -3051,7 +3060,10 @@ fn renderJournalTab(frame: *Frame, game: *const library.Game) void {
     for (sessions) |s| {
         var found = false;
         for (seen.items) |v| {
-            if (std.mem.eql(u8, v, s.version)) { found = true; break; }
+            if (std.mem.eql(u8, v, s.version)) {
+                found = true;
+                break;
+            }
         }
         if (!found) seen.append(alloc, s.version) catch break;
     }

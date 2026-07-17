@@ -748,6 +748,13 @@ pub const State = struct {
     /// The set only changes when an install is added/removed, so we skip the
     /// per-frame SELECT + rebuild while the generation is unchanged.
     installed_set_gen: u64 = 0,
+    /// Bumped whenever a game field is edited IN PLACE (status, etc.) without
+    /// replacing the `games` slice. The library filter cache keys off the
+    /// slice ptr + filter state, so an in-place edit is otherwise invisible
+    /// to it — a status change while a status filter is active would leave the
+    /// now-non-matching game on screen until an unrelated refresh. Folded into
+    /// `filterSignature`; bump via `bumpGameEdit()`.
+    game_edit_gen: u64 = 0,
     /// `<data_root>/ui_scale`.
     ui_scale: f32 = 1.25,
     /// Tracks the last persisted value so we don't rewrite the file
