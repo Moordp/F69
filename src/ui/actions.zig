@@ -218,6 +218,7 @@ pub const isGameRunning = launch.isGameRunning;
 pub const doStopGame = launch.doStopGame;
 pub const drainRunningGames = launch.drainRunningGames;
 pub const doBackupSaves = launch.doBackupSaves;
+pub const doImportSaves = launch.doImportSaves;
 pub const doOpenGameFolder = launch.doOpenGameFolder;
 pub const doOpenSaves = launch.doOpenSaves;
 pub const doOpenInstallFolder = launch.doOpenInstallFolder;

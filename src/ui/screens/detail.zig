@@ -95,6 +95,10 @@ pub fn detailScreen(frame: *Frame) !bool {
                 actions.doBackupSaves(frame, game);
                 ob.close();
             }
+            if (dvui.menuItemLabel(@src(), "Import saves…", .{}, .{ .expand = .horizontal }) != null) {
+                actions.doImportSaves(frame, game);
+                ob.close();
+            }
             _ = dvui.separator(@src(), .{ .expand = .horizontal });
             // (Convert + Fix Compat + engine tools live in the Tools tab.)
             if (dvui.menuItemLabel(@src(), "Sync now", .{}, .{ .expand = .horizontal }) != null) {

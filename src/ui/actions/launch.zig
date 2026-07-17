@@ -12,6 +12,7 @@ const convert_mod = @import("convert");
 const compat_mod = @import("compat");
 const downloads = @import("downloads");
 const version_mod = @import("util_version");
+const file_picker = @import("util_file_picker");
 const argv = @import("util_argv");
 const dvui = @import("dvui");
 const types = @import("../types.zig");
@@ -1638,8 +1639,7 @@ pub fn drainRunningGames(frame: *Frame) void {
             const counts_as_played = !early_fail and duration_s >= @as(i64, frame.state.min_session_seconds);
             if (counts_as_played) {
                 if (d.version) |v| {
-                    frame.lib.setLastPlayedVersionIfNewer(d.tid, v, version_mod.compare)
-                        catch |e| log.warn("setLastPlayedVersionIfNewer failed: {s}", .{@errorName(e)});
+                    frame.lib.setLastPlayedVersionIfNewer(d.tid, v, version_mod.compare) catch |e| log.warn("setLastPlayedVersionIfNewer failed: {s}", .{@errorName(e)});
                 }
             }
         }
@@ -1907,6 +1907,40 @@ pub fn doBackupSaves(frame: *Frame, game: *const library.Game) void {
     state.setLaunchMsg(ok_msg);
 }
 
+/// Inverse of `doBackupSaves`: pick a folder (e.g. a previous save
+/// backup, or the user's existing save data) and copy its contents into
+/// the per-game sandbox HOME. Lets a player carry saves into f69's
+/// sandbox for a game they were already playing outside it.
+pub fn doImportSaves(frame: *Frame, game: *const library.Game) void {
+    const state = frame.state;
+    const alloc = frame.lib.alloc;
+
+    const picked = file_picker.openFolder(alloc, null) catch |e| {
+        var buf: [128]u8 = undefined;
+        state.setLaunchMsg(std.fmt.bufPrint(&buf, "Folder picker failed: {s}", .{@errorName(e)}) catch "Folder picker failed");
+        return;
+    } orelse return; // cancelled
+    defer alloc.free(picked);
+
+    var home_buf: [640]u8 = undefined;
+    const sandbox_home = std.fmt.bufPrint(&home_buf, "{s}/{d}/.f69-home", .{ frame.info.library_root, game.f95_thread_id }) catch {
+        state.setLaunchMsg("Saves path buffer overflow.");
+        return;
+    };
+    std.Io.Dir.cwd().createDirPath(frame.io, sandbox_home) catch |e| {
+        var buf: [192]u8 = undefined;
+        state.setLaunchMsg(std.fmt.bufPrint(&buf, "Sandbox HOME mkdir failed: {s}", .{@errorName(e)}) catch "mkdir failed");
+        return;
+    };
+    copyTreePlain(alloc, frame.io, picked, sandbox_home) catch |e| {
+        var buf: [192]u8 = undefined;
+        state.setLaunchMsg(std.fmt.bufPrint(&buf, "Save import failed: {s}", .{@errorName(e)}) catch "Save import failed");
+        return;
+    };
+    var ok: [256]u8 = undefined;
+    state.setLaunchMsg(std.fmt.bufPrint(&ok, "Saves imported into sandbox HOME from {s}", .{picked}) catch "Saves imported");
+}
+
 /// Pure-ish: produce a stable "YYYYMMDD-HHMMSS"-shaped string. Uses
 /// the host clock; falls back to "unknown" if the clock read fails.
 fn backupTimestamp(io: std.Io) [24]u8 {
@@ -1966,7 +2000,6 @@ fn copyOneFile(io: std.Io, src: []const u8, dest: []const u8) !void {
     const st = in.stat(io) catch return;
     try out.setPermissions(io, st.permissions);
 }
-
 
 pub fn doOpenGameFolder(frame: *Frame, game: *const library.Game) void {
     const state = frame.state;
@@ -2155,4 +2188,3 @@ test "expandSavesPath: $XDG_DATA_HOME takes precedence over $HOME prefix" {
     defer testing.allocator.free(got);
     try testing.expectEqualStrings("/sb/.local/share/x", got);
 }
-
