@@ -135,6 +135,10 @@ pub fn main(init: std.process.Init) !void {
     var lib = try library.Library.open(gpa, db_path);
     defer lib.close();
 
+    // Automatic DB backups: on startup, snapshot the (post-migration) DB to
+    // `<data_root>/backups/` if the newest is older than a day, keeping the
+    // most recent few. Best-effort — never blocks launch.
+    maybeBackupDb(init.io, gpa, &lib, data_root);
 
     const rate_limit_ms: u64 = 1500;
     var f95_client = f95.Client.init(gpa, init.io, rate_limit_ms);
@@ -819,6 +823,73 @@ fn resolveAria2Path(gpa: std.mem.Allocator, io: std.Io, environ: std.process.Env
 /// Remove orphan `*.tmp` cover files left by a prior run that crashed
 /// or was Ctrl+C'd mid-write (see ui.fetchAndWriteCover's atomic
 /// tmp+rename). Best-effort.
+const BACKUP_INTERVAL_S: i64 = 24 * 60 * 60; // one snapshot per day
+const BACKUP_KEEP: usize = 10;
+
+/// Parse `f69-<epoch>.db` → the epoch seconds; null for anything else.
+fn parseBackupEpoch(name: []const u8) ?i64 {
+    if (!std.mem.startsWith(u8, name, "f69-")) return null;
+    if (!std.mem.endsWith(u8, name, ".db")) return null;
+    const mid = name["f69-".len .. name.len - ".db".len];
+    if (mid.len == 0) return null;
+    return std.fmt.parseInt(i64, mid, 10) catch null;
+}
+
+/// Startup DB backup: snapshot to `<data_root>/backups/f69-<now>.db` when the
+/// newest existing snapshot is older than `BACKUP_INTERVAL_S`, then prune to
+/// the newest `BACKUP_KEEP`. Best-effort: any failure logs and returns.
+fn maybeBackupDb(io: std.Io, gpa: std.mem.Allocator, lib: *library.Library, data_root: []const u8) void {
+    const dir_path = std.fmt.allocPrint(gpa, "{s}/backups", .{data_root}) catch return;
+    defer gpa.free(dir_path);
+    std.Io.Dir.cwd().createDirPath(io, dir_path) catch |e| {
+        log.warn("db backup: mkdir {s} failed: {s}", .{ dir_path, @errorName(e) });
+        return;
+    };
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(io);
+
+    var epochs: std.ArrayList(i64) = .empty;
+    defer epochs.deinit(gpa);
+    var newest: i64 = 0;
+    var iter = dir.iterate();
+    while (iter.next(io) catch null) |entry| {
+        if (entry.kind != .file) continue;
+        const ep = parseBackupEpoch(entry.name) orelse continue;
+        epochs.append(gpa, ep) catch continue;
+        if (ep > newest) newest = ep;
+    }
+
+    const now = std.Io.Clock.Timestamp.now(io, .real).raw.toSeconds();
+    if (newest != 0 and now - newest < BACKUP_INTERVAL_S) return; // not due yet
+
+    const dest = std.fmt.allocPrint(gpa, "{s}/f69-{d}.db", .{ dir_path, now }) catch return;
+    defer gpa.free(dest);
+    lib.backupTo(gpa, dest) catch |e| {
+        log.warn("db backup: VACUUM INTO {s} failed: {s}", .{ dest, @errorName(e) });
+        return;
+    };
+    log.info("db backup -> {s}", .{dest});
+    epochs.append(gpa, now) catch {};
+
+    if (epochs.items.len > BACKUP_KEEP) {
+        std.mem.sort(i64, epochs.items, {}, std.sort.asc(i64));
+        const drop = epochs.items.len - BACKUP_KEEP;
+        for (epochs.items[0..drop]) |ep| {
+            var nb: [64]u8 = undefined;
+            const nm = std.fmt.bufPrint(&nb, "f69-{d}.db", .{ep}) catch continue;
+            dir.deleteFile(io, nm) catch {};
+        }
+    }
+}
+
+test "parseBackupEpoch" {
+    try std.testing.expectEqual(@as(?i64, 1700000000), parseBackupEpoch("f69-1700000000.db"));
+    try std.testing.expectEqual(@as(?i64, null), parseBackupEpoch("f69.db"));
+    try std.testing.expectEqual(@as(?i64, null), parseBackupEpoch("other-123.db"));
+    try std.testing.expectEqual(@as(?i64, null), parseBackupEpoch("f69-abc.db"));
+    try std.testing.expectEqual(@as(?i64, null), parseBackupEpoch("f69-123.txt"));
+}
+
 fn sweepTmpCovers(io: std.Io, covers_dir: []const u8) !void {
     var dir = try std.Io.Dir.cwd().openDir(io, covers_dir, .{ .iterate = true });
     defer dir.close(io);
@@ -849,4 +920,3 @@ fn loadCookie(io: std.Io, gpa: std.mem.Allocator, path: []const u8) !?[]u8 {
     gpa.free(bytes);
     return dup;
 }
-

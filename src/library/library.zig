@@ -752,6 +752,28 @@ pub const Library = struct {
         }
     }
 
+    /// Write a consistent snapshot of the whole DB to `dest_path` via
+    /// `VACUUM INTO` — safe with an open connection + WAL (unlike a raw file
+    /// copy, which can capture a torn mid-write state). `dest_path` must not
+    /// already exist. App-controlled path; single quotes are escaped anyway.
+    pub fn backupTo(self: *Library, alloc: std.mem.Allocator, dest_path: []const u8) errs.Error!void {
+        const q_count = std.mem.count(u8, dest_path, "'");
+        const escaped = alloc.alloc(u8, dest_path.len + q_count) catch return errs.Error.OutOfMemory;
+        defer alloc.free(escaped);
+        var j: usize = 0;
+        for (dest_path) |c| {
+            escaped[j] = c;
+            j += 1;
+            if (c == '\'') {
+                escaped[j] = '\'';
+                j += 1;
+            }
+        }
+        const sql = std.fmt.allocPrint(alloc, "VACUUM INTO '{s}'", .{escaped}) catch return errs.Error.OutOfMemory;
+        defer alloc.free(sql);
+        self.conn.inner.exec(sql, .{}) catch return self.dbFail();
+    }
+
     pub fn ratingStats(self: *Library) errs.Error!struct { mean: f32, count: u32 } {
         var rows = self.conn.inner.rows(
             \\SELECT COALESCE(AVG(rating), 3.5), COUNT(rating)
@@ -1855,6 +1877,27 @@ test "library: open + migrate + listGames empty" {
     const games = try lib.listGames();
     defer lib.freeGames(games);
     try std.testing.expectEqual(@as(usize, 0), games.len);
+}
+
+test "library: backupTo produces a populated snapshot" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var lib = try Library.open(gpa, ":memory:");
+    defer lib.close();
+    try lib.upsertGame(&.{ .f95_thread_id = 42, .name = "Backup Me" });
+
+    const path = "/tmp/f69-backuptest-42.db";
+    std.Io.Dir.cwd().deleteFile(io, path) catch {}; // VACUUM INTO needs dest absent
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    try lib.backupTo(gpa, path);
+
+    // Reopen the snapshot — proves VACUUM INTO wrote a valid, populated DB.
+    var restored = try Library.open(gpa, path);
+    defer restored.close();
+    const games = try restored.listGames();
+    defer restored.freeGames(games);
+    try std.testing.expectEqual(@as(usize, 1), games.len);
+    try std.testing.expectEqualStrings("Backup Me", games[0].name);
 }
 
 test "library: install round-trip + latestInstallForGame" {
