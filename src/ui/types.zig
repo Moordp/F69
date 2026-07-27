@@ -138,6 +138,11 @@ pub const RuntimeInfo = struct {
     db_path: []const u8,
     covers_dir: []const u8,
     library_root: []const u8,
+    /// System temp root for scratch/staging (mod-apply extraction, test-
+    /// install preview). `%TEMP%` on Windows, `$TMPDIR`/`/tmp` elsewhere —
+    /// resolved once at startup so staging never lands in a drive-root
+    /// `C:\tmp`. Defaults to `/tmp` for the headless test harness (Linux).
+    staging_dir: []const u8 = "/tmp",
     /// `<config>/f69/f95_cookie` — login state lives here so it
     /// survives across restarts.
     cookie_path: []const u8,
@@ -231,6 +236,10 @@ pub const RuntimeInfo = struct {
     /// writes here.
     refresh_backend_path: []const u8,
     initial_refresh_backend: state_mod.RefreshBackend,
+    /// `<data_root>/update_check_source` — single-line `builtin` / `rss`.
+    /// Picks the "Check for updates" data source. Settings → Updates writes it.
+    update_check_source_path: []const u8,
+    initial_update_check_source: state_mod.UpdateCheckSource,
     /// `<data_root>/max_parallel_sync` — single-line integer (1..16).
     /// Effective concurrency of the `/full` + scrape worker pool.
     /// Default 4. Settings → Sync row writes here.

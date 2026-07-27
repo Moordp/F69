@@ -45,6 +45,7 @@ pub const State = state_mod.State;
 pub const AutoCheckSettings = state_mod.AutoCheckSettings;
 pub const AutoCheckUnit = state_mod.AutoCheckUnit;
 pub const RefreshBackend = state_mod.RefreshBackend;
+pub const UpdateCheckSource = state_mod.UpdateCheckSource;
 pub const MAX_PARALLEL_SYNC = state_mod.MAX_PARALLEL_SYNC;
 pub const MAX_PARALLEL_IMAGE = state_mod.MAX_PARALLEL_IMAGE;
 pub const DEFAULT_PARALLEL = state_mod.DEFAULT_PARALLEL;
@@ -133,7 +134,7 @@ pub fn runMainLoop(
     // Mod install/uninstall queue + worker. Long-lived: spans the
     // app's lifetime so jobs survive screen navigation and the worker
     // stays warm between clicks.
-    var mod_jobs_ctx = actions.RunnerCtx{ .alloc = gpa, .io = io, .lib = lib, .repo = recipe_repo };
+    var mod_jobs_ctx = actions.RunnerCtx{ .alloc = gpa, .io = io, .lib = lib, .repo = recipe_repo, .temp_root = info.staging_dir };
     var mod_jobs = mod_job_queue.Queue.init(gpa, io, &win, actions.modJobRunner, &mod_jobs_ctx);
     defer mod_jobs.deinit();
 
@@ -199,6 +200,8 @@ pub fn runMainLoop(
     state.desktop_notifications_persisted = info.initial_desktop_notifications;
     state.refresh_backend = info.initial_refresh_backend;
     state.refresh_backend_persisted = info.initial_refresh_backend;
+    state.update_check_source = info.initial_update_check_source;
+    state.update_check_source_persisted = info.initial_update_check_source;
     state.max_parallel_sync = info.initial_max_parallel_sync;
     state.max_parallel_sync_persisted = info.initial_max_parallel_sync;
     state.max_parallel_image = info.initial_max_parallel_image;
@@ -275,7 +278,7 @@ pub fn runMainLoop(
         actions.freeTagsMaster(lib.alloc, &state);
         if (state.sync_queue) |q| lib.alloc.free(q);
         if (state.rpdl_token) |t| lib.alloc.free(t);
-        if (state.tag_colors) |*m| library.freeTagColors(m);
+        if (state.tag_colors) |*m| library.Library.freeTagColors(m);
     }
 
     // Wire the download poller's UI wake-up: when the background aria2 poller
@@ -313,6 +316,7 @@ pub fn runMainLoop(
         actions.persistAutoUpdateDefaultIfDirty(&state, info.auto_update_default_path, io);
         actions.persistDesktopNotificationsIfDirty(&state, info.desktop_notifications_path, io);
         actions.persistRefreshBackendIfDirty(&state, info.refresh_backend_path, io);
+        actions.persistUpdateCheckSourceIfDirty(&state, info.update_check_source_path, io);
         actions.persistMaxParallelSyncIfDirty(&state, info.max_parallel_sync_path, io);
         actions.persistMaxParallelImageIfDirty(&state, info.max_parallel_image_path, io);
         actions.persistMinSessionSecondsIfDirty(&state, info.min_session_seconds_path, io);
@@ -343,6 +347,12 @@ pub fn runMainLoop(
             // `http.Client.connection_pool.used`, which makes
             // `f95.Client.deinit` skip its http teardown and leak.
             actions.cancelAllWorkers(&state);
+            // The mod-job queue lives on the frame, not State, so
+            // cancelAllWorkers can't reach it — signal cancel on every
+            // queued/running mod job here so the drain loop can retire them.
+            mod_jobs.lock();
+            for (mod_jobs.jobsLocked()) |mj| mj.cancel_flag.store(true, .release);
+            mod_jobs.unlock();
             var shutdown_frame: Frame = .{
                 .state = &state,
                 .games = games,
@@ -379,6 +389,15 @@ pub fn runMainLoop(
                 actions.drainPostInstall(&shutdown_frame);
                 actions.drainManualInstall(&shutdown_frame);
                 actions.drainTestInstall(&shutdown_frame);
+                // These three were missing: `workersBusy` counts import /
+                // folder-import / mod jobs, but without draining them their
+                // slots never clear, so quitting mid-import always burned
+                // the full 6 s then hard-exited — and a finished Move-mode
+                // folder import never ran onFolderImportDone, orphaning the
+                // moved files with no install row. Draining lets them retire.
+                actions.drainImport(&shutdown_frame);
+                actions.drainFolderImport(&shutdown_frame);
+                actions.drainModJobs(&shutdown_frame);
                 io.sleep(std.Io.Duration.fromMilliseconds(50), .real) catch {};
             }
             if (actions.workersBusy(&state)) {
@@ -665,7 +684,9 @@ pub fn guiFrame(frame: *Frame) !bool {
     // extract worker is in flight, ask dvui to schedule another
     // frame. vsync caps the cost at ~60 fps; idle libraries with
     // no activity incur zero wakeups.
-    if (anyDownloadActive(frame.dl_mgr) or anyPostInstallActive(frame.state)) {
+    if (anyDownloadActive(frame.dl_mgr) or anyPostInstallActive(frame.state) or
+        actions.folderImportActive(frame.state))
+    {
         dvui.refresh(frame.win, @src(), null);
     }
     // Toasts need wall-clock ticks to fade out. Without an explicit
@@ -691,6 +712,7 @@ pub fn guiFrame(frame: *Frame) !bool {
     actions.drainTestInstall(frame);
     actions.drainModJobs(frame);
     actions.drainImport(frame);
+    actions.drainFolderImport(frame);
     // Prune the running-games map for processes that have exited so
     // the detail screen's Launch ↔ Stop swap stays honest.
     actions.drainRunningGames(frame);
@@ -702,10 +724,6 @@ pub fn guiFrame(frame: *Frame) !bool {
         .name = "root",
     });
     defer root.deinit();
-
-    // Global sync banner — visible on every screen while a sync-all
-    // batch is in flight (or for a beat after a single sync completes).
-    screens.renderSyncBanner(frame);
 
     const t0 = types.startLatency(frame.io);
     // Design-B shell: left icon rail (primary nav) + screen content.

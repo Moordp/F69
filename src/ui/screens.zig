@@ -15,7 +15,7 @@
 //   diagnostics.zig    — diagnosticsScreen
 //   components.zig     — iconButton/iconOnly/tabButton/settingsHelpText,
 //                        humanBytes/humanRate, formatUtcDateTime,
-//                        renderSyncRecapPopup/renderToasts/renderSyncBanner,
+//                        renderSyncRecapPopup/renderToasts,
 //                        engine + dev-status colour/label tables,
 //                        gameByThreadId
 
@@ -50,6 +50,5 @@ pub const renderSyncRecapPopup = components.renderSyncRecapPopup;
 pub const renderLoginPopup = components.renderLoginPopup;
 pub const renderLaunchDiagPopup = components.renderLaunchDiagPopup;
 pub const renderToasts = components.renderToasts;
-pub const renderSyncBanner = components.renderSyncBanner;
 pub const renderIconRail = components.renderIconRail;
 pub const renderStatusBar = components.renderStatusBar;

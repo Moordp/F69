@@ -27,6 +27,10 @@ pub const Error = error{
     DeleteFailed,
     OutOfMemory,
     PathTooLong,
+    /// Cooperative cancel fired before the source was deleted. Distinct
+    /// from CopyFailed so callers can report "cancelled" rather than
+    /// mislabeling a user-requested stop as a failure.
+    Canceled,
 };
 
 /// Progress callback shape — matches `installer/apply.zig` so the UI
@@ -45,6 +49,15 @@ pub const Opts = struct {
     /// originals — peak disk goes up to 2x permanently, but the
     /// originals stay intact.
     keep_source: bool = false,
+    /// Live byte-progress sink for a background driver (the
+    /// folder-import worker). Bumped (`fetchAdd`) per 64 KB chunk in
+    /// BOTH the copy pass (bytes written) and the verify pass (bytes
+    /// re-read) — so a driver that pre-computed total = `2 × sum(file
+    /// sizes)` gets a bar that advances smoothly across copy *and*
+    /// verify instead of stalling at ~50%. Accumulates across multiple
+    /// `copyVerifyDelete` calls when the same atomic is shared, giving
+    /// one batch-wide counter. Null = no byte reporting.
+    byte_done: ?*std.atomic.Value(u64) = null,
 };
 
 pub const Stats = struct {
@@ -84,12 +97,14 @@ pub fn copyVerifyDelete(
     var stats = Stats{};
 
     // ---- Phase 1: count files (for progress total). ----
+    // Best-effort — a walk hiccup here only undercounts the progress
+    // bar, never touches data, so `catch null` is fine in THIS phase.
+    var file_total: u32 = 0;
     {
         var walker = src.walk(alloc) catch return Error.OutOfMemory;
         defer walker.deinit();
-        var total: u32 = 0;
-        while (walker.next(io) catch null) |e| if (e.kind == .file) { total += 1; };
-        if (opts.progress_cb) |cb| cb(opts.progress_ctx, 0, total);
+        while (walker.next(io) catch null) |e| if (e.kind == .file) { file_total += 1; };
+        if (opts.progress_cb) |cb| cb(opts.progress_ctx, 0, file_total);
     }
 
     // We track every (rel, src_sha) we copied so the verify pass can
@@ -110,14 +125,19 @@ pub fn copyVerifyDelete(
         var walker = src.walk(alloc) catch return Error.OutOfMemory;
         defer walker.deinit();
         var done: u32 = 0;
-        const total = stats.files_copied; // updated below
 
-        while (walker.next(io) catch null) |entry| {
+        // A walk error here is FATAL, not a silent stop: phase 4 deletes
+        // the whole source tree, so ending the copy loop early on a FUSE
+        // hiccup would leave un-copied files that then get deleted.
+        while (walker.next(io) catch |e| {
+            log.warn("migrate: source walk failed mid-copy: {s} — aborting, both trees left intact", .{@errorName(e)});
+            return Error.CopyFailed;
+        }) |entry| {
             if (entry.kind != .file) continue;
             if (opts.cancel) |c| {
                 if (c.load(.monotonic)) {
                     log.warn("migrate: canceled before deleting source — left both intact", .{});
-                    return Error.CopyFailed;
+                    return Error.Canceled;
                 }
             }
 
@@ -127,13 +147,13 @@ pub fn copyVerifyDelete(
             var dst_buf: [1024]u8 = undefined;
             const dst_path = std.fmt.bufPrint(&dst_buf, "{s}/{s}", .{ dst_dir, rel }) catch return Error.PathTooLong;
 
-            const sha = copyAndHash(io, src_path, dst_path, &stats.bytes_copied) catch return Error.CopyFailed;
+            const sha = copyAndHash(io, src_path, dst_path, &stats.bytes_copied, opts.byte_done) catch return Error.CopyFailed;
             const rel_owned = aalloc.dupe(u8, rel) catch return Error.OutOfMemory;
             records.append(aalloc, .{ .rel = rel_owned, .src_sha = sha }) catch return Error.OutOfMemory;
 
             stats.files_copied += 1;
             done += 1;
-            if (opts.progress_cb) |cb| cb(opts.progress_ctx, done, total);
+            if (opts.progress_cb) |cb| cb(opts.progress_ctx, done, file_total);
         }
     }
 
@@ -142,12 +162,12 @@ pub fn copyVerifyDelete(
         if (opts.cancel) |c| {
             if (c.load(.monotonic)) {
                 log.warn("migrate: canceled during verify — source preserved", .{});
-                return Error.CopyFailed;
+                return Error.Canceled;
             }
         }
         var dst_buf: [1024]u8 = undefined;
         const dst_path = std.fmt.bufPrint(&dst_buf, "{s}/{s}", .{ dst_dir, rec.rel }) catch return Error.PathTooLong;
-        const dst_sha = hashFile(io, dst_path) catch return Error.VerifyMismatch;
+        const dst_sha = hashFile(io, dst_path, opts.byte_done) catch return Error.VerifyMismatch;
         if (!std.mem.eql(u8, &rec.src_sha, &dst_sha)) {
             log.warn("migrate: verify failed for {s} — source preserved", .{rec.rel});
             return Error.VerifyMismatch;
@@ -171,11 +191,35 @@ pub fn copyVerifyDelete(
     return stats;
 }
 
+/// Sum the byte size of every regular file under `src_dir`. The
+/// folder-import worker calls this up front to pre-compute a
+/// batch-wide progress total (doubling the result to cover the verify
+/// re-read pass). stat-only — reads no file data. Returns 0 on any
+/// walk error: a progress total is best-effort, never fatal.
+pub fn sumTreeBytes(alloc: std.mem.Allocator, io: std.Io, src_dir: []const u8) u64 {
+    var src = std.Io.Dir.cwd().openDir(io, src_dir, .{ .iterate = true, .access_sub_paths = true }) catch return 0;
+    defer src.close(io);
+    var walker = src.walk(alloc) catch return 0;
+    defer walker.deinit();
+    var total: u64 = 0;
+    while (walker.next(io) catch null) |e| {
+        if (e.kind != .file) continue;
+        const st = e.dir.statFile(io, e.basename, .{}) catch continue;
+        total += st.size;
+    }
+    return total;
+}
+
 /// Stream-copy `src` → `dst` while computing the source's SHA-256.
 /// Bumps `bytes_total` with each chunk so the caller can show throughput.
-fn copyAndHash(io: std.Io, src: []const u8, dst: []const u8, bytes_total: *u64) ![32]u8 {
+fn copyAndHash(io: std.Io, src: []const u8, dst: []const u8, bytes_total: *u64, byte_done: ?*std.atomic.Value(u64)) ![32]u8 {
     var in = try std.Io.Dir.cwd().openFile(io, src, .{ .mode = .read_only });
     defer in.close(io);
+    // Snapshot the source size up front — after the copy we assert we
+    // read exactly this many bytes, so a short/torn read can't slip a
+    // truncated copy past the verify pass (its hash would match the
+    // truncated source we just hashed).
+    const expected_size = (in.stat(io) catch return error.StatFailed).size;
     if (std.fs.path.dirname(dst)) |d| try std.Io.Dir.cwd().createDirPath(io, d);
     var out = try std.Io.Dir.cwd().createFile(io, dst, .{ .truncate = true });
     defer out.close(io);
@@ -187,14 +231,31 @@ fn copyAndHash(io: std.Io, src: []const u8, dst: []const u8, bytes_total: *u64) 
     var out_writer = out.writer(io, &wr_buf);
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
 
+    var copied: u64 = 0;
     while (true) {
-        const got = in_reader.interface.readSliceShort(&chunk) catch break;
+        // A read error MUST propagate, not be swallowed as EOF: the
+        // hash is computed from this same stream, so a truncated read
+        // would hash a truncated source, the destination would match
+        // it, verify would pass, and phase 4 would delete the intact
+        // original. That is the exact unrecoverable loss this module
+        // exists to prevent.
+        const got = try in_reader.interface.readSliceShort(&chunk);
         if (got == 0) break;
         hasher.update(chunk[0..got]);
         try out_writer.interface.writeAll(chunk[0..got]);
+        copied += got;
         bytes_total.* += got;
+        if (byte_done) |bd| _ = bd.fetchAdd(got, .monotonic);
     }
     try out_writer.interface.flush();
+
+    // Second guard: we must have read the whole file. A silent short
+    // read that returned 0 early (rather than erroring) would otherwise
+    // pass hash-verify against its own truncated hash.
+    if (copied != expected_size) {
+        log.warn("migrate: short copy of '{s}' ({d}/{d} bytes) — aborting before any delete", .{ src, copied, expected_size });
+        return error.CopyFailed;
+    }
 
     // Preserve the executable bit so launchers (.sh / .py / etc.)
     // stay runnable post-migration.
@@ -207,7 +268,7 @@ fn copyAndHash(io: std.Io, src: []const u8, dst: []const u8, bytes_total: *u64) 
 }
 
 /// Read a file and return its SHA-256. Used during the verify pass.
-fn hashFile(io: std.Io, path: []const u8) ![32]u8 {
+fn hashFile(io: std.Io, path: []const u8, byte_done: ?*std.atomic.Value(u64)) ![32]u8 {
     var f = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only });
     defer f.close(io);
 
@@ -216,9 +277,13 @@ fn hashFile(io: std.Io, path: []const u8) ![32]u8 {
     var rdr = f.reader(io, &rd_buf);
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     while (true) {
-        const got = rdr.interface.readSliceShort(&chunk) catch break;
+        // Propagate a read error rather than hashing a truncated prefix.
+        // Either way the source is preserved (the caller maps any error
+        // here to VerifyMismatch), but propagating keeps the failure honest.
+        const got = try rdr.interface.readSliceShort(&chunk);
         if (got == 0) break;
         hasher.update(chunk[0..got]);
+        if (byte_done) |bd| _ = bd.fetchAdd(got, .monotonic);
     }
     var sha: [32]u8 = undefined;
     hasher.final(&sha);

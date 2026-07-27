@@ -66,10 +66,18 @@ fn versionMatches(ctx: *const Ctx, bound: dom.EngineVersionBound, mode: VersionM
     const alloc = std.heap.page_allocator;
     const detected_opt: ?[]const u8 = switch (bound.engine) {
         .renpy => detectRenpyVersion(ctx, alloc),
-        // Other engines: version probing not implemented yet. Returning
-        // null here means engine_version_at_* never matches for them —
-        // an upcoming patch can flesh out per-engine probes.
-        else => null,
+        // Other engines: version probing not implemented yet. An
+        // engine_version_at_* bound therefore can NEVER match for them, so
+        // the recipe is silently skipped. Log it loudly (warn, distinct
+        // from a genuine probe-read failure) so a recipe author can see
+        // WHY their version-gated fix never fires, instead of guessing.
+        else => {
+            std.log.scoped(.compat).warn(
+                "versionMatches: no version probe for engine={s} yet — an engine_version_at_* bound can never match, so this fix will be SKIPPED (bound={s})",
+                .{ @tagName(bound.engine), bound.version },
+            );
+            return false;
+        },
     };
     const detected = detected_opt orelse {
         std.log.scoped(.compat).info("versionMatches: engine={s} probe FAILED (no version file readable) — bound={s} mode={s}", .{ @tagName(bound.engine), bound.version, @tagName(mode) });

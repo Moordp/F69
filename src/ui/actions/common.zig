@@ -21,6 +21,7 @@
 //     helpers that touch state owned by three domains.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const log = std.log.scoped(.ui_actions);
 const library = @import("library");
 const version_mod = @import("util_version");
@@ -65,6 +66,7 @@ pub fn cancelAllWorkers(state: *types.State) void {
     if (state.launch_watch_job) |j| j.cancel.store(true, .release);
     if (state.test_install_job) |j| j.cancel.store(true, .release);
     if (state.import_job) |j| j.cancel.store(true, .release);
+    if (state.folder_import_job) |j| j.cancel.store(true, .release);
 }
 
 /// True when any async worker is still occupying its state slot.
@@ -92,6 +94,7 @@ pub fn workersBusy(state: *const types.State) bool {
     if (state.launch_watch_job != null) return true;
     if (state.test_install_job != null) return true;
     if (state.import_job != null) return true;
+    if (state.folder_import_job != null) return true;
     if (state.post_install_jobs) |list_ptr| {
         if (list_ptr.items.len > 0) return true;
     }
@@ -184,14 +187,53 @@ fn browserWorker(job: *BrowserJob) void {
         job.alloc.free(job.url);
         job.alloc.destroy(job);
     }
-    const argv = [_][]const u8{ job.exe, job.url };
+    var argv_buf: [5][]const u8 = undefined;
+    const argv = systemOpenArgv(job.exe, job.url, &argv_buf);
     var child = std.process.spawn(job.io, .{
-        .argv = &argv,
+        .argv = argv,
         .stdin = .ignore,
         .stdout = .ignore,
         .stderr = .ignore,
     }) catch return;
     _ = child.wait(job.io) catch {};
+}
+
+/// Build the argv to open `target` (a URL or filesystem path). When
+/// `custom_exe` is a real user-chosen browser/opener it's used verbatim
+/// (`{exe, target}`); the sentinel "xdg-open" (the cross-platform default)
+/// and the empty string both map to the OS's native opener instead —
+/// Windows `cmd /c start "" <t>`, macOS `open <t>`, Linux `xdg-open <t>`.
+/// Without this, every open-in-external-app action spawned a literal
+/// `xdg-open` that doesn't exist on Windows/macOS. `buf` backs the result.
+pub fn systemOpenArgv(custom_exe: []const u8, target: []const u8, buf: *[5][]const u8) []const []const u8 {
+    const use_default = custom_exe.len == 0 or std.mem.eql(u8, custom_exe, "xdg-open");
+    if (!use_default) {
+        buf[0] = custom_exe;
+        buf[1] = target;
+        return buf[0..2];
+    }
+    switch (builtin.os.tag) {
+        .windows => {
+            // `start` treats its first quoted arg as a window title, so pass
+            // an empty title before the target (works for URLs and folders).
+            buf[0] = "cmd";
+            buf[1] = "/c";
+            buf[2] = "start";
+            buf[3] = "";
+            buf[4] = target;
+            return buf[0..5];
+        },
+        .macos => {
+            buf[0] = "open";
+            buf[1] = target;
+            return buf[0..2];
+        },
+        else => {
+            buf[0] = "xdg-open";
+            buf[1] = target;
+            return buf[0..2];
+        },
+    }
 }
 
 // ============================================================
@@ -586,6 +628,17 @@ pub fn persistRefreshBackendIfDirty(state: *State, path: []const u8, io: std.Io)
         return;
     };
     state.refresh_backend_persisted = state.refresh_backend;
+}
+
+/// Mirror `state.update_check_source` to disk on toggle. Writes the enum
+/// tag name (`builtin` / `rss`).
+pub fn persistUpdateCheckSourceIfDirty(state: *State, path: []const u8, io: std.Io) void {
+    if (state.update_check_source == state.update_check_source_persisted) return;
+    persistTextFile(io, path, @tagName(state.update_check_source)) catch |e| {
+        log.warn("update_check_source persist failed: {s}", .{@errorName(e)});
+        return;
+    };
+    state.update_check_source_persisted = state.update_check_source;
 }
 
 /// Mirror `state.max_parallel_sync` to disk on change. Writes the

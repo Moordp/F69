@@ -1246,6 +1246,11 @@ fn onSyncFailed(frame: *Frame, job: *SyncJob) void {
     else
         std.fmt.bufPrint(&emsg, "scrape failed: {s}", .{friendly}) catch "scrape failed";
     state.setSyncMsg(m);
+    // A single-game sync failure is a discrete user action — surface it as
+    // a toast so it can't be missed. In a sync-all queue this handler fires
+    // once PER failing game, so a toast each would spam; there the status
+    // bar's err line carries the outcome instead.
+    if (state.sync_queue == null) state.notifyErr(m);
     freeSyncPayload(job);
 }
 
@@ -1289,6 +1294,8 @@ fn onSyncDone(frame: *Frame, job: *SyncJob) void {
             freeSyncPayload(job);
             return;
         };
+        // In-place edit (dev_status → orphaned) — invalidate the filter cache.
+        state.game_edit_gen +%= 1;
         state.sync_status = .ok;
         state.sort_applied_column = null;
         state.sort_applied_dir = null;
@@ -1352,6 +1359,12 @@ fn onSyncDone(frame: *Frame, job: *SyncJob) void {
         freeSyncPayload(job);
         return;
     };
+
+    // The scrape edited this game's fields IN PLACE (name/status/version/…)
+    // without replacing the `games` slice, so bump game_edit_gen to
+    // invalidate the library filter cache — otherwise a status/text filter
+    // could keep showing (or hiding) this row until an unrelated refresh.
+    state.game_edit_gen +%= 1;
 
     // After a successful scrape we have everything needed to author
     // the canonical game recipe (name + version + engine + thread).
@@ -2512,6 +2525,7 @@ fn startSyncBatchIndexer(frame: *Frame, ids_slice: []u64) void {
             .ids = ids_slice,
             .indexer_client = frame.f95_indexer_client,
             .io = frame.io,
+            .fast_total = @intCast(ids_slice.len),
         },
         &state.pending_fast_check,
     ) catch {
@@ -2568,6 +2582,12 @@ fn fastCheckWorker(job: *FastCheckJob) void {
             }
         }
         i = chunk_end;
+        // Surface pre-flight progress to the bottom-bar indicator. The
+        // UI is otherwise blind during this phase (no sync slot, no
+        // queue yet), so without this the bar sits at "Ready" while a
+        // big library grinds through dozens of `/fast` chunks.
+        p.fast_done.store(@intCast(i), .release);
+        job_mod.refreshDebounced(job.win, @src());
     }
 
     p.last_changes = last_changes;

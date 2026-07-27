@@ -116,7 +116,10 @@ pub const Store = struct {
             .sha256 = sha_hex,
             .relpath = relpath_owned,
             .size = bytes.len,
-            .mode = 0o644,
+            // Capture the file's REAL permission bits so undo can put the
+            // exec bit back — the old hardcoded 0o644 left restored
+            // launcher scripts/binaries non-executable.
+            .mode = statModeOf(self.io, full),
             .was_symlink = false,
             .symlink_target = null,
         };
@@ -172,6 +175,10 @@ pub const Store = struct {
         if (!std.mem.eql(u8, verify_hex, rec.sha256)) return errs.Error.BackupMismatch;
 
         try writeBytes(self.io, dest, bytes);
+        // Put the original permission bits back (notably the exec bit) —
+        // writeBytes creates with default perms, so without this an undo
+        // of a fix on an executable would leave it non-runnable.
+        applyMode(self.io, dest, rec.mode);
     }
 
     /// Re-hash a backup snapshot and verify it matches the record.
@@ -227,6 +234,32 @@ fn writeBytes(io: std.Io, path: []const u8, bytes: []const u8) errs.Error!void {
     var fw = f.writer(io, &fw_buf);
     fw.interface.writeAll(bytes) catch return errs.Error.IoError;
     fw.interface.flush() catch return errs.Error.IoError;
+}
+
+/// Best-effort POSIX permission bits of `path` for the BackupRecord.
+/// Returns 0 on non-POSIX platforms (Windows Permissions has no
+/// exec-bit concept) or on stat failure — restore treats 0 as "leave
+/// default perms". The `comptime @hasDecl` guard keeps the POSIX-only
+/// `toMode` call from being analyzed on Windows.
+fn statModeOf(io: std.Io, path: []const u8) u32 {
+    const Perms = std.Io.File.Permissions;
+    if (comptime @hasDecl(Perms, "toMode")) {
+        const st = std.Io.Dir.cwd().statFile(io, path, .{}) catch return 0;
+        return @intCast(st.permissions.toMode() & 0o7777);
+    }
+    return 0;
+}
+
+/// Re-apply recorded permission bits to `path` after a restore. No-op
+/// when `mode` is 0 or on non-POSIX platforms.
+fn applyMode(io: std.Io, path: []const u8, mode: u32) void {
+    const Perms = std.Io.File.Permissions;
+    if (comptime @hasDecl(Perms, "fromMode")) {
+        if (mode == 0) return;
+        var f = std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_write }) catch return;
+        defer f.close(io);
+        f.setPermissions(io, Perms.fromMode(@intCast(mode))) catch {};
+    }
 }
 
 fn sha256OfBytes(bytes: []const u8) [32]u8 {

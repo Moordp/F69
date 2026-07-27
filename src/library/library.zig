@@ -75,7 +75,7 @@ pub const Library = struct {
         conn.exec("PRAGMA cache_size = -65536") catch return errs.Error.SchemaMigrationFailed;
         conn.exec("PRAGMA mmap_size = 268435456") catch return errs.Error.SchemaMigrationFailed;
         conn.exec("PRAGMA temp_store = MEMORY") catch return errs.Error.SchemaMigrationFailed;
-        runMigrations(alloc, &conn) catch return errs.Error.SchemaMigrationFailed;
+        runMigrations(alloc, &conn, db_path) catch return errs.Error.SchemaMigrationFailed;
         return .{ .alloc = alloc, .conn = conn };
     }
 
@@ -178,10 +178,16 @@ pub const Library = struct {
         return self.conn.inner.changes() > 0;
     }
 
-    /// INSERT OR REPLACE — upsert by f95_thread_id (primary key).
+    /// Upsert by f95_thread_id (primary key). Uses INSERT … ON CONFLICT
+    /// DO UPDATE, NOT `INSERT OR REPLACE`: REPLACE is implemented as
+    /// DELETE-then-INSERT, and `installs.game_thread_id REFERENCES
+    /// games(...) ON DELETE CASCADE` (with foreign_keys ON) means the
+    /// delete would cascade-wipe every install row for this game on every
+    /// sync — the "sync forgot my installs" bug. DO UPDATE mutates the row
+    /// in place, so the FK delete never fires and children survive.
     pub fn upsertGame(self: *Library, g: *const dom.Game) errs.Error!void {
         const sql =
-            \\INSERT OR REPLACE INTO games (
+            \\INSERT INTO games (
             \\  f95_thread_id, name, developer, cover_url, description_md,
             \\  tags_json, rating, vote_count, user_rating,
             \\  completion_status, engine, latest_version,
@@ -192,6 +198,24 @@ pub const Library = struct {
             \\  auto_update, mod_backup_mode, last_indexer_change,
             \\  last_indexer_parser_version, last_played_version, pinned_version, status_changed_at
             \\) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            \\ON CONFLICT(f95_thread_id) DO UPDATE SET
+            \\  name=excluded.name, developer=excluded.developer, cover_url=excluded.cover_url,
+            \\  description_md=excluded.description_md, tags_json=excluded.tags_json,
+            \\  rating=excluded.rating, vote_count=excluded.vote_count, user_rating=excluded.user_rating,
+            \\  completion_status=excluded.completion_status, engine=excluded.engine,
+            \\  latest_version=excluded.latest_version, sandbox=excluded.sandbox,
+            \\  last_played_at=excluded.last_played_at, total_playtime_s=excluded.total_playtime_s,
+            \\  last_scraped_at=excluded.last_scraped_at, created_at=excluded.created_at,
+            \\  notes=excluded.notes, screenshots_json=excluded.screenshots_json,
+            \\  changelog_md=excluded.changelog_md, reviews_md=excluded.reviews_md,
+            \\  download_links_json=excluded.download_links_json, dev_status=excluded.dev_status,
+            \\  downloads_md=excluded.downloads_md, last_updated_at=excluded.last_updated_at,
+            \\  thread_info_md=excluded.thread_info_md, censored=excluded.censored,
+            \\  auto_update=excluded.auto_update, mod_backup_mode=excluded.mod_backup_mode,
+            \\  last_indexer_change=excluded.last_indexer_change,
+            \\  last_indexer_parser_version=excluded.last_indexer_parser_version,
+            \\  last_played_version=excluded.last_played_version, pinned_version=excluded.pinned_version,
+            \\  status_changed_at=excluded.status_changed_at
         ;
         const tags_json = try self.encodeTagsJson(g.tags);
         defer self.alloc.free(tags_json);
@@ -1655,7 +1679,7 @@ const migrations = [_]Migration{
     },
 };
 
-fn runMigrations(alloc: std.mem.Allocator, conn: *dbu.Conn) !void {
+fn runMigrations(alloc: std.mem.Allocator, conn: *dbu.Conn, db_path: []const u8) !void {
     // Make sure the version table exists. CREATE IF NOT EXISTS is idempotent.
     try conn.exec(
         \\CREATE TABLE IF NOT EXISTS _schema_version (
@@ -1684,7 +1708,38 @@ fn runMigrations(alloc: std.mem.Allocator, conn: *dbu.Conn) !void {
         return error.SchemaTooNew;
     }
 
-    // Apply pending migrations in order.
+    // Anything to do?
+    var pending: u32 = 0;
+    for (migrations) |m| {
+        if (m.id > max_applied) pending += 1;
+    }
+    if (pending == 0) {
+        log.info("no pending migrations (at {d})", .{max_applied});
+        return;
+    }
+
+    // Pre-migration snapshot (best-effort, defense in depth). The
+    // per-migration transaction below already makes each step atomic —
+    // a crash rolls back cleanly and leaves the DB untouched — so this
+    // exists only to recover from a migration that SUCCEEDS but
+    // transforms data wrongly. VACUUM INTO is WAL-safe and lands beside
+    // the DB (whose dir already exists). Skipped for in-memory DBs and
+    // for a fresh DB (max_applied == 0) that has no user data to protect.
+    if (max_applied > 0 and !std.mem.eql(u8, db_path, ":memory:")) {
+        const bak = std.fmt.allocPrint(alloc, "{s}.premig-{d}-to-{d}.bak", .{ db_path, max_applied, declared_max }) catch null;
+        if (bak) |dest| {
+            defer alloc.free(dest);
+            vacuumInto(alloc, conn, dest) catch |e|
+                log.warn("pre-migration backup to '{s}' failed: {s} (continuing — migrations are atomic)", .{ dest, @errorName(e) });
+        }
+    }
+
+    // Apply pending migrations in order — each in its OWN transaction so
+    // a crash or error mid-migration rolls the whole step back (schema +
+    // the _schema_version record together). Without this, a crash between
+    // a DROP and its RENAME could lose a table, or a crash between the
+    // DDL and the version-record insert could re-run an ALTER on the next
+    // start and soft-brick with a duplicate-column error.
     var applied_now: u32 = 0;
     for (migrations) |m| {
         if (m.id <= max_applied) continue;
@@ -1696,24 +1751,66 @@ fn runMigrations(alloc: std.mem.Allocator, conn: *dbu.Conn) !void {
         std.crypto.hash.sha2.Sha256.hash(m.sql, &sha, .{});
         const hex = std.fmt.bytesToHex(sha, .lower);
 
-        try conn.execScript(alloc, m.sql);
-
-        // Record the migration.
-        const ins = std.fmt.allocPrint(
-            alloc,
-            "INSERT INTO _schema_version (id, hash, applied_at) VALUES ({d}, '{s}', {d})",
-            .{ m.id, hex[0..], unixSecondsApprox() },
-        ) catch return error.OutOfMemory;
-        defer alloc.free(ins);
-        try conn.exec(ins);
+        // FK enforcement must be toggled OUTSIDE the transaction — SQLite
+        // treats `PRAGMA foreign_keys` as a no-op while a transaction is
+        // active. Migration 10 rebuilds a table (DROP/RENAME) and needs FK
+        // off so a child table's cascade doesn't wipe rows mid-rebuild; do
+        // it for every migration so the PRAGMAs embedded in that SQL become
+        // harmless no-ops and no rebuild can cascade.
+        conn.exec("PRAGMA foreign_keys = OFF") catch {};
+        conn.exec("BEGIN") catch return error.ExecFailed;
+        applyMigration(alloc, conn, m, hex[0..]) catch |e| {
+            conn.exec("ROLLBACK") catch {};
+            conn.exec("PRAGMA foreign_keys = ON") catch {};
+            log.err("migration {d} failed: {s} — rolled back, DB left unchanged", .{ m.id, @errorName(e) });
+            return e;
+        };
+        conn.exec("COMMIT") catch |e| {
+            conn.exec("ROLLBACK") catch {};
+            conn.exec("PRAGMA foreign_keys = ON") catch {};
+            log.err("migration {d} commit failed: {s} — rolled back", .{ m.id, @errorName(e) });
+            return e;
+        };
+        conn.exec("PRAGMA foreign_keys = ON") catch {};
 
         applied_now += 1;
         log.info("migration {d} applied", .{m.id});
     }
+}
 
-    if (applied_now == 0) {
-        log.info("no pending migrations (at {d})", .{max_applied});
+/// Run one migration's SQL and record it in `_schema_version`. Called
+/// inside an open transaction so the schema change and its version
+/// record commit or roll back together.
+fn applyMigration(alloc: std.mem.Allocator, conn: *dbu.Conn, m: Migration, hex: []const u8) !void {
+    try conn.execScript(alloc, m.sql);
+    const ins = std.fmt.allocPrint(
+        alloc,
+        "INSERT INTO _schema_version (id, hash, applied_at) VALUES ({d}, '{s}', {d})",
+        .{ m.id, hex, unixSecondsApprox() },
+    ) catch return error.OutOfMemory;
+    defer alloc.free(ins);
+    try conn.exec(ins);
+}
+
+/// `VACUUM INTO 'dest'` with single-quote escaping. dest must not
+/// already exist (SQLite refuses to overwrite). Used for the
+/// pre-migration snapshot.
+fn vacuumInto(alloc: std.mem.Allocator, conn: *dbu.Conn, dest: []const u8) !void {
+    const q_count = std.mem.count(u8, dest, "'");
+    const escaped = alloc.alloc(u8, dest.len + q_count) catch return error.OutOfMemory;
+    defer alloc.free(escaped);
+    var j: usize = 0;
+    for (dest) |c| {
+        escaped[j] = c;
+        j += 1;
+        if (c == '\'') {
+            escaped[j] = '\'';
+            j += 1;
+        }
     }
+    const sql = std.fmt.allocPrint(alloc, "VACUUM INTO '{s}'", .{escaped}) catch return error.OutOfMemory;
+    defer alloc.free(sql);
+    conn.inner.exec(sql, .{}) catch return error.ExecFailed;
 }
 
 /// Coarse wall-clock seconds. Avoids std.time API churn between Zig
@@ -1949,6 +2046,33 @@ test "library: backupTo produces a populated snapshot" {
     defer restored.freeGames(games);
     try std.testing.expectEqual(@as(usize, 1), games.len);
     try std.testing.expectEqualStrings("Backup Me", games[0].name);
+}
+
+test "library: upsertGame preserves existing installs (no cascade delete)" {
+    const gpa = std.testing.allocator;
+    var lib = try Library.open(gpa, ":memory:");
+    defer lib.close();
+
+    try lib.upsertGame(&.{ .f95_thread_id = 7, .name = "G" });
+    try lib.upsertInstall(&.{
+        .id = [_]u8{'a'} ** 36,
+        .game_thread_id = 7,
+        .version = "1.0",
+        .install_path = "/tmp/x",
+        .recipe_id = "",
+        .installed_at = 1,
+        .source = .manual,
+    });
+
+    // Re-upsert the game the way a sync's applyScrape does. With the old
+    // INSERT OR REPLACE this cascade-deleted the install row (FK ON DELETE
+    // CASCADE); the ON CONFLICT DO UPDATE must leave it intact.
+    try lib.upsertGame(&.{ .f95_thread_id = 7, .name = "G (synced)" });
+
+    const installs = try lib.listInstalls(7);
+    defer lib.freeInstalls(installs);
+    try std.testing.expectEqual(@as(usize, 1), installs.len);
+    try std.testing.expectEqualStrings("1.0", installs[0].version);
 }
 
 test "library: tag color override round-trip" {

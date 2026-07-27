@@ -1927,6 +1927,26 @@ pub fn doImportSaves(frame: *Frame, game: *const library.Game) void {
         state.setLaunchMsg("Saves path buffer overflow.");
         return;
     };
+
+    // Import writes files into the sandbox HOME with truncate — an
+    // in-place merge over whatever saves are already there. If that
+    // directory already holds the player's current saves, snapshot them
+    // FIRST so an accidental import of an older backup is recoverable.
+    // A failed pre-import backup aborts the import (safety over convenience).
+    if (dirHasEntries(frame.io, sandbox_home)) {
+        const ts = backupTimestamp(frame.io);
+        var bak_buf: [800]u8 = undefined;
+        const bak = std.fmt.bufPrint(&bak_buf, "{s}/save-backups/{d}/pre-import-{s}", .{ frame.info.data_root, game.f95_thread_id, ts }) catch {
+            state.setLaunchMsg("Pre-import backup path buffer overflow — import aborted.");
+            return;
+        };
+        copyTreePlain(alloc, frame.io, sandbox_home, bak) catch |e| {
+            var buf: [224]u8 = undefined;
+            state.setLaunchMsg(std.fmt.bufPrint(&buf, "Couldn't back up existing saves ({s}) — import aborted to protect them.", .{@errorName(e)}) catch "Pre-import backup failed — import aborted");
+            return;
+        };
+    }
+
     std.Io.Dir.cwd().createDirPath(frame.io, sandbox_home) catch |e| {
         var buf: [192]u8 = undefined;
         state.setLaunchMsg(std.fmt.bufPrint(&buf, "Sandbox HOME mkdir failed: {s}", .{@errorName(e)}) catch "mkdir failed");
@@ -1938,7 +1958,7 @@ pub fn doImportSaves(frame: *Frame, game: *const library.Game) void {
         return;
     };
     var ok: [256]u8 = undefined;
-    state.setLaunchMsg(std.fmt.bufPrint(&ok, "Saves imported into sandbox HOME from {s}", .{picked}) catch "Saves imported");
+    state.setLaunchMsg(std.fmt.bufPrint(&ok, "Saves imported into sandbox HOME from {s} (existing saves, if any, were backed up first)", .{picked}) catch "Saves imported");
 }
 
 /// Pure-ish: produce a stable "YYYYMMDD-HHMMSS"-shaped string. Uses
@@ -1949,6 +1969,17 @@ fn backupTimestamp(io: std.Io) [24]u8 {
     const secs = @divTrunc(ts.raw.toNanoseconds(), 1_000_000_000);
     _ = std.fmt.bufPrint(&out, "{d}", .{secs}) catch return out;
     return out;
+}
+
+/// True if `path` exists as a directory and contains at least one
+/// entry. Used to decide whether importing saves would clobber an
+/// existing (non-empty) sandbox HOME. Any open/iterate error → false
+/// (treat as "nothing worth protecting").
+fn dirHasEntries(io: std.Io, path: []const u8) bool {
+    var d = std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch return false;
+    defer d.close(io);
+    var it = d.iterate();
+    return (it.next(io) catch return false) != null;
 }
 
 /// Simple recursive copy: directories + files, preserves modes, no
@@ -1980,6 +2011,7 @@ fn copyTreePlain(alloc: std.mem.Allocator, io: std.Io, src: []const u8, dest: []
 fn copyOneFile(io: std.Io, src: []const u8, dest: []const u8) !void {
     var in = try std.Io.Dir.cwd().openFile(io, src, .{ .mode = .read_only });
     defer in.close(io);
+    const expected_size = (in.stat(io) catch return error.StatFailed).size;
     if (std.fs.path.dirname(dest)) |d| try std.Io.Dir.cwd().createDirPath(io, d);
     var out = try std.Io.Dir.cwd().createFile(io, dest, .{ .truncate = true });
     defer out.close(io);
@@ -1989,14 +2021,20 @@ fn copyOneFile(io: std.Io, src: []const u8, dest: []const u8) !void {
     var wr_buf: [64 * 1024]u8 = undefined;
     var in_reader = in.reader(io, &rd_buf);
     var out_writer = out.writer(io, &wr_buf);
+    var copied: u64 = 0;
     while (true) {
-        // readSliceShort aliases its source if the destination is the
-        // reader's own backing buffer — keep them distinct.
-        const got = in_reader.interface.readSliceShort(&chunk) catch break;
+        // A read error MUST propagate, not be swallowed as EOF: swallowing
+        // silently truncates the save backup/import while the caller still
+        // reports success. readSliceShort aliases its source if the
+        // destination is the reader's own backing buffer — keep them distinct.
+        const got = try in_reader.interface.readSliceShort(&chunk);
         if (got == 0) break;
         try out_writer.interface.writeAll(chunk[0..got]);
+        copied += got;
     }
     try out_writer.interface.flush();
+    // Guard against a silent short read leaving a truncated copy.
+    if (copied != expected_size) return error.ShortCopy;
     const st = in.stat(io) catch return;
     try out.setPermissions(io, st.permissions);
 }
@@ -2144,8 +2182,28 @@ fn spawnXdgOpen(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !void {
         fn run(a: *ReaperArgs) void {
             defer a.alloc.free(a.path);
             defer a.alloc.destroy(a);
+            // Per-OS file-manager / opener: Windows opens Explorer (or the
+            // default handler) via `start`, macOS via `open`, Linux via
+            // `xdg-open`. A literal `xdg-open` doesn't exist off Linux.
+            var argv_buf: [5][]const u8 = undefined;
+            const open_argv: []const []const u8 = switch (builtin.os.tag) {
+                .windows => blk: {
+                    argv_buf = .{ "cmd", "/c", "start", "", a.path };
+                    break :blk argv_buf[0..5];
+                },
+                .macos => blk: {
+                    argv_buf[0] = "open";
+                    argv_buf[1] = a.path;
+                    break :blk argv_buf[0..2];
+                },
+                else => blk: {
+                    argv_buf[0] = "xdg-open";
+                    argv_buf[1] = a.path;
+                    break :blk argv_buf[0..2];
+                },
+            };
             var child = std.process.spawn(a.io, .{
-                .argv = &.{ "xdg-open", a.path },
+                .argv = open_argv,
                 .stdin = .ignore,
                 .stdout = .ignore,
                 .stderr = .ignore,

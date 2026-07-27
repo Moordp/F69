@@ -288,6 +288,13 @@ pub const FastCheckPayload = struct {
     /// `job.alloc`; ownership transfers to onDone which frees it.
     last_changes: ?[]i64 = null,
     err_name: ?[]const u8 = null,
+    /// Live progress for the bottom-bar indicator: `fast_done` is the
+    /// count of IDs the worker has finished `/fast`-checking, bumped
+    /// per chunk; `fast_total` is the batch size, set once by the UI
+    /// thread before spawn. The pre-flight has no per-game name, so the
+    /// bar is purely count-driven (done/total).
+    fast_done: std.atomic.Value(u32) = .init(0),
+    fast_total: u32 = 0,
 };
 pub const FastCheckJob = Job(FastCheckPayload);
 

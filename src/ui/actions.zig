@@ -126,6 +126,9 @@ pub const resolveFolderEntry = imports.resolveFolderEntry;
 pub const parseF95ThreadInput = imports.parseF95ThreadInput;
 pub const freeFolderScan = imports.freeFolderScan;
 pub const drainImport = imports.drainImport;
+pub const drainFolderImport = imports.drainFolderImport;
+pub const cancelFolderImport = imports.cancelFolderImport;
+pub const folderImportActive = imports.folderImportActive;
 
 // ---- Common glue ----
 pub const cancelAllWorkers = common.cancelAllWorkers;
@@ -150,6 +153,7 @@ pub const persistSandboxDefaultIfDirty = common.persistSandboxDefaultIfDirty;
 pub const persistAutoUpdateDefaultIfDirty = common.persistAutoUpdateDefaultIfDirty;
 pub const persistDesktopNotificationsIfDirty = common.persistDesktopNotificationsIfDirty;
 pub const persistRefreshBackendIfDirty = common.persistRefreshBackendIfDirty;
+pub const persistUpdateCheckSourceIfDirty = common.persistUpdateCheckSourceIfDirty;
 pub const persistMaxParallelSyncIfDirty = common.persistMaxParallelSyncIfDirty;
 pub const persistMaxParallelImageIfDirty = common.persistMaxParallelImageIfDirty;
 pub const persistMinSessionSecondsIfDirty = common.persistMinSessionSecondsIfDirty;

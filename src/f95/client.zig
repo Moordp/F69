@@ -25,6 +25,17 @@ pub const Client = struct {
     /// round-trip (it only borrows a duped copy of the cookie).
     cookie_lock: Io.Mutex = .init,
     cookie: ?[]const u8 = null,
+    /// Serializes `self.http.fetch` calls. `std.http.Client` is NOT
+    /// thread-safe — its `connection_pool` (the `used`/`free` lists) is
+    /// mutated on every open/close, so two worker threads fetching through
+    /// the one shared client race the pool and one nulls a connection the
+    /// other is about to flush → `req.connection.?` panic (seen from image
+    /// cover fetches racing a scrape). Held across the whole fetch. This
+    /// serializes HTTP, but forum requests are already 1.5s-rate-limited
+    /// and CDN image workers still parallelize decode/write around it;
+    /// re-scanning the CA bundle per request (the per-client alternative)
+    /// would be far costlier.
+    http_lock: Io.Mutex = .init,
 
     pub fn init(alloc: std.mem.Allocator, io: Io, rate_limit_ms: u64) Client {
         return .{
@@ -179,6 +190,8 @@ pub const Client = struct {
         }
         const extra_headers: []const std.http.Header = hdr_buf[0..hdr_n];
 
+        self.http_lock.lockUncancelable(self.io);
+        defer self.http_lock.unlock(self.io);
         const result = self.http.fetch(.{
             .location = .{ .url = url },
             .response_writer = &aw.writer,
@@ -240,6 +253,8 @@ pub const Client = struct {
         }
         const extra_headers: []const std.http.Header = hdr_buf[0..hdr_n];
 
+        self.http_lock.lockUncancelable(self.io);
+        defer self.http_lock.unlock(self.io);
         const result = self.http.fetch(.{
             .location = .{ .url = url },
             .method = .POST,

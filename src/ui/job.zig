@@ -127,8 +127,15 @@ pub fn Job(comptime Payload: type) type {
         /// completing in the same tick produces one redraw instead
         /// of N.
         pub fn markDone(self: *Self) void {
+            // Capture `win` BEFORE the release-store: once the store is
+            // visible, the UI reaper (drainBackgroundJob) may observe the
+            // terminal phase and `destroy(self)` before this line runs, so
+            // reading `self.win` after the store is a use-after-free. The
+            // Window itself outlives the job, so the captured pointer stays
+            // valid.
+            const win = self.win;
             self.phase.store(@intFromEnum(Phase.done), .release);
-            refreshDebounced(self.win, @src());
+            refreshDebounced(win, @src());
         }
 
         /// Worker → UI: flip to `.failed`, refresh. The payload's
@@ -136,8 +143,10 @@ pub fn Job(comptime Payload: type) type {
         /// `markFailed` itself is allocator-free so it works from
         /// any worker control path.
         pub fn markFailed(self: *Self) void {
+            // Same UAF window as markDone — capture `win` before the store.
+            const win = self.win;
             self.phase.store(@intFromEnum(Phase.failed), .release);
-            refreshDebounced(self.win, @src());
+            refreshDebounced(win, @src());
         }
 
         /// UI thread snapshot of the current phase.

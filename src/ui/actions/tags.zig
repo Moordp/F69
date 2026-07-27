@@ -81,7 +81,10 @@ fn onRefreshTagsFailed(frame: *Frame, job: *RefreshTagsJob) void {
     const state = frame.state;
     var emsg: [160]u8 = undefined;
     const m = std.fmt.bufPrint(&emsg, "tag refresh failed: {s}", .{common.friendlyError(job.payload.err_name orelse "?")}) catch "tag refresh failed";
+    state.sync_status = .err;
     state.setSyncMsg(m);
+    // Single discrete action — surface as a toast (no per-item spam risk).
+    state.notifyErr(m);
 }
 
 /// Release the master tag list back to `alloc`. Used by the refresh

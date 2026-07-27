@@ -150,16 +150,25 @@ pub fn load(arena: std.mem.Allocator, data: []const u8) Error!Value {
 
 fn readLongLE(b: []const u8) i64 {
     if (b.len == 0) return 0;
+    // `b.len` is attacker-controlled (LONG1 carries a u8 length, so up to
+    // 255). Only the low 8 bytes fit in an i64 — a longer Python long
+    // can't be represented anyway — so consume at most 8. This also keeps
+    // `shift` from wrapping past 63 (the old `u6 +%= 8` corrupted byte 8+)
+    // and keeps `b.len * 8` from overflowing the sign-extend cast (the old
+    // `@intCast` to u7 PANICKED for b.len >= 16).
+    const take = @min(b.len, 8);
     var v: i64 = 0;
-    var shift: u6 = 0;
-    for (b) |byte| {
-        v |= @as(i64, byte) << shift;
-        shift +%= 8;
+    var shift: usize = 0;
+    for (b[0..take]) |byte| {
+        v |= @as(i64, byte) << @as(u6, @intCast(shift));
+        shift += 8;
     }
-    // Sign-extend from the top bit of the last byte.
-    if (b[b.len - 1] & 0x80 != 0) {
-        const bits: u7 = @intCast(b.len * 8);
-        if (bits < 64) v -= (@as(i64, 1) << @intCast(bits));
+    // Sign-extend from the top bit of the last consumed byte. For take == 8
+    // the i64 bit pattern already carries the sign, so only adjust when the
+    // value occupies fewer than 64 bits.
+    if (take < 8 and (b[take - 1] & 0x80) != 0) {
+        const bits: u6 = @intCast(take * 8);
+        v -= (@as(i64, 1) << bits);
     }
     return v;
 }
@@ -210,11 +219,20 @@ fn appendsFromMark(arena: std.mem.Allocator, stack: *std.ArrayList(Value), marks
     stack.shrinkRetainingCapacity(m);
 }
 
+/// Upper bound on a single list/dict's element count. Real F95Checker /
+/// RPA pickles hold at most a few hundred entries; this cap only exists
+/// to keep a crafted pickle (thousands of single APPEND/SETITEM opcodes
+/// on one growing container, each re-copying the whole slice on the
+/// parse arena) from amplifying into gigabytes. Well above any legitimate
+/// input, far below a memory-exhaustion DoS.
+const MAX_CONTAINER_LEN: usize = 1 << 20;
+
 fn appendToList(arena: std.mem.Allocator, list_val: *Value, extra: []const Value) Error!void {
     const old = switch (list_val.*) {
         .list => |l| l,
         else => return Error.Unsupported,
     };
+    if (old.len + extra.len > MAX_CONTAINER_LEN) return Error.Unsupported;
     const merged = try arena.alloc(Value, old.len + extra.len);
     @memcpy(merged[0..old.len], old);
     @memcpy(merged[old.len..], extra);
@@ -248,6 +266,7 @@ fn addPairs(arena: std.mem.Allocator, dict_val: *Value, extra: []const Pair) Err
         .dict => |d| d,
         else => return Error.Unsupported,
     };
+    if (old.len + extra.len > MAX_CONTAINER_LEN) return Error.Unsupported;
     const merged = try arena.alloc(Pair, old.len + extra.len);
     @memcpy(merged[0..old.len], old);
     @memcpy(merged[old.len..], extra);
