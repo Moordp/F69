@@ -202,6 +202,8 @@ pub const drainBookmarks = bookmarks.drainBookmarks;
 
 // ---- Auth ----
 pub const doLogin = auth.doLogin;
+pub const doSubmitTotp = auth.doSubmitTotp;
+pub const cancelTwoStep = auth.cancelTwoStep;
 pub const doLoginWithCookie = auth.doLoginWithCookie;
 pub const doOpenF95Login = auth.doOpenF95Login;
 pub const doLogout = auth.doLogout;

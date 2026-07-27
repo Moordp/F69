@@ -710,6 +710,28 @@ fn renderF95LoginCard(frame: *Frame) void {
         return;
     }
 
+    // Two-step (TOTP) challenge in progress → show only the code prompt.
+    if (state.two_step_pending) {
+        dvui.labelNoFmt(@src(), "Enter the code from your authenticator app:", .{}, .{ .color_text = td(t.ink) });
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
+        {
+            const te = style.textEntry(@src(), .{
+                .text = .{ .buffer = &state.two_step_code_buf },
+                .placeholder = "123456",
+            }, .{ .expand = .horizontal, .id_extra = 0xCB05 });
+            te.deinit();
+        }
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 10 } });
+        if (style.button(@src(), "Verify code", .{}, .{ .style = .highlight })) {
+            actions.doSubmitTotp(frame, state.f95TwoStepCodeSlice());
+        }
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
+        if (style.button(@src(), "Cancel", .{}, .{ .expand = .horizontal })) {
+            actions.cancelTwoStep(frame);
+        }
+        return;
+    }
+
     // Signed out → password form, or the cookie form (the 2FA / passkey
     // workaround). A link at the bottom toggles between them.
     if (!state.f95_login_use_cookie) {

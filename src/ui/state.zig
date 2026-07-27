@@ -1239,6 +1239,12 @@ pub const State = struct {
     /// When true, the F95 login card shows the cookie form instead of the
     /// username/password form.
     f95_login_use_cookie: bool = false,
+    /// Two-step (TOTP) challenge in progress: the login card shows a code
+    /// field. `two_step_carry` holds the challenge-session cookies (owned by
+    /// the gpa) to hand to `submitTwoStep`; freed on submit / cancel / logout.
+    two_step_pending: bool = false,
+    two_step_carry: ?[]u8 = null,
+    two_step_code_buf: [16]u8 = [_]u8{0} ** 16,
     login_status: LoginStatus = .unknown,
     login_msg: buf_mod.MessageBuf(128) = .{},
     /// Donor-tier check result. `null` = not yet probed (either
@@ -1661,6 +1667,10 @@ pub const State = struct {
     pub fn f95UserSlice(self: *State) []u8 {
         const end = std.mem.indexOfScalar(u8, &self.f95_user_buf, 0) orelse self.f95_user_buf.len;
         return self.f95_user_buf[0..end];
+    }
+    pub fn f95TwoStepCodeSlice(self: *State) []u8 {
+        const end = std.mem.indexOfScalar(u8, &self.two_step_code_buf, 0) orelse self.two_step_code_buf.len;
+        return self.two_step_code_buf[0..end];
     }
     pub fn f95CookieUserSlice(self: *State) []u8 {
         const end = std.mem.indexOfScalar(u8, &self.f95_cookie_user_buf, 0) orelse self.f95_cookie_user_buf.len;

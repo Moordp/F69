@@ -25,9 +25,16 @@ pub const Service = struct {
         return bookmarks.fetchAll(self.client, self.alloc, progress);
     }
 
-    pub fn login(self: *Service, io: std.Io, creds: auth.Credentials) errs.Error![]u8 {
-        // `auth.login` already calls `client.setCookie` on success.
+    pub fn login(self: *Service, io: std.Io, creds: auth.Credentials) errs.Error!auth.LoginResult {
+        // `auth.login` calls `client.setCookie` on the `.ok` variant; `.two_step`
+        // returns challenge cookies for `submitTwoStep`.
         return auth.login(self.client, self.alloc, io, creds);
+    }
+
+    /// Complete a two-step (TOTP) challenge started by `login`. Returns the
+    /// authenticated cookie (applied to the client) for the caller to persist.
+    pub fn submitTwoStep(self: *Service, io: std.Io, carry_cookies: []const u8, code: []const u8) errs.Error![]u8 {
+        return auth.submitTwoStep(self.client, self.alloc, io, carry_cookies, code);
     }
 
     /// Sign in with a session cookie the user copied from their browser (the

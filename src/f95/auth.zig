@@ -26,17 +26,30 @@ pub const Credentials = struct {
 
 const LOGIN_PAGE_URL = "https://f95zone.to/login/";
 const LOGIN_POST_URL = "https://f95zone.to/login/login";
+const TWO_STEP_URL = "https://f95zone.to/login/two-step";
 const USER_AGENT = @import("client.zig").USER_AGENT;
 
-/// Run the full login dance. On success returns the combined
-/// `xf_*` cookie value (allocator-owned) and applies it to `client`.
-/// Caller frees the slice.
+/// Outcome of a password login. Either we got an authenticated cookie, or the
+/// account has 2FA and F95 returned a two-step challenge that needs a code
+/// submitted via `submitTwoStep`.
+pub const LoginResult = union(enum) {
+    /// Combined authenticated `xf_*` cookie (owned). Already applied to the
+    /// client. Caller persists + frees.
+    ok: []u8,
+    /// 2FA required. Carries the challenge-session cookies (owned) to hand to
+    /// `submitTwoStep` along with the user's code. NOT yet authenticated.
+    two_step: []u8,
+};
+
+/// Run the password login dance. Returns `.ok` with the authenticated cookie
+/// (applied to `client`), or `.two_step` when the account needs a 2FA code.
+/// Caller frees the owned slice in whichever variant.
 pub fn login(
     client: *Client,
     alloc: std.mem.Allocator,
     io: Io,
     creds: Credentials,
-) errs.Error![]u8 {
+) errs.Error!LoginResult {
     log.debug("login: user='{s}' (pw len={d})", .{ creds.username, creds.password.len });
 
     var http: std.http.Client = .{ .allocator = alloc, .io = io };
@@ -55,11 +68,70 @@ pub fn login(
     defer alloc.free(body);
 
     log.debug("login step 3/3: POST {s} (body {d} bytes)", .{ LOGIN_POST_URL, body.len });
-    const cookie = try postLogin(&http, alloc, body, token_and_cookies.cookies);
-    errdefer alloc.free(cookie);
+    const post = try postLogin(&http, alloc, body, token_and_cookies.cookies);
+    defer alloc.free(post.body_head);
+    errdefer alloc.free(post.cookies);
 
+    if (post.has_xf_user) {
+        try client.setCookie(post.cookies);
+        log.info("F95 login OK ({d}-byte cookie)", .{post.cookies.len});
+        return .{ .ok = post.cookies };
+    }
+
+    // No xf_user. Two-step (2FA) challenge, or just bad credentials? XenForo's
+    // JSON reply for a 2FA account carries a redirect to /login/two-step.
+    if (std.mem.indexOf(u8, post.body_head, "two-step") != null or
+        std.mem.indexOf(u8, post.body_head, "two_step") != null or
+        std.mem.indexOf(u8, post.body_head, "totp") != null)
+    {
+        // Carry both the GET's xf_csrf and the POST's challenge-session
+        // cookies into the two-step requests.
+        const carry = try mergeCookies(alloc, token_and_cookies.cookies, post.cookies);
+        alloc.free(post.cookies);
+        log.info("F95 login: two-step (2FA) challenge detected — carry cookies {d}B", .{carry.len});
+        return .{ .two_step = carry };
+    }
+
+    log.warn("login rejected — no xf_user cookie and no two-step marker (bad credentials)", .{});
+    // `errdefer alloc.free(post.cookies)` frees on this error return — don't
+    // free explicitly here or it's a double-free.
+    return errs.Error.AuthRequired;
+}
+
+/// Complete a two-step (TOTP) challenge. `carry_cookies` comes from
+/// `LoginResult.two_step`; `code` is the 6-digit authenticator code. On
+/// success returns the authenticated cookie (applied to `client`) — same
+/// shape as a password login.
+pub fn submitTwoStep(
+    client: *Client,
+    alloc: std.mem.Allocator,
+    io: Io,
+    carry_cookies: []const u8,
+    code: []const u8,
+) errs.Error![]u8 {
+    var http: std.http.Client = .{ .allocator = alloc, .io = io };
+    defer http.deinit();
+
+    // Step 1: GET the two-step page to read a fresh _xfToken + provider, and
+    // pick up any cookies it sets.
+    log.debug("two-step 1/2: GET {s}", .{TWO_STEP_URL});
+    const page = try fetchTwoStep(&http, alloc, carry_cookies);
+    defer alloc.free(page.token);
+    defer alloc.free(page.provider);
+    defer alloc.free(page.cookies);
+
+    const carry2 = try mergeCookies(alloc, carry_cookies, page.cookies);
+    defer alloc.free(carry2);
+
+    // Step 2: POST the code.
+    log.debug("two-step 2/2: POST {s} (provider='{s}', code len={d})", .{ TWO_STEP_URL, page.provider, code.len });
+    const body = try buildTwoStepBody(alloc, code, page.provider, page.token);
+    defer alloc.free(body);
+
+    const cookie = try postTwoStep(&http, alloc, body, carry2);
+    errdefer alloc.free(cookie);
     try client.setCookie(cookie);
-    log.info("F95 login OK ({d}-byte cookie)", .{cookie.len});
+    log.info("F95 two-step OK ({d}-byte cookie)", .{cookie.len});
     return cookie;
 }
 
@@ -250,7 +322,18 @@ fn appendUrlEncoded(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, value: []
 
 // ----- step 3: POST + capture Set-Cookie -----
 
-fn postLogin(http: *std.http.Client, alloc: std.mem.Allocator, form_body: []const u8, carry_cookies: []const u8) errs.Error![]u8 {
+const PostResult = struct {
+    /// `xf_*` cookies captured from the POST response (owned). On a 2FA
+    /// account these are the challenge-session cookies (no xf_user yet).
+    cookies: []u8,
+    /// True when an `xf_user` cookie was set — i.e. fully authenticated.
+    has_xf_user: bool,
+    /// First ~16 KB of the decompressed response body (owned), used to tell a
+    /// two-step challenge apart from bad credentials + for live diagnostics.
+    body_head: []u8,
+};
+
+fn postLogin(http: *std.http.Client, alloc: std.mem.Allocator, form_body: []const u8, carry_cookies: []const u8) errs.Error!PostResult {
     const uri = std.Uri.parse(LOGIN_POST_URL) catch return errs.Error.NetworkError;
 
     // Build the header set: content-type + accept + identity encoding
@@ -347,20 +430,226 @@ fn postLogin(http: *std.http.Client, alloc: std.mem.Allocator, form_body: []cons
         &decompress_state,
         &decompress_buf,
     );
-    var peek_buf: [256]u8 = undefined;
-    const peek_len = body_reader.readSliceShort(&peek_buf) catch 0;
-    _ = body_reader.discardRemaining() catch {};
-    if (peek_len > 0) log.debug("login response body head: '{s}'", .{peek_buf[0..peek_len]});
+    // Read up to ~16 KB of the body. The caller inspects it to tell a
+    // two-step (2FA) challenge apart from bad credentials; it's also logged
+    // for live diagnostics of the real XenForo response.
+    const body_head = readBodyHead(body_reader, alloc, 16 * 1024) catch
+        (alloc.dupe(u8, "") catch return errs.Error.OutOfMemory);
+    if (body_head.len > 0) log.debug("login response body head ({d}B): '{s}'", .{
+        body_head.len, body_head[0..@min(512, body_head.len)],
+    });
 
-    // Login failure: XF returns 200 with a JSON `{"status":"error",…}`
-    // body and *no* xf_user cookie. Turn that into AuthRequired.
-    // The `errdefer jar.deinit(alloc)` above handles the cleanup —
-    // don't deinit explicitly here or we'd double-free.
-    if (jar.items.len == 0 or std.mem.indexOf(u8, jar.items, "xf_user=") == null) {
-        log.warn("login rejected — no xf_user cookie in response", .{});
-        return errs.Error.AuthRequired;
+    const has_xf_user = jar.items.len > 0 and std.mem.indexOf(u8, jar.items, "xf_user=") != null;
+    const cookies = jar.toOwnedSlice(alloc) catch {
+        alloc.free(body_head);
+        return errs.Error.OutOfMemory;
+    };
+    return .{ .cookies = cookies, .has_xf_user = has_xf_user, .body_head = body_head };
+}
+
+/// Read + own up to `limit` bytes of a body, then drain the rest.
+fn readBodyHead(reader: anytype, alloc: std.mem.Allocator, limit: usize) errs.Error![]u8 {
+    var acc: std.ArrayList(u8) = .empty;
+    errdefer acc.deinit(alloc);
+    while (acc.items.len < limit) {
+        var chunk: [4096]u8 = undefined;
+        const want = @min(chunk.len, limit - acc.items.len);
+        const got = reader.readSliceShort(chunk[0..want]) catch break;
+        if (got == 0) break;
+        acc.appendSlice(alloc, chunk[0..got]) catch return errs.Error.OutOfMemory;
+    }
+    _ = reader.discardRemaining() catch {};
+    return acc.toOwnedSlice(alloc) catch errs.Error.OutOfMemory;
+}
+
+/// Merge two "a=b; c=d" cookie strings, de-duplicating by name (later wins).
+fn mergeCookies(alloc: std.mem.Allocator, first: []const u8, second: []const u8) errs.Error![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    // Emit `second` first (fresher), then any name from `first` not already seen.
+    appendCookiePairs(&out, alloc, second) catch return errs.Error.OutOfMemory;
+    var it = std.mem.splitSequence(u8, first, "; ");
+    while (it.next()) |pair| {
+        if (pair.len == 0) continue;
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
+        const name = pair[0..eq];
+        if (cookieHasName(out.items, name)) continue;
+        if (out.items.len > 0) out.appendSlice(alloc, "; ") catch return errs.Error.OutOfMemory;
+        out.appendSlice(alloc, pair) catch return errs.Error.OutOfMemory;
+    }
+    return out.toOwnedSlice(alloc) catch errs.Error.OutOfMemory;
+}
+
+fn appendCookiePairs(out: *std.ArrayList(u8), alloc: std.mem.Allocator, cookies: []const u8) !void {
+    var it = std.mem.splitSequence(u8, cookies, "; ");
+    while (it.next()) |pair| {
+        if (pair.len == 0) continue;
+        if (out.items.len > 0) try out.appendSlice(alloc, "; ");
+        try out.appendSlice(alloc, pair);
+    }
+}
+
+fn cookieHasName(cookies: []const u8, name: []const u8) bool {
+    var it = std.mem.splitSequence(u8, cookies, "; ");
+    while (it.next()) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse pair.len;
+        if (std.mem.eql(u8, pair[0..eq], name)) return true;
+    }
+    return false;
+}
+
+// ----- two-step (TOTP) helpers -----
+
+const TwoStepPage = struct {
+    token: []u8, // _xfToken from the two-step form (owned)
+    provider: []u8, // "totp" (owned)
+    cookies: []u8, // xf_* the two-step page set (owned)
+};
+
+/// GET the two-step page, carrying the challenge cookies. Scrapes a fresh
+/// `_xfToken`, guesses the provider (default "totp"), and captures any
+/// `xf_*` Set-Cookie. Logs the body head for live diagnostics.
+fn fetchTwoStep(http: *std.http.Client, alloc: std.mem.Allocator, carry_cookies: []const u8) errs.Error!TwoStepPage {
+    const uri = std.Uri.parse(TWO_STEP_URL) catch return errs.Error.NetworkError;
+    const headers = [_]std.http.Header{
+        .{ .name = "accept", .value = "text/html" },
+        .{ .name = "cookie", .value = carry_cookies },
+    };
+    var req = http.request(.GET, uri, .{
+        .keep_alive = false,
+        .headers = .{ .user_agent = .{ .override = USER_AGENT } },
+        .extra_headers = &headers,
+    }) catch return errs.Error.NetworkError;
+    defer req.deinit();
+
+    req.sendBodiless() catch return errs.Error.NetworkError;
+    if (req.connection) |c| c.flush() catch {};
+
+    var redir_buf: [8192]u8 = undefined;
+    var response = req.receiveHead(&redir_buf) catch return errs.Error.NetworkError;
+    if (response.head.status != .ok) {
+        log.warn("two-step GET status {d}", .{@intFromEnum(response.head.status)});
+        return errs.Error.HttpStatusError;
     }
 
+    // Capture xf_* cookies BEFORE reading the body (reading invalidates header
+    // strings).
+    var jar: std.ArrayList(u8) = .empty;
+    errdefer jar.deinit(alloc);
+    var hdr_iter = response.head.iterateHeaders();
+    while (hdr_iter.next()) |h| {
+        if (!std.ascii.eqlIgnoreCase(h.name, "set-cookie")) continue;
+        const pair = trimSetCookieAttrs(h.value);
+        if (!std.mem.startsWith(u8, pair, "xf_")) continue;
+        if (std.mem.indexOf(u8, pair, "=deleted") != null) continue;
+        if (jar.items.len > 0) jar.appendSlice(alloc, "; ") catch return errs.Error.OutOfMemory;
+        jar.appendSlice(alloc, pair) catch return errs.Error.OutOfMemory;
+    }
+
+    var transfer_buf: [4096]u8 = undefined;
+    var decompress_state: std.http.Decompress = undefined;
+    var decompress_buf: [64 * 1024]u8 = undefined;
+    const body_reader = response.readerDecompressing(&transfer_buf, &decompress_state, &decompress_buf);
+    const html = try readBodyHead(body_reader, alloc, 64 * 1024);
+    defer alloc.free(html);
+    log.debug("two-step GET body head ({d}B): '{s}'", .{ html.len, html[0..@min(512, html.len)] });
+
+    const token_view = extractXfToken(html) orelse {
+        log.warn("two-step page had no _xfToken", .{});
+        jar.deinit(alloc);
+        return errs.Error.AuthRequired;
+    };
+    const token = alloc.dupe(u8, token_view) catch return errs.Error.OutOfMemory;
+    errdefer alloc.free(token);
+    const provider = alloc.dupe(u8, extractProvider(html)) catch return errs.Error.OutOfMemory;
+    errdefer alloc.free(provider);
+    const cookies = jar.toOwnedSlice(alloc) catch return errs.Error.OutOfMemory;
+    return .{ .token = token, .provider = provider, .cookies = cookies };
+}
+
+/// Pull the selected two-step provider from `name="provider" value="…"`.
+/// Defaults to "totp" — the common authenticator-app provider.
+fn extractProvider(html: []const u8) []const u8 {
+    const marker = "name=\"provider\" value=\"";
+    if (std.mem.indexOf(u8, html, marker)) |s| {
+        const start = s + marker.len;
+        if (std.mem.indexOfScalarPos(u8, html, start, '"')) |end| {
+            const v = html[start..end];
+            if (v.len > 0) return v;
+        }
+    }
+    return "totp";
+}
+
+fn buildTwoStepBody(alloc: std.mem.Allocator, code: []const u8, provider: []const u8, token: []const u8) errs.Error![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(alloc);
+    appendField(&buf, alloc, "code", code) catch return errs.Error.OutOfMemory;
+    buf.append(alloc, '&') catch return errs.Error.OutOfMemory;
+    appendField(&buf, alloc, "provider", provider) catch return errs.Error.OutOfMemory;
+    buf.append(alloc, '&') catch return errs.Error.OutOfMemory;
+    appendField(&buf, alloc, "trust", "1") catch return errs.Error.OutOfMemory;
+    buf.append(alloc, '&') catch return errs.Error.OutOfMemory;
+    appendField(&buf, alloc, "remember", "1") catch return errs.Error.OutOfMemory;
+    buf.append(alloc, '&') catch return errs.Error.OutOfMemory;
+    appendField(&buf, alloc, "_xfToken", token) catch return errs.Error.OutOfMemory;
+    buf.append(alloc, '&') catch return errs.Error.OutOfMemory;
+    appendField(&buf, alloc, "_xfResponseType", "json") catch return errs.Error.OutOfMemory;
+    return buf.toOwnedSlice(alloc) catch errs.Error.OutOfMemory;
+}
+
+/// POST the TOTP code. Captures the `xf_*` cookies; success = an `xf_user`
+/// cookie comes back. Mirrors `postLogin`.
+fn postTwoStep(http: *std.http.Client, alloc: std.mem.Allocator, form_body: []const u8, carry_cookies: []const u8) errs.Error![]u8 {
+    const uri = std.Uri.parse(TWO_STEP_URL) catch return errs.Error.NetworkError;
+    var hdr: [4]std.http.Header = .{
+        .{ .name = "content-type", .value = "application/x-www-form-urlencoded" },
+        .{ .name = "accept", .value = "application/json, text/html" },
+        .{ .name = "accept-encoding", .value = "identity" },
+        .{ .name = "cookie", .value = carry_cookies },
+    };
+    var req = http.request(.POST, uri, .{
+        .keep_alive = false,
+        .redirect_behavior = .unhandled,
+        .headers = .{ .user_agent = .{ .override = USER_AGENT } },
+        .extra_headers = &hdr,
+    }) catch return errs.Error.NetworkError;
+    defer req.deinit();
+
+    req.transfer_encoding = .{ .content_length = form_body.len };
+    var body_writer = req.sendBodyUnflushed(&.{}) catch return errs.Error.NetworkError;
+    body_writer.writer.writeAll(form_body) catch return errs.Error.NetworkError;
+    body_writer.end() catch return errs.Error.NetworkError;
+    if (req.connection) |c| c.flush() catch {};
+
+    var redir_buf: [8192]u8 = undefined;
+    var response = req.receiveHead(&redir_buf) catch return errs.Error.NetworkError;
+    log.debug("two-step POST status={d}", .{@intFromEnum(response.head.status)});
+
+    var jar: std.ArrayList(u8) = .empty;
+    errdefer jar.deinit(alloc);
+    var hdr_iter = response.head.iterateHeaders();
+    while (hdr_iter.next()) |h| {
+        if (!std.ascii.eqlIgnoreCase(h.name, "set-cookie")) continue;
+        const pair = trimSetCookieAttrs(h.value);
+        if (!std.mem.startsWith(u8, pair, "xf_")) continue;
+        if (std.mem.indexOf(u8, pair, "=deleted") != null) continue;
+        if (jar.items.len > 0) jar.appendSlice(alloc, "; ") catch return errs.Error.OutOfMemory;
+        jar.appendSlice(alloc, pair) catch return errs.Error.OutOfMemory;
+    }
+
+    var transfer_buf: [4096]u8 = undefined;
+    var decompress_state: std.http.Decompress = undefined;
+    var decompress_buf: [64 * 1024]u8 = undefined;
+    const body_reader = response.readerDecompressing(&transfer_buf, &decompress_state, &decompress_buf);
+    const body_head = readBodyHead(body_reader, alloc, 4 * 1024) catch (alloc.dupe(u8, "") catch return errs.Error.OutOfMemory);
+    defer alloc.free(body_head);
+    if (body_head.len > 0) log.debug("two-step POST body head ({d}B): '{s}'", .{ body_head.len, body_head[0..@min(512, body_head.len)] });
+
+    if (jar.items.len == 0 or std.mem.indexOf(u8, jar.items, "xf_user=") == null) {
+        log.warn("two-step rejected — no xf_user cookie (bad/expired code?)", .{});
+        return errs.Error.AuthRequired;
+    }
     return jar.toOwnedSlice(alloc) catch errs.Error.OutOfMemory;
 }
 
@@ -525,6 +814,29 @@ test "trimSetCookieAttrs strips attrs" {
     try std.testing.expectEqualStrings(
         "xf_session=xyz",
         trimSetCookieAttrs("  xf_session=xyz "),
+    );
+}
+
+test "mergeCookies dedups by name, second wins" {
+    const a = std.testing.allocator;
+    const m = try mergeCookies(a, "xf_csrf=OLD; xf_user=U", "xf_csrf=NEW; xf_session=S");
+    defer a.free(m);
+    // second emitted first; xf_user carried from first; xf_csrf not duplicated.
+    try std.testing.expectEqualStrings("xf_csrf=NEW; xf_session=S; xf_user=U", m);
+}
+
+test "extractProvider default + explicit" {
+    try std.testing.expectEqualStrings("totp", extractProvider("<form>no provider here</form>"));
+    try std.testing.expectEqualStrings("email", extractProvider("<input name=\"provider\" value=\"email\">"));
+}
+
+test "buildTwoStepBody fields" {
+    const a = std.testing.allocator;
+    const b = try buildTwoStepBody(a, "123456", "totp", "TOK");
+    defer a.free(b);
+    try std.testing.expectEqualStrings(
+        "code=123456&provider=totp&trust=1&remember=1&_xfToken=TOK&_xfResponseType=json",
+        b,
     );
 }
 

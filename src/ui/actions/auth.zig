@@ -38,17 +38,16 @@ pub fn doLogin(frame: *Frame, username: []const u8, password: []const u8) void {
     state.login_status = .logging_in;
     state.setLoginMsg("contacting F95Zone…");
 
-    const cookie = frame.f95_svc.login(frame.io, .{
+    const result = frame.f95_svc.login(frame.io, .{
         .username = username,
         .password = password,
     }) catch |e| {
         state.login_status = .err;
         const friendly: []const u8 = switch (e) {
-            // Bad password AND a 2FA/passkey challenge both collapse to
-            // AuthRequired here (F95 just withholds xf_user). Point users at
-            // the cookie workaround, which is the only thing that clears a
-            // passkey.
-            error.AuthRequired => "wrong password, or your account uses 2FA/passkey — try \"Sign in with cookie\"",
+            // Bad password (a 2FA challenge is now handled separately via the
+            // .two_step result, not AuthRequired). Passkey accounts never even
+            // reach a 2FA code prompt, so still point them at cookie sign-in.
+            error.AuthRequired => "wrong password (passkey accounts: use \"Sign in with cookie\")",
             error.NetworkError => "network error — check connection",
             error.HttpStatusError => "F95Zone returned an unexpected status",
             else => @errorName(e),
@@ -58,22 +57,99 @@ pub fn doLogin(frame: *Frame, username: []const u8, password: []const u8) void {
         state.setLoginMsg(m);
         return;
     };
+
+    switch (result) {
+        .two_step => |carry| {
+            // 2FA account: F95 wants a code. Stash the challenge cookies and
+            // flip the card to the code prompt.
+            if (state.two_step_carry) |old| frame.lib.alloc.free(old);
+            state.two_step_carry = carry; // takes ownership
+            state.two_step_pending = true;
+            @memset(&state.f95_pass_buf, 0);
+            @memset(&state.two_step_code_buf, 0);
+            state.login_status = .logging_in;
+            state.setLoginMsg("enter your 2FA authenticator code");
+            log.info("doLogin: two-step required — prompting for code", .{});
+        },
+        .ok => |cookie| {
+            defer frame.lib.alloc.free(cookie);
+            persistCookie(frame.io, frame.info.cookie_path, cookie) catch |e| {
+                std.log.scoped(.ui).warn("could not persist cookie: {s}", .{@errorName(e)});
+            };
+            // Wipe the password buffer so it doesn't linger in State.
+            @memset(&state.f95_pass_buf, 0);
+            state.login_status = .logged_in;
+            state.setLoginMsg("logged in");
+            // Login popup self-dismisses on successful auth so the user goes
+            // straight back to the library; donor-status probe runs fresh so
+            // the Download button reflects current eligibility.
+            state.login_popup_open = false;
+            state.is_donor = null;
+            checkDonorStatus(frame);
+        },
+    }
+}
+
+/// Submit the TOTP code for an in-progress two-step challenge (started by
+/// doLogin returning `.two_step`). On success authenticates + persists exactly
+/// like a password login; on a bad code it stays on the prompt for a retry.
+pub fn doSubmitTotp(frame: *Frame, code: []const u8) void {
+    const state = frame.state;
+    const carry = state.two_step_carry orelse {
+        state.two_step_pending = false;
+        state.login_status = .err;
+        state.setLoginMsg("2FA session expired — sign in again");
+        return;
+    };
+    if (code.len == 0) {
+        state.setLoginMsg("enter your authenticator code");
+        return;
+    }
+    log.info("doSubmitTotp start (code len={d})", .{code.len});
+    state.login_status = .logging_in;
+    state.setLoginMsg("verifying code…");
+
+    const cookie = frame.f95_svc.submitTwoStep(frame.io, carry, code) catch |e| {
+        state.login_status = .err;
+        const friendly: []const u8 = switch (e) {
+            error.AuthRequired => "wrong or expired code — try again",
+            error.NetworkError => "network error — check connection",
+            else => @errorName(e),
+        };
+        var emsg: [128]u8 = undefined;
+        const m = std.fmt.bufPrint(&emsg, "2FA failed: {s}", .{friendly}) catch "2FA failed";
+        state.setLoginMsg(m);
+        return; // keep two_step_pending so the user can retry the code
+    };
     defer frame.lib.alloc.free(cookie);
 
     persistCookie(frame.io, frame.info.cookie_path, cookie) catch |e| {
         std.log.scoped(.ui).warn("could not persist cookie: {s}", .{@errorName(e)});
     };
-
-    // Wipe the password buffer so it doesn't linger in State.
+    // Tear down the two-step session.
+    frame.lib.alloc.free(carry);
+    state.two_step_carry = null;
+    state.two_step_pending = false;
+    @memset(&state.two_step_code_buf, 0);
     @memset(&state.f95_pass_buf, 0);
     state.login_status = .logged_in;
     state.setLoginMsg("logged in");
-    // Login popup self-dismisses on successful auth so the user goes
-    // straight back to the library; donor-status probe runs fresh so
-    // the Download button reflects current eligibility.
     state.login_popup_open = false;
     state.is_donor = null;
     checkDonorStatus(frame);
+}
+
+/// Abandon an in-progress two-step challenge and return to the login form.
+pub fn cancelTwoStep(frame: *Frame) void {
+    const state = frame.state;
+    if (state.two_step_carry) |c| {
+        frame.lib.alloc.free(c);
+        state.two_step_carry = null;
+    }
+    state.two_step_pending = false;
+    @memset(&state.two_step_code_buf, 0);
+    state.login_status = .logged_out;
+    state.setLoginMsg("");
 }
 
 /// Sign in with a session cookie the user copied from their browser — the
@@ -216,6 +292,13 @@ pub fn doLogout(frame: *Frame) void {
     frame.f95_svc.client.clearCookie();
     // Best-effort delete the on-disk cookie.
     std.Io.Dir.cwd().deleteFile(frame.io, frame.info.cookie_path) catch {};
+    // Drop any in-flight two-step challenge session.
+    if (state.two_step_carry) |c| {
+        frame.lib.alloc.free(c);
+        state.two_step_carry = null;
+    }
+    state.two_step_pending = false;
+    @memset(&state.two_step_code_buf, 0);
     @memset(&state.f95_user_buf, 0);
     @memset(&state.f95_pass_buf, 0);
     state.login_status = .logged_out;
