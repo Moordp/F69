@@ -110,6 +110,13 @@ jobs:
           VER=$(awk -F'"' '/\.version = / { print $2; exit }' build.zig.zon)
           mkdir -p artifacts
           tar -C zig-out -czf "artifacts/f69-${VER}-linux-slim-x86_64.tar.gz" portable-slim
+      # Smoke the slim bundle HERE, on the same runner that built it — the
+      # slim bundle uses the SYSTEM glibc, so its floor is this host's glibc
+      # and it can't be tested on an older base like the other formats. The
+      # runner has no GPU, so the launch check reaches the clean GPU-abort.
+      - name: Smoke-test slim bundle (host glibc)
+        continue-on-error: true
+        run: bash scripts/smoke-package.sh artifacts/f69-*-linux-slim-x86_64.tar.gz
       - uses: actions/upload-artifact@v4
         with:
           name: f69-slim
@@ -315,6 +322,66 @@ jobs:
         # tolerates the network call but is non-hermetic; a downstream
         # packager would replace this with a vendored fetchZigDeps.
         run: nix build .#f69 --impure || echo "nix build failed (impure fetch story TBD)"
+
+  # ----- Smoke: install each built package in its target distro + run it -----
+  # Headless per-package acceptance test (scripts/smoke-package.sh): install
+  # the artifact, assert `--version`, `ldd` (no missing libs), a launch that
+  # reaches the clean GPU-abort after a full non-GUI startup (DB open +
+  # migrate + backup), and the expected shipped files. No GPU needed — the
+  # container has no Vulkan device, which is exactly the path we assert.
+  #
+  # Each format is tested where its glibc floor is satisfied:
+  #   - deb/rpm/arch: in their own build container (exact glibc match).
+  #   - portable-full: in OLD-glibc debian:bookworm — it bundles its own
+  #     glibc loader, so it MUST run there. (If the CI lib-harvest ships a
+  #     hollow bundle — the known empty-$LD_LIBRARY_PATH issue — this is what
+  #     catches it.)
+  # The slim bundle's glibc floor is the build host itself, so it can't run on
+  # an older base; it's smoked on the runner inside the portable-slim job.
+  #
+  # continue-on-error while packaging settles (hollow-bundle + native-tool
+  # issues are still open): the job SURFACES package breakage without blocking
+  # a release. Once the package builds are reliably green, drop
+  # continue-on-error and add `smoke` to the release job's `needs` to make it
+  # a hard gate.
+  smoke:
+    needs: [portable, arch, debian, fedora]
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - artifact: f69-debian
+            image: debian:bookworm-slim
+            prep: apt-get update -qq && apt-get install -y -qq --no-install-recommends ca-certificates
+          - artifact: f69-fedora
+            image: fedora:latest
+            prep: dnf install -y -q findutils >/dev/null
+          - artifact: f69-arch
+            image: archlinux:latest
+            prep: pacman -Sy --noconfirm --needed >/dev/null
+          - artifact: f69-portable
+            image: debian:bookworm-slim
+            prep: apt-get update -qq && apt-get install -y -qq --no-install-recommends libvulkan1
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: artifacts
+      - name: Prep container + smoke-test artifact(s)
+        run: |
+          ${{ matrix.prep }}
+          fail=0
+          for f in artifacts/*.deb artifacts/*.rpm artifacts/*.pkg.tar.zst artifacts/*.tar.gz; do
+            [ -e "$f" ] || continue
+            bash scripts/smoke-package.sh "$f" || fail=1
+          done
+          exit $fail
 
   # ----- Release: aggregate artifacts on tag push -----
   release:

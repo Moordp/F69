@@ -32,8 +32,10 @@ pub fn build(b: *std.Build) void {
     // Build-time options surface — version string is currently the only
     // entry. UI's Diagnostics screen and main.zig's `--version` CLI flag
     // import this to show "f69 vX.Y.Z" so bug reports identify the build.
-    // Keep in sync with `.version` in build.zig.zon.
-    const app_version: []const u8 = "0.10.0";
+    // Single-sourced from `.version` in build.zig.zon (same value the dist
+    // packaging steps read) so the binary and the packages never disagree —
+    // a mismatch the package smoke test (scripts/smoke-package.sh) enforces.
+    const app_version: []const u8 = readVersion(b) catch "0.0.0";
     const build_opts = b.addOptions();
     build_opts.addOption([]const u8, "version", app_version);
     const build_opts_mod = build_opts.createModule();
@@ -260,6 +262,7 @@ pub fn build(b: *std.Build) void {
     ui_mod.addImport("importers", importers_mod);
     ui_mod.addImport("image", image_mod);
     ui_mod.addImport("util_version", util_version_mod);
+    ui_mod.addImport("util_paths", util_paths_mod);
     ui_mod.addImport("util_file_picker", file_picker_mod);
     ui_mod.addImport("util_atomic_io", util_atomic_io_mod);
     ui_mod.addImport("build_options", build_opts_mod);
@@ -2111,17 +2114,16 @@ const RUN_SH_FULL =
     \\# library / a throwaway test dir); default to the bundle's own data/.
     \\export F69_DATA_DIR="${F69_DATA_DIR:-$DIR/data}"
     \\
-    \\# Prepend our bundled lib/ but PRESERVE the host's LD_LIBRARY_PATH
-    \\# so SDL3 can dlopen vendor GPU libs (libGL_*, libGLX_nvidia, …).
-    \\# Also append standard GPU driver dirs as fallbacks — harmless on
-    \\# systems where the path doesn't exist.
+    \\# GPU driver dirs for SDL3's vendor-lib dlopen (libGL_*, libGLX_nvidia,
+    \\# …). Standard + NixOS locations; harmless where they don't exist.
     \\GPU_PATHS=/run/opengl-driver/lib:/usr/lib/x86_64-linux-gnu:/usr/lib64:/usr/lib
-    \\if [ -n "${LD_LIBRARY_PATH:-}" ]; then
-    \\    LD_LIBRARY_PATH="$DIR/lib:$LD_LIBRARY_PATH:$GPU_PATHS"
-    \\else
-    \\    LD_LIBRARY_PATH="$DIR/lib:$GPU_PATHS"
-    \\fi
-    \\export LD_LIBRARY_PATH
+    \\# Stash the caller's LD_LIBRARY_PATH; it is only safe to prepend in
+    \\# BUNDLED mode. In system-glibc mode a foreign libc on the inherited
+    \\# path (Steam runtime, conda, /opt SDKs) would be loaded by the system
+    \\# loader and mismatch it → `undefined symbol: __nptl_change_stack_pe,
+    \\# version GLIBC_PRIVATE`. The actual LD_LIBRARY_PATH is built per-mode
+    \\# in the loader-choice block below.
+    \\INHERITED_LD="${LD_LIBRARY_PATH:-}"
     \\
     \\# Vulkan + EGL driver discovery. SDL3's GPU backend needs the ICD
     \\# JSONs (separate from the .so files) to know which GPU stack to
@@ -2174,12 +2176,23 @@ const RUN_SH_FULL =
     \\fi
     \\
     \\if [ "$use_bundled" = 1 ]; then
-    \\    # Old host: bundled glibc + loader carry the day.
-    \\    LD_LIBRARY_PATH="$DIR/lib/glibc:$LD_LIBRARY_PATH"
+    \\    # Old host: the bundled glibc + loader carry the day, so the
+    \\    # inherited path is safe (the bundled loader resolves libc from
+    \\    # lib/glibc, ahead of anything on the inherited path).
+    \\    if [ -n "$INHERITED_LD" ]; then
+    \\        LD_LIBRARY_PATH="$DIR/lib/glibc:$DIR/lib:$INHERITED_LD:$GPU_PATHS"
+    \\    else
+    \\        LD_LIBRARY_PATH="$DIR/lib/glibc:$DIR/lib:$GPU_PATHS"
+    \\    fi
     \\    export LD_LIBRARY_PATH
     \\    exec "$DIR/lib/glibc/ld-linux-x86-64.so.2" "$DIR/f69" "$@"
     \\else
-    \\    # Same-or-newer host: system glibc/loader; bundled app libs only.
+    \\    # Same-or-newer host: system glibc/loader + bundled app libs only.
+    \\    # Do NOT add the inherited LD_LIBRARY_PATH — a foreign libc there
+    \\    # would shadow the system libc that pairs with the system loader
+    \\    # and crash with the GLIBC_PRIVATE symbol error.
+    \\    LD_LIBRARY_PATH="$DIR/lib:$GPU_PATHS"
+    \\    export LD_LIBRARY_PATH
     \\    exec "$DIR/f69" "$@"
     \\fi
     \\

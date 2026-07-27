@@ -203,6 +203,13 @@
         # exact same config — that's what makes it resolve dvui's lazy
         # backend deps (SDL / freetype / tree-sitter). (The devShell keeps
         # its own list with extras like zls / SDL2 / cacert / aria2.)
+        # Single source for the package version — both the f69 package and
+        # its zig-deps derivation reference this so they can't drift from
+        # each other. Keep in sync with `.version` in build.zig.zon (the
+        # binary's own `--version` is single-sourced from the zon in
+        # build.zig; parsing the zon here would need a fragile Nix regex).
+        f69Version = "0.10.1";
+
         f69NativeBuildInputs = with pkgs; [
           zig
           pkg-config
@@ -254,7 +261,7 @@
         # the "got:" hash from the mismatch error.
         f69-zig-deps = pkgs.stdenv.mkDerivation {
           pname = "f69-zig-deps";
-          version = "0.10.1";
+          version = f69Version;
           src = ./.;
           nativeBuildInputs = f69NativeBuildInputs ++ [ pkgs.cacert pkgs.git ];
           buildInputs = f69BuildInputs;
@@ -295,7 +302,7 @@
         #
         packages.f69 = pkgs.stdenv.mkDerivation rec {
           pname = "f69";
-          version = "0.9.0";
+          version = f69Version;
           src = ./.;
 
           nativeBuildInputs = f69NativeBuildInputs ++ [ pkgs.makeWrapper ];
