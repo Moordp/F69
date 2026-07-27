@@ -591,6 +591,9 @@ pub fn build(b: *std.Build) void {
         ui_test_mod.addImport("ui_theme_store", ui_theme_store_mod);
         ui_test_mod.addImport("dvui", dvui_testing);
         ui_test_mod.addImport("ui_comp", ui_comp_test_mod);
+        // Mirror the main ui_mod: imports.zig's F95Checker config-path
+        // resolution (buildConfigDataPath) needs util_paths.
+        ui_test_mod.addImport("util_paths", util_paths_mod);
 
         const integration_mod = b.createModule(.{
             .root_source_file = b.path("src/testkit/integration.zig"),

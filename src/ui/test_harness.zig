@@ -166,6 +166,8 @@ pub const Harness = struct {
             .initial_aria2_seed_ratio = 5.0,
             .aria2_seed_time_path = try join(a, root, "aria2_seed_time"),
             .initial_aria2_seed_time = 0,
+            .update_check_source_path = try join(a, root, "update_check_source"),
+            .initial_update_check_source = .builtin,
             .host = .{},
         };
 
