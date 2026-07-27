@@ -1835,6 +1835,13 @@ const PKGBUILD_TEMPLATE =
     \\arch=('x86_64')
     \\url='https://github.com/your-org/f69'
     \\license=('MIT')
+    \\# RUNTIME deps. makepkg does NOT auto-scan the ELF for sonames the way
+    \\# dpkg-shlibdeps / rpm's find-requires do, so every library f69
+    \\# dynamically links must be listed here by hand or the installed
+    \\# package fails at launch with "libFOO.so.N: cannot open shared object
+    \\# file" (the package smoke test catches this). sqlite/openssl/dav1d/
+    \\# libavif are also build deps, but listing them in depends installs
+    \\# them for build() too, so they don't need repeating in makedepends.
     \\depends=(
     \\    'vulkan-icd-loader'
     \\    'wayland'
@@ -1847,15 +1854,15 @@ const PKGBUILD_TEMPLATE =
     \\    'libxrandr'
     \\    'dbus'
     \\    'libarchive'
+    \\    'sqlite'
+    \\    'openssl'
+    \\    'dav1d'
+    \\    'libavif'
     \\)
     \\makedepends=(
     \\    'zig'
     \\    'pkg-config'
     \\    'wayland-protocols'
-    \\    'sqlite'
-    \\    'openssl'
-    \\    'dav1d'
-    \\    'libavif'
     \\)
     \\optdepends=(
     \\    'aria2: multi-protocol downloads (auto-launched as RPC daemon)'

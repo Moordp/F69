@@ -345,7 +345,7 @@ jobs:
   # continue-on-error and add `smoke` to the release job's `needs` to make it
   # a hard gate.
   smoke:
-    needs: [portable, arch, debian, fedora]
+    needs: [portable, arch, debian, fedora, windows]
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -365,6 +365,11 @@ jobs:
           - artifact: f69-portable
             image: debian:bookworm-slim
             prep: apt-get update -qq && apt-get install -y -qq --no-install-recommends libvulkan1
+          # Windows: PE DLL-closure completeness via objdump (binutils reads
+          # PE import tables) + unzip — no Wine, so no GPU/display needed.
+          - artifact: f69-windows
+            image: debian:bookworm-slim
+            prep: apt-get update -qq && apt-get install -y -qq --no-install-recommends binutils unzip
     container:
       image: ${{ matrix.image }}
     steps:
@@ -377,7 +382,7 @@ jobs:
         run: |
           ${{ matrix.prep }}
           fail=0
-          for f in artifacts/*.deb artifacts/*.rpm artifacts/*.pkg.tar.zst artifacts/*.tar.gz; do
+          for f in artifacts/*.deb artifacts/*.rpm artifacts/*.pkg.tar.zst artifacts/*.tar.gz artifacts/*.zip; do
             [ -e "$f" ] || continue
             bash scripts/smoke-package.sh "$f" || fail=1
           done

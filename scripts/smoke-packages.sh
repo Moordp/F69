@@ -17,6 +17,8 @@
 #                                                    OLD base proves it runs)
 #   *slim*.tar.gz         → ubuntu:latest          (uses SYSTEM glibc, so its
 #                                                    floor is the build host's)
+#   *windows*.zip         → debian:bookworm-slim   (PE DLL-closure check via
+#                                                    objdump; no Wine needed)
 #
 # NOTE on slim: the slim bundle links the system glibc, so it only runs on a
 # host whose glibc is >= the machine that BUILT it. If you built the bundle on
@@ -84,6 +86,10 @@ image_and_prep() {
             # Portable bundles its libs + glibc loader; a bare base + the
             # Vulkan loader (dlopen'd, not bundled) is all it needs.
             echo "debian:bookworm-slim|apt-get update -qq && apt-get install -y -qq --no-install-recommends libvulkan1" ;;
+        *windows*.zip)
+            # PE DLL-closure check needs objdump (binutils reads PE) + unzip.
+            # Wine is optional; skip it here to keep the container light.
+            echo "debian:bookworm-slim|apt-get update -qq && apt-get install -y -qq --no-install-recommends binutils unzip" ;;
         *) echo "" ;;
     esac
 }
@@ -91,7 +97,7 @@ image_and_prep() {
 # Collect artifacts we know how to test.
 shopt -s nullglob
 ARTIFACTS=()
-for f in "$ART_DIR"/*.deb "$ART_DIR"/*.rpm "$ART_DIR"/*.pkg.tar.zst "$ART_DIR"/*.tar.gz; do
+for f in "$ART_DIR"/*.deb "$ART_DIR"/*.rpm "$ART_DIR"/*.pkg.tar.zst "$ART_DIR"/*.tar.gz "$ART_DIR"/*.zip; do
     ARTIFACTS+=("$f")
 done
 if [ "${#ARTIFACTS[@]}" -eq 0 ]; then

@@ -56,6 +56,84 @@ pass() { printf '  \033[32mPASS\033[0m %s\n' "$1"; PASS=$((PASS + 1)); }
 fail() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL + 1)); }
 info() { printf '  ---- %s\n' "$1"; }
 
+# DLLs Windows itself provides — never expected in the bundle. Kept in sync
+# with scripts/package-windows.sh (the packager's harvest whitelist).
+win_is_system_dll() {
+    case "$(printf '%s' "$1" | tr 'A-Z' 'a-z')" in
+        kernel32.dll|ntdll.dll|user32.dll|gdi32.dll|advapi32.dll|shell32.dll|ole32.dll|\
+        oleaut32.dll|comdlg32.dll|crypt32.dll|imm32.dll|version.dll|winmm.dll|ws2_32.dll|\
+        setupapi.dll|msvcrt.dll|rpcrt4.dll|bcrypt.dll|secur32.dll|dxgi.dll|\
+        d3d12.dll|d3d11.dll|gdiplus.dll|shcore.dll|dwmapi.dll|uxtheme.dll|userenv.dll|\
+        netapi32.dll|iphlpapi.dll|dnsapi.dll|wsock32.dll|winhttp.dll|wininet.dll|\
+        cfgmgr32.dll|powrprof.dll|hid.dll|cabinet.dll|api-ms-win-*) return 0 ;;
+    esac
+    return 1
+}
+
+# Windows smoke: extract the zip, verify the DLL closure is complete (the PE
+# analog of ldd — walk f69.exe's import table breadth-first and assert every
+# non-system DLL is bundled), best-effort `wine --version`, and the exe exists.
+smoke_windows() {
+    info "extracting windows zip"
+    if ! command -v unzip >/dev/null 2>&1; then
+        fail "unzip not available — cannot inspect windows zip"; return
+    fi
+    unzip -q "$ARTIFACT" -d "$WORK"
+    local exe; exe="$(find "$WORK" -iname 'f69.exe' | head -n1)"
+    if [ -z "$exe" ]; then fail "f69.exe not found in zip"; return; fi
+    local dir; dir="$(dirname "$exe")"
+    pass "extract produced $(basename "$exe")"
+
+    # PICK an objdump that reads PE. Prefer the mingw one; plain binutils
+    # objdump also parses PE import tables ("DLL Name:").
+    local objdump=""
+    for cand in x86_64-w64-mingw32-objdump objdump; do
+        command -v "$cand" >/dev/null 2>&1 && { objdump="$cand"; break; }
+    done
+    if [ -z "$objdump" ]; then
+        info "no objdump — skipping DLL-closure check"
+    else
+        # BFS the import graph. worklist = basenames to inspect; seen tracks
+        # visited; missing collects non-system imports absent from the dir.
+        local worklist="f69.exe" seen=" " missing=""
+        while [ -n "$worklist" ]; do
+            local cur="${worklist%% *}"; worklist="${worklist#"$cur"}"; worklist="${worklist# }"
+            case "$seen" in *" $cur "*) continue ;; esac
+            seen="$seen$cur "
+            local curpath; curpath="$(find "$dir" -maxdepth 1 -iname "$cur" | head -n1)"
+            [ -z "$curpath" ] && continue
+            local imp
+            for imp in $("$objdump" -p "$curpath" 2>/dev/null | grep -i 'DLL Name' | awk '{print $3}'); do
+                win_is_system_dll "$imp" && continue
+                if [ -n "$(find "$dir" -maxdepth 1 -iname "$imp" | head -n1)" ]; then
+                    case "$seen" in *" $imp "*) ;; *) worklist="$worklist $imp" ;; esac
+                else
+                    case "$missing" in *" $imp "*) ;; *) missing="$missing $imp" ;; esac
+                fi
+            done
+        done
+        if [ -z "$missing" ]; then
+            pass "DLL closure complete (no unbundled non-system DLLs)"
+        else
+            fail "DLL closure incomplete — unbundled non-system DLLs:$missing"
+        fi
+    fi
+
+    # Best-effort execution via Wine. --version returns before any GPU/backend
+    # init, so it works headless; skipped cleanly where wine isn't installed.
+    if command -v wine >/dev/null 2>&1; then
+        local out rc
+        out="$(cd "$dir" && WINEDEBUG=-all timeout 90 wine f69.exe --version 2>/dev/null)"; rc=$?
+        if [ "$rc" -eq 0 ] && { [ -z "$EXPECT_VER" ] || printf '%s' "$out" | grep -qF "$EXPECT_VER"; }; then
+            pass "wine --version exits 0 ($(printf '%s' "$out" | tr -d '\r' | head -n1))"
+        else
+            fail "wine --version failed (exit $rc): $(printf '%s' "$out" | tr -d '\r' | head -n1)"
+        fi
+    else
+        info "wine not installed — skipping --version run (DLL-closure check still ran)"
+    fi
+}
+
 # Throwaway workspace + data dir; cleaned on exit.
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/f69-smoke.XXXXXX")"
 DATA="$WORK/data"
@@ -63,6 +141,17 @@ cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT
 
 echo "== smoke: $BASENAME (expect version '${EXPECT_VER:-?}') =="
+
+# Windows is a different animal (PE, no ELF/ldd, no native exec on Linux) —
+# handle it in its own path and finish.
+case "$BASENAME" in
+    *windows*.zip | *.zip)
+        smoke_windows
+        echo "== smoke: $PASS passed, $FAIL failed =="
+        [ "$FAIL" -eq 0 ]
+        exit $?
+        ;;
+esac
 
 # BIN  = the f69 executable to test.
 # ENTRY = how to invoke it (may be a run.sh wrapper for the portable bundle).
