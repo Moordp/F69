@@ -156,6 +156,14 @@ pub const NoSandbox = struct {
         defer map.deinit();
         if (cfg.sandbox_home.len > 0) {
             map.put("HOME", cfg.sandbox_home) catch return errs.Error.OutOfMemory;
+            // Windows games read USERPROFILE (Documents / Saved Games), not
+            // HOME, so redirect it too — otherwise this NoSandbox fallback's
+            // per-game save isolation is a silent no-op on Windows and the
+            // game writes into the real user profile. Best-effort; Sandboxie
+            // is the real isolation when present.
+            if (builtin.os.tag == .windows) {
+                map.put("USERPROFILE", cfg.sandbox_home) catch return errs.Error.OutOfMemory;
+            }
         }
         // Suppress games' "open log in your editor" behaviour.
         // Ren'Py on crash invokes `xdg-open <traceback.txt>` which

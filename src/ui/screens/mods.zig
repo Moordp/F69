@@ -80,12 +80,12 @@ pub fn modsScreen(frame: *Frame) !bool {
                 dvui.icon(@src(), "resolve-warn", dvui.entypo.help, .{}, .{
                     .gravity_y = 0.5,
                     .min_size_content = .{ .w = 14, .h = 14 },
-                    .color_text = .{ .r = 0xE0, .g = 0xA0, .b = 0x40 },
+                    .color_text = tokens.toDvui(tokens.active.warn, dvui.Color),
                 });
                 _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 6, .h = 1 } });
                 dvui.labelNoFmt(@src(), msg, .{}, .{
                     .gravity_y = 0.5,
-                    .color_text = .{ .r = 0xE6, .g = 0xC8, .b = 0x9A },
+                    .color_text = tokens.toDvui(tokens.active.ink2, dvui.Color),
                 });
             }
         }
@@ -118,7 +118,7 @@ fn renderModsHeader(frame: *Frame, game: *const library.Game) void {
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 12, .h = 1 } });
     var title_buf: [256]u8 = undefined;
     const title = std.fmt.bufPrint(&title_buf, "Mods — {s}", .{game.name}) catch "Mods";
-    dvui.labelNoFmt(@src(), title, .{}, .{ .style = .highlight, .gravity_y = 0.5 });
+    dvui.labelNoFmt(@src(), title, .{}, .{ .color_text = tokens.toDvui(tokens.active.acc, dvui.Color), .gravity_y = 0.5 });
     _ = dvui.spacer(@src(), .{ .expand = .horizontal });
     if (style.button(@src(), "Open game folder", .{}, .{ .gravity_y = 0.5 })) {
         actions.doOpenInstallFolder(frame, game);
@@ -519,7 +519,7 @@ fn renderDetailHeader(
             .modfile => |m| modfiles[m.modfile_idx].filename,
             .orphan_recipe => |r| cache.mods[r.recipe_idx].recipe.name,
         };
-        dvui.labelNoFmt(@src(), title, .{}, .{ .style = .highlight, .gravity_y = 0.5 });
+        dvui.labelNoFmt(@src(), title, .{}, .{ .color_text = tokens.toDvui(tokens.active.acc, dvui.Color), .gravity_y = 0.5 });
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         renderStatusPill(status);
     }
@@ -680,7 +680,7 @@ fn renderDetailPlan(item: ListItem, cache: *const owned_types.ModsPageCache) voi
         .orphan_recipe => |r| &cache.mods[r.recipe_idx],
     };
 
-    dvui.labelNoFmt(@src(), "Plan summary", .{}, .{ .style = .highlight });
+    dvui.labelNoFmt(@src(), "Plan summary", .{}, .{ .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 4 } });
 
     if (pm == null) {
@@ -730,7 +730,7 @@ fn renderDetailImpact(item: ListItem, cache: *const owned_types.ModsPageCache) v
         .orphan_recipe => |r| &cache.mods[r.recipe_idx],
     };
 
-    dvui.labelNoFmt(@src(), "File impact", .{}, .{ .style = .highlight });
+    dvui.labelNoFmt(@src(), "File impact", .{}, .{ .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 4 } });
 
     if (pm == null) {
@@ -762,7 +762,7 @@ fn renderDetailMetadata(
     };
     if (pm == null) return;
 
-    dvui.labelNoFmt(@src(), "Details", .{}, .{ .style = .highlight });
+    dvui.labelNoFmt(@src(), "Details", .{}, .{ .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 4 } });
     const rec = pm.?.recipe;
     if (rec.for_game_version) |fgv| {
@@ -848,7 +848,7 @@ fn renderModsInstallPicker(frame: *Frame, game: *const library.Game) void {
     }
 
     if (n == 1) {
-        dvui.labelNoFmt(@src(), labels_buf[0], .{}, .{ .gravity_y = 0.5, .style = .highlight });
+        dvui.labelNoFmt(@src(), labels_buf[0], .{}, .{ .gravity_y = 0.5, .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
         if (state.mods_page_install_id == null) {
             state.mods_page_install_id = installs[0].id;
         }
@@ -966,7 +966,7 @@ fn renderModJobBanner(frame: *Frame) void {
         }
         break :blk std.fmt.bufPrint(&buf, "{s}: {s} - {s}", .{ verb, disp, phase_text }) catch "Mod job in flight";
     };
-    dvui.labelNoFmt(@src(), status_txt, .{}, .{ .gravity_y = 0.5, .style = .highlight });
+    dvui.labelNoFmt(@src(), status_txt, .{}, .{ .gravity_y = 0.5, .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
 
     if (h.depth > 1) {
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });

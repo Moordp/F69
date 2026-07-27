@@ -611,12 +611,12 @@ fn renderSimulationAggregate(sim: *const installer_mod.SimulationResult) void {
     if (ow_van > 0) {
         var buf: [128]u8 = undefined;
         const txt = std.fmt.bufPrint(&buf, "~ Overwrites {d} vanilla file(s)", .{ow_van}) catch "~ Overwrites vanilla";
-        dvui.labelNoFmt(@src(), txt, .{}, .{ .color_text = .{ .r = 0xE0, .g = 0xC0, .b = 0x70 } });
+        dvui.labelNoFmt(@src(), txt, .{}, .{ .color_text = tokens.toDvui(tokens.active.warn, dvui.Color) });
     }
     if (ow_mod > 0) {
         var buf: [160]u8 = undefined;
         const txt = std.fmt.bufPrint(&buf, "[!] Conflicts: {d} file(s) already owned by another mod", .{ow_mod}) catch "Conflicts with another mod";
-        dvui.labelNoFmt(@src(), txt, .{}, .{ .color_text = .{ .r = 0xFF, .g = 0x80, .b = 0x80 } });
+        dvui.labelNoFmt(@src(), txt, .{}, .{ .color_text = tokens.toDvui(tokens.active.danger, dvui.Color) });
     }
     if (mode_n > 0) {
         var buf: [128]u8 = undefined;
@@ -626,7 +626,7 @@ fn renderSimulationAggregate(sim: *const installer_mod.SimulationResult) void {
     if (del_n > 0) {
         var buf: [128]u8 = undefined;
         const txt = std.fmt.bufPrint(&buf, "- Removes {d} file(s)", .{del_n}) catch "Removes file(s)";
-        dvui.labelNoFmt(@src(), txt, .{}, .{ .color_text = .{ .r = 0xE0, .g = 0xC0, .b = 0x70 } });
+        dvui.labelNoFmt(@src(), txt, .{}, .{ .color_text = tokens.toDvui(tokens.active.warn, dvui.Color) });
     }
 
     if (sim.diagnostics.len > 0) {
@@ -637,8 +637,8 @@ fn renderSimulationAggregate(sim: *const installer_mod.SimulationResult) void {
             if (d.source_step_index != null) continue;
             const color: dvui.Color = switch (d.severity) {
                 .info => helpTextColor(),
-                .warn => .{ .r = 0xE0, .g = 0xC0, .b = 0x70 },
-                .err => .{ .r = 0xFF, .g = 0x80, .b = 0x80 },
+                .warn => tokens.toDvui(tokens.active.warn, dvui.Color),
+                .err => tokens.toDvui(tokens.active.danger, dvui.Color),
             };
             dvui.labelNoFmt(@src(), d.msg, .{}, .{ .color_text = color, .id_extra = std.hash.Wyhash.hash(0, d.msg) });
         }
@@ -936,8 +936,8 @@ fn renderOneRow(
         };
         action_color = switch (f.action) {
             .add => .{ .r = 0x4F, .g = 0xC3, .b = 0x6F },
-            .overwrite_vanilla => .{ .r = 0xE0, .g = 0xC0, .b = 0x70 },
-            .overwrite_mod => .{ .r = 0xFF, .g = 0x80, .b = 0x80 },
+            .overwrite_vanilla => tokens.toDvui(tokens.active.warn, dvui.Color),
+            .overwrite_mod => tokens.toDvui(tokens.active.danger, dvui.Color),
         };
         if (f.conflicting_mod) |m| {
             extras = std.fmt.bufPrint(&extra_buf, "   (owned by `{s}`)", .{m}) catch "";
@@ -948,7 +948,7 @@ fn renderOneRow(
         action_color = if (!d.existed)
             style.labelDim()
         else
-            .{ .r = 0xE0, .g = 0xC0, .b = 0x70 };
+            tokens.toDvui(tokens.active.warn, dvui.Color);
         if (!d.existed) extras = "   (no matching file in plan)";
     } else if (node.mode_change) |mc| {
         step_idx = mc.source_step_index;
@@ -1296,8 +1296,8 @@ fn renderWizardBlockRow(
             if (d.source_step_index == null or d.source_step_index.? != idx) continue;
             const color: dvui.Color = switch (d.severity) {
                 .info => helpTextColor(),
-                .warn => .{ .r = 0xE0, .g = 0xC0, .b = 0x70 },
-                .err => .{ .r = 0xFF, .g = 0x80, .b = 0x80 },
+                .warn => tokens.toDvui(tokens.active.warn, dvui.Color),
+                .err => tokens.toDvui(tokens.active.danger, dvui.Color),
             };
             dvui.labelNoFmt(@src(), d.msg, .{}, .{
                 .color_text = color,

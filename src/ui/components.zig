@@ -299,7 +299,9 @@ pub fn tabButton(label: []const u8, active: bool) bool {
 /// prose-under-heading slots. `dvui.label` doesn't wrap — long
 /// explanations overflow the panel at narrow window widths. Using
 /// `textLayout` with `.expand = .horizontal` lets the text reflow.
-pub fn helpTextColor() dvui.Color { return style.labelDim(); }
+pub fn helpTextColor() dvui.Color {
+    return style.labelDim();
+}
 
 pub fn settingsHelpText(text: []const u8) void {
     // dvui's textLayout draws a selection / focus ring by default
@@ -1076,8 +1078,8 @@ fn renderToastPill(index: usize, t: state_mod.Toast) bool {
     const text_color: dvui.Color = switch (t.kind) {
         .info => helpTextColor(),
         .success => tokens.toDvui(tokens.active.acc, dvui.Color),
-        .warn => .{ .r = 0xE0, .g = 0xC0, .b = 0x70 },
-        .err => .{ .r = 0xFF, .g = 0x80, .b = 0x80 },
+        .warn => td(tokens.active.warn),
+        .err => td(tokens.active.danger),
     };
 
     var bw: dvui.ButtonWidget = undefined;
@@ -1249,6 +1251,33 @@ fn statusMiniBar(frac: f32, w: f32) void {
     inner.deinit();
 }
 
+/// Shared trailing cluster for a sync/image activity in the status bar:
+/// a gap, the mini progress bar, another gap, then a `done/total`
+/// counter. Only one activity branch renders per frame, so the repeated
+/// `@src()` widget ids never collide.
+fn statusProgress(frac: f32, done: u32, total: u32, font: dvui.Font) void {
+    const t = tokens.active;
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 9, .h = 1 } });
+    statusMiniBar(frac, 110);
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 9, .h = 1 } });
+    var b: [32]u8 = undefined;
+    dvui.labelNoFmt(@src(), std.fmt.bufPrint(&b, "{d}/{d}", .{ done, total }) catch "", .{}, .{ .gravity_y = 0.5, .color_text = td(t.ink3), .font = font });
+}
+
+/// Cancel affordance for an in-flight sync (pre-flight or `/full`),
+/// living in the status bar now that the old top banner is gone.
+/// `cancelSync` already tears down the fast-check job, the `/full`
+/// queue, and piggybacked image work, so one button covers every sync
+/// phase. `src` is threaded from the call site so the two branches get
+/// distinct widget ids.
+fn statusCancelButton(frame: *Frame, src: std.builtin.SourceLocation, cancelling: bool) void {
+    if (cancelling) {
+        _ = iconButton(src, "Cancelling…", entypo.cross, .{ .style = .control, .gravity_y = 0.5, .color_text = .{ .r = 0x80, .g = 0x80, .b = 0x80 } });
+    } else {
+        if (iconButton(src, "Cancel", entypo.cross, .{ .style = .err, .gravity_y = 0.5 })) actions.cancelSync(frame);
+    }
+}
+
 fn statusJobTitle(frame: *Frame, job: *const downloads.Job) []const u8 {
     if (job.game_id != 0) {
         for (frame.games) |*g| {
@@ -1323,14 +1352,86 @@ pub fn renderStatusBar(frame: *Frame) void {
     } else if (n_post > 0) {
         statusDot(td(t.warn));
         dvui.labelNoFmt(@src(), "Installing…", .{}, .{ .gravity_y = 0.5, .color_text = td(t.ink2), .font = mono });
-    } else if (state.anyActiveSync()) {
+    } else if (state.folder_import_job) |fj| {
+        // Background folder copy/move (cross-device or copy mode). The
+        // byte total is 2× the data size (copy + verify), so a percent
+        // reads cleaner than a GB counter that would show double.
+        statusDot(td(t.acc));
+        const p = &fj.payload;
+        const ci = p.cur_index.load(.acquire);
+        const name = if (ci < p.items.len) p.items[ci].name else "";
+        var bimp: [96]u8 = undefined;
+        const lbl = if (name.len > 0) (std.fmt.bufPrint(&bimp, "Importing {s}", .{name}) catch "Importing…") else "Importing…";
+        dvui.labelNoFmt(@src(), lbl, .{}, .{ .gravity_y = 0.5, .color_text = td(t.ink2), .font = mono });
+        const bd = p.bytes_done.load(.monotonic);
+        const bt = p.bytes_total.load(.acquire);
+        const frac: f32 = if (bt > 0) @as(f32, @floatFromInt(bd)) / @as(f32, @floatFromInt(bt)) else 0;
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 9, .h = 1 } });
+        statusMiniBar(frac, 110);
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 9, .h = 1 } });
+        var bpct: [16]u8 = undefined;
+        const pct: u32 = @intFromFloat(std.math.clamp(frac, 0, 1) * 100);
+        dvui.labelNoFmt(@src(), std.fmt.bufPrint(&bpct, "{d}%", .{pct}) catch "", .{}, .{ .gravity_y = 0.5, .color_text = td(t.ink3), .font = mono });
+        if (fj.cancelRequested()) {
+            _ = iconButton(@src(), "Cancelling…", entypo.cross, .{ .style = .control, .gravity_y = 0.5, .color_text = .{ .r = 0x80, .g = 0x80, .b = 0x80 } });
+        } else {
+            if (iconButton(@src(), "Cancel", entypo.cross, .{ .style = .err, .gravity_y = 0.5 })) actions.cancelFolderImport(frame);
+        }
+    } else if (state.pending_fast_check) |fc| {
+        // Phase 0: indexer `/fast` pre-flight. No per-game name yet —
+        // the bar is purely count-driven off the worker's atomics.
+        statusDot(td(t.acc));
+        dvui.labelNoFmt(@src(), "Checking for changes", .{}, .{ .gravity_y = 0.5, .color_text = td(t.ink2), .font = mono });
+        const fd = fc.payload.fast_done.load(.acquire);
+        const ftot = fc.payload.fast_total;
+        const frac: f32 = if (ftot > 0) @as(f32, @floatFromInt(fd)) / @as(f32, @floatFromInt(ftot)) else 0;
+        statusProgress(frac, fd, ftot, mono);
+        statusCancelButton(frame, @src(), fc.cancel.load(.acquire));
+    } else if (state.anyActiveSync() or state.sync_queue != null) {
+        // Phase 1: per-game `/full` syncs. `sync_queue_started/total`
+        // is the batch position; the name is the row in flight.
         statusDot(td(t.acc));
         const nm = state.currentSyncName();
         var b3: [96]u8 = undefined;
         const lbl = if (nm.len > 0) (std.fmt.bufPrint(&b3, "Syncing {s}", .{nm}) catch "Syncing…") else "Syncing…";
         dvui.labelNoFmt(@src(), lbl, .{}, .{ .gravity_y = 0.5, .color_text = td(t.ink2), .font = mono });
+        const done = state.sync_queue_started;
+        const tot = state.sync_queue_total;
+        const frac: f32 = if (tot > 0) @as(f32, @floatFromInt(done)) / @as(f32, @floatFromInt(tot)) else 0;
+        statusProgress(frac, done, tot, mono);
+        statusCancelButton(frame, @src(), state.anySyncCancelling());
+    } else if (state.anyActiveImage() or
+        (state.image_queue != null and state.image_queue_head < state.image_queue_len) or
+        state.image_total > 0)
+    {
+        // Phase 2: background screenshot backfill. Lower-key dot — the
+        // library is fully usable while this trickles in.
+        statusDot(td(t.acc_dim));
+        dvui.labelNoFmt(@src(), "Fetching screenshots", .{}, .{ .gravity_y = 0.5, .color_text = td(t.ink2), .font = mono });
+        const idone = state.image_done.load(.acquire);
+        const itot = state.image_total;
+        const frac: f32 = if (itot > 0) @as(f32, @floatFromInt(idone)) / @as(f32, @floatFromInt(itot)) else 0;
+        statusProgress(frac, idone, itot, mono);
+        if (state.image_cancel.load(.acquire)) {
+            _ = iconButton(@src(), "Cancelling…", entypo.cross, .{ .style = .control, .gravity_y = 0.5, .color_text = .{ .r = 0x80, .g = 0x80, .b = 0x80 } });
+        } else {
+            if (iconButton(@src(), "Cancel", entypo.cross, .{ .style = .control, .gravity_y = 0.5 })) actions.cancelImageQueue(frame);
+        }
     } else {
-        dvui.labelNoFmt(@src(), "Ready", .{}, .{ .gravity_y = 0.5, .color_text = td(t.ink3), .font = mono });
+        // Idle: surface the last sync/tag/import status message so a
+        // failed sync doesn't just silently fall back to "Ready". Errors
+        // (sync_status == .err) render in the danger color and, being an
+        // .err toast's peer, persist until the next action overwrites the
+        // buffer. Progress is shown by the branches above; this only fires
+        // when nothing is actively running.
+        const smsg = state.syncMsg();
+        if (smsg.len > 0) {
+            const is_err = state.sync_status == .err;
+            statusDot(td(if (is_err) t.danger else t.ink3));
+            dvui.labelNoFmt(@src(), smsg, .{}, .{ .gravity_y = 0.5, .color_text = td(if (is_err) t.danger else t.ink3), .font = mono });
+        } else {
+            dvui.labelNoFmt(@src(), "Ready", .{}, .{ .gravity_y = 0.5, .color_text = td(t.ink3), .font = mono });
+        }
     }
 
     _ = dvui.spacer(@src(), .{ .expand = .horizontal });
@@ -1340,7 +1441,7 @@ pub fn renderStatusBar(frame: *Frame) void {
     if (n_post > 0) statusSeg(0xD1, "install", n_post, td(t.warn), mono);
     if (n_seed > 0) statusSeg(0xD2, "\u{2191} seeding", n_seed, td(t.ink3), mono);
     {
-        const syncing = state.anyActiveSync();
+        const syncing = state.anyActiveSync() or state.sync_queue != null or state.pending_fast_check != null;
         dvui.labelNoFmt(@src(), if (syncing) "\u{27F3} syncing" else "\u{27F3} idle", .{}, .{
             .id_extra = 0xD9,
             .gravity_y = 0.5,
@@ -1359,396 +1460,4 @@ pub fn renderStatusBar(frame: *Frame) void {
         .padding = .{ .x = 8, .y = 0, .w = 0, .h = 0 },
     });
     if (dvui.clicked(bar.data(), .{})) state.dock_expanded = !state.dock_expanded;
-}
-
-pub fn renderSyncBanner(frame: *Frame) void {
-    const state = frame.state;
-    const has_active = state.anyActiveSync();
-    const has_queue = state.sync_queue != null;
-    // Phase-2 (background image fetch) keeps the banner pinned even
-    // after phase-1 sync-all is done. The whole library is usable; the
-    // banner just shows "still tidying up screenshots…". `image_total
-    // > 0` covers the brief window where the active job is reaped but
-    // the next hasn't spawned yet.
-    const has_image_work = state.anyActiveImage() or
-        (state.image_queue != null and state.image_queue_head < state.image_queue_len) or
-        state.image_total > 0;
-
-    // Debounce the image row: only show it once image work has been in
-    // flight for at least IMAGE_BANNER_MIN_NS. A burst that drains
-    // near-instantly (a lone cache-fast fetch, or a residual total>0
-    // window between jobs) never crosses the threshold, so the bar
-    // can't flash on and off. `enqueueImageFetch` already suppresses
-    // no-new-image jobs entirely; this catches every other transient.
-    const IMAGE_BANNER_MIN_NS: i128 = 150 * std.time.ns_per_ms;
-    const now_ns = dvui.frameTimeNS();
-    if (has_image_work) {
-        if (state.image_work_since_ns == 0) state.image_work_since_ns = now_ns;
-    } else {
-        state.image_work_since_ns = 0;
-    }
-    const image_row_visible = has_image_work and
-        (now_ns - state.image_work_since_ns) >= IMAGE_BANNER_MIN_NS;
-
-    // Only surface the banner while a sync is genuinely in flight.
-    // Terminal messages like "nothing to sync — all games already
-    // populated" used to keep the banner pinned on every screen
-    // (including during bookmark imports) — that's noisy and confusing.
-    // Settled state messages live in their normal status-line slots.
-    if (!has_active and !has_queue and !image_row_visible) return;
-
-    // Stack: row 1 = sync (text + cover); row 2 = phase-2 (images).
-    // The outer vbox gives both rows the same padded background so it
-    // reads as a single banner.
-    var outer = dvui.box(@src(), .{ .dir = .vertical }, .{
-        .expand = .horizontal,
-        .padding = .{ .x = 12, .y = 4, .w = 12, .h = 4 },
-        .background = true,
-        .style = if (state.sync_status == .err) .err else .highlight,
-    });
-    defer outer.deinit();
-
-    // Only render row 1 when phase-1 work is in flight; otherwise the
-    // phase-2 row stands alone after the sync-all batch settles.
-    if (has_active or has_queue) {
-        renderSyncBannerSyncRow(frame);
-    }
-    if (image_row_visible) {
-        renderSyncBannerImageRow(frame);
-    }
-}
-
-// Banner column widths. Every right-side column reserves its slot so
-// the sync row and image row align — the progress bar lives at the
-// same X on both rows regardless of which extras are visible. Numbers
-// are tuned for the default UI scale; dvui scales them up/down with
-// the global content-scale.
-const BANNER_TITLE_W: f32 = 320;
-/// Max source bytes copied into the title before bufPrint formats with
-/// counters. Roughly tuned to fit within `BANNER_TITLE_W` at default UI
-/// scale — anything longer gets ellipsized at the byte boundary
-/// (might split a multi-byte UTF-8 codepoint, which dvui then renders
-/// as a tofu glyph; preferable to the right-side cluster sliding).
-const BANNER_TITLE_MAX_CHARS: usize = 40;
-const BANNER_BAR_W: f32 = 200;
-const BANNER_BAR_H_SYNC: f32 = 12;
-const BANNER_BAR_H_IMAGE: f32 = 10;
-const BANNER_BAR_INNER_W: f32 = 196;
-const BANNER_COUNTER_W: f32 = 86;
-const BANNER_STEP_W: f32 = 110;
-const BANNER_CANCEL_W: f32 = 150;
-const BANNER_GAP: f32 = 10;
-const BANNER_ROW_H: f32 = 24;
-const BANNER_TEXT_PRIMARY = dvui.Color{ .r = 0xE0, .g = 0xE0, .b = 0xE0 };
-const BANNER_TEXT_DIM = dvui.Color{ .r = 0xC0, .g = 0x90, .b = 0xA8 };
-
-/// Copy `src` into `buf` cropped to ≤ `max_bytes`, appending an
-/// ellipsis (`...`) when truncated. Walks back to a UTF-8 char
-/// boundary so we don't slice a multi-byte codepoint in half.
-fn truncForBanner(buf: []u8, src: []const u8, max_bytes: usize) []const u8 {
-    if (src.len <= max_bytes) return src;
-    const room: usize = if (max_bytes > 3) max_bytes - 3 else max_bytes;
-    var cut: usize = @min(room, src.len);
-    if (cut > buf.len - 3) cut = buf.len - 3;
-    // Step back to the start of a UTF-8 codepoint. Continuation bytes
-    // have the top two bits `10`; start bytes do not.
-    while (cut > 0 and (src[cut] & 0xC0) == 0x80) : (cut -= 1) {}
-    if (cut == 0) return src[0..0];
-    @memcpy(buf[0..cut], src[0..cut]);
-    buf[cut] = '.';
-    buf[cut + 1] = '.';
-    buf[cut + 2] = '.';
-    return buf[0 .. cut + 3];
-}
-
-fn renderSyncBannerSyncRow(frame: *Frame) void {
-    const state = frame.state;
-    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
-        .expand = .horizontal,
-        .min_size_content = .{ .w = 0, .h = BANNER_ROW_H + 4 },
-    });
-    defer bar.deinit();
-
-    // ---- Title column (fixed width — capped so a long game name
-    // can't push the right-side cluster around) ----
-    {
-        var title_box = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .min_size_content = .{ .w = BANNER_TITLE_W, .h = BANNER_ROW_H },
-            .max_size_content = dvui.Options.MaxSize.width(BANNER_TITLE_W),
-            .gravity_y = 0.5,
-        });
-        defer title_box.deinit();
-
-        const cur_name = state.currentSyncName();
-        var name_trunc_buf: [BANNER_TITLE_MAX_CHARS]u8 = undefined;
-        var title_buf: [BANNER_TITLE_MAX_CHARS + 40]u8 = undefined;
-        const title_text: []const u8 = blk: {
-            if (cur_name.len > 0 and state.sync_queue_total > 0) {
-                const tn = truncForBanner(&name_trunc_buf, cur_name, BANNER_TITLE_MAX_CHARS);
-                break :blk std.fmt.bufPrint(
-                    &title_buf,
-                    "Syncing {s}  ({d}/{d})",
-                    .{ tn, state.sync_queue_started, state.sync_queue_total },
-                ) catch "Syncing\u{2026}";
-            } else if (cur_name.len > 0) {
-                const tn = truncForBanner(&name_trunc_buf, cur_name, BANNER_TITLE_MAX_CHARS);
-                break :blk std.fmt.bufPrint(&title_buf, "Syncing {s}\u{2026}", .{tn}) catch "Syncing\u{2026}";
-            } else if (!state.sync_msg.isEmpty()) {
-                break :blk truncForBanner(&title_buf, state.syncMsg(), BANNER_TITLE_MAX_CHARS);
-            } else {
-                break :blk "Syncing\u{2026}";
-            }
-        };
-        dvui.labelNoFmt(@src(), title_text, .{}, .{
-            .gravity_y = 0.5,
-            .color_text = BANNER_TEXT_PRIMARY,
-        });
-    }
-
-    _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-
-    // ---- Progress bar column (fixed width; always drawn) ----
-    {
-        const pct: u32 = if (state.sync_queue_total > 0)
-            @intCast(@min(@divTrunc(@as(u64, state.sync_queue_started) * 100, @as(u64, state.sync_queue_total)), 100))
-        else
-            0;
-        var bar_outer = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .min_size_content = .{ .w = BANNER_BAR_W, .h = BANNER_BAR_H_SYNC },
-            .border = style.border_thin,
-            .corner_radius = .all(3),
-            .color_border = style.borderColor(),
-            .background = true,
-            .color_fill = .{ .r = 0x16, .g = 0x0B, .b = 0x10 },
-            .gravity_y = 0.5,
-        });
-        defer bar_outer.deinit();
-        if (pct > 0) {
-            const fill_w: f32 = (@as(f32, @floatFromInt(pct)) * BANNER_BAR_INNER_W) / 100.0;
-            var bar_inner = dvui.box(@src(), .{ .dir = .horizontal }, .{
-                .min_size_content = .{
-                    .w = @max(2.0, fill_w),
-                    .h = BANNER_BAR_H_SYNC - 4,
-                },
-                .background = true,
-                .color_fill = tokens.toDvui(tokens.active.acc, dvui.Color),
-                .corner_radius = .all(2),
-                .gravity_y = 0.5,
-            });
-            bar_inner.deinit();
-        }
-    }
-
-    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = BANNER_GAP, .h = 1 } });
-
-    // ---- Counter column (fixed width) ----
-    {
-        var counter_box = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .min_size_content = .{ .w = BANNER_COUNTER_W, .h = BANNER_ROW_H },
-            .gravity_y = 0.5,
-        });
-        defer counter_box.deinit();
-        var pct_buf: [24]u8 = undefined;
-        const pct_str = if (state.sync_queue_total > 0)
-            std.fmt.bufPrint(&pct_buf, "{d}/{d}", .{ state.sync_queue_started, state.sync_queue_total }) catch ""
-        else
-            "";
-        dvui.labelNoFmt(@src(), pct_str, .{}, .{
-            .gravity_y = 0.5,
-            .color_text = BANNER_TEXT_PRIMARY,
-        });
-    }
-
-    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = BANNER_GAP, .h = 1 } });
-
-    // ---- Step/cancelling slot (fixed width even when empty) ----
-    {
-        var step_box = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .min_size_content = .{ .w = BANNER_STEP_W, .h = BANNER_ROW_H },
-            .gravity_y = 0.5,
-        });
-        defer step_box.deinit();
-        var step_text: []const u8 = "";
-        var step_buf: [40]u8 = undefined;
-        if (state.firstActiveSync()) |j| {
-            if (j.cancel.load(.acquire)) {
-                step_text = "cancelling\u{2026}";
-            } else {
-                const done = j.payload.progress_done.load(.acquire);
-                const total = j.payload.progress_total.load(.acquire);
-                if (total > 1) {
-                    step_text = std.fmt.bufPrint(&step_buf, "step {d}/{d}", .{ done, total }) catch "";
-                }
-            }
-        }
-        dvui.labelNoFmt(@src(), step_text, .{}, .{
-            .gravity_y = 0.5,
-            .color_text = BANNER_TEXT_DIM,
-        });
-    }
-
-    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = BANNER_GAP, .h = 1 } });
-
-    // ---- Cancel button (fixed width) ----
-    {
-        var cancel_box = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .min_size_content = .{ .w = BANNER_CANCEL_W, .h = BANNER_ROW_H },
-            .gravity_y = 0.5,
-        });
-        defer cancel_box.deinit();
-        const sync_cancelling: bool = state.anySyncCancelling();
-        if (sync_cancelling) {
-            const dim: dvui.Options = .{
-                .style = .control,
-                .color_text = .{ .r = 0x80, .g = 0x80, .b = 0x80 },
-            };
-            _ = iconButton(@src(), "Cancelling\u{2026}", entypo.cross, dim);
-        } else {
-            if (iconButton(@src(), "Cancel", entypo.cross, .{ .style = .err })) {
-                actions.cancelSync(frame);
-            }
-        }
-    }
-}
-
-/// Phase-2 banner row: aggregate progress for background screenshot
-/// fetches. Stays pinned after phase-1 wraps up so the user can see
-/// "library is usable, images still trickling in".
-fn renderSyncBannerImageRow(frame: *Frame) void {
-    const state = frame.state;
-    var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
-        .expand = .horizontal,
-        .min_size_content = .{ .w = 0, .h = BANNER_ROW_H + 4 },
-        .padding = .{ .x = 0, .y = 2, .w = 0, .h = 0 },
-    });
-    defer bar.deinit();
-
-    const queue_pending: usize = if (state.image_queue) |_|
-        state.image_queue_len - state.image_queue_head
-    else
-        0;
-    const cur_name = state.currentImageName();
-    const cancelling = state.image_cancel.load(.acquire);
-    const done = state.image_done.load(.acquire);
-    const total = state.image_total;
-
-    // ---- Title column (same width + cap as sync row) ----
-    {
-        var title_box = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .min_size_content = .{ .w = BANNER_TITLE_W, .h = BANNER_ROW_H },
-            .max_size_content = dvui.Options.MaxSize.width(BANNER_TITLE_W),
-            .gravity_y = 0.5,
-        });
-        defer title_box.deinit();
-
-        var name_trunc_buf: [BANNER_TITLE_MAX_CHARS]u8 = undefined;
-        var title_buf: [BANNER_TITLE_MAX_CHARS + 40]u8 = undefined;
-        const title_text: []const u8 = blk: {
-            if (cancelling) break :blk "Cancelling image fetch\u{2026}";
-            if (cur_name.len > 0 and queue_pending > 0) {
-                const tn = truncForBanner(&name_trunc_buf, cur_name, BANNER_TITLE_MAX_CHARS);
-                break :blk std.fmt.bufPrint(
-                    &title_buf,
-                    "Fetching images: {s}  (+{d})",
-                    .{ tn, queue_pending },
-                ) catch "Fetching images\u{2026}";
-            }
-            if (cur_name.len > 0) {
-                const tn = truncForBanner(&name_trunc_buf, cur_name, BANNER_TITLE_MAX_CHARS);
-                break :blk std.fmt.bufPrint(&title_buf, "Fetching images: {s}", .{tn}) catch "Fetching images\u{2026}";
-            }
-            break :blk "Fetching images\u{2026}";
-        };
-        dvui.labelNoFmt(@src(), title_text, .{}, .{
-            .gravity_y = 0.5,
-            .color_text = BANNER_TEXT_PRIMARY,
-        });
-    }
-
-    _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-
-    // ---- Progress bar column (same width as sync row) ----
-    {
-        const pct: u32 = if (total > 0)
-            @intCast(@min(@divTrunc(@as(u64, done) * 100, @as(u64, total)), 100))
-        else
-            0;
-        var bar_outer = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .min_size_content = .{ .w = BANNER_BAR_W, .h = BANNER_BAR_H_IMAGE },
-            .border = style.border_thin,
-            .corner_radius = .all(3),
-            .color_border = style.borderColor(),
-            .background = true,
-            .color_fill = .{ .r = 0x16, .g = 0x0B, .b = 0x10 },
-            .gravity_y = 0.5,
-        });
-        defer bar_outer.deinit();
-        if (pct > 0) {
-            const fill_w: f32 = (@as(f32, @floatFromInt(pct)) * BANNER_BAR_INNER_W) / 100.0;
-            var bar_inner = dvui.box(@src(), .{ .dir = .horizontal }, .{
-                .min_size_content = .{
-                    .w = @max(2.0, fill_w),
-                    .h = BANNER_BAR_H_IMAGE - 4,
-                },
-                .background = true,
-                .color_fill = .{ .r = 0x8A, .g = 0x6E, .b = 0xC9 },
-                .corner_radius = .all(2),
-                .gravity_y = 0.5,
-            });
-            bar_inner.deinit();
-        }
-    }
-
-    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = BANNER_GAP, .h = 1 } });
-
-    // ---- Counter column ----
-    {
-        var counter_box = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .min_size_content = .{ .w = BANNER_COUNTER_W, .h = BANNER_ROW_H },
-            .gravity_y = 0.5,
-        });
-        defer counter_box.deinit();
-        var pct_buf: [32]u8 = undefined;
-        const pct_str = if (total > 0)
-            std.fmt.bufPrint(&pct_buf, "{d}/{d}", .{ done, total }) catch ""
-        else
-            "";
-        dvui.labelNoFmt(@src(), pct_str, .{}, .{
-            .gravity_y = 0.5,
-            .color_text = BANNER_TEXT_DIM,
-        });
-    }
-
-    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = BANNER_GAP, .h = 1 } });
-
-    // ---- Step slot (empty on image row — preserved for alignment) ----
-    {
-        var step_box = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .min_size_content = .{ .w = BANNER_STEP_W, .h = BANNER_ROW_H },
-            .gravity_y = 0.5,
-        });
-        defer step_box.deinit();
-    }
-
-    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = BANNER_GAP, .h = 1 } });
-
-    // ---- Cancel button ----
-    {
-        var cancel_box = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .min_size_content = .{ .w = BANNER_CANCEL_W, .h = BANNER_ROW_H },
-            .gravity_y = 0.5,
-        });
-        defer cancel_box.deinit();
-        if (cancelling) {
-            const dim: dvui.Options = .{
-                .style = .control,
-                .color_text = .{ .r = 0x80, .g = 0x80, .b = 0x80 },
-            };
-            _ = iconButton(@src(), "Cancelling\u{2026}", entypo.cross, dim);
-        } else {
-            if (iconButton(@src(), "Cancel images", entypo.cross, .{ .style = .control })) {
-                actions.cancelImageQueue(frame);
-            }
-        }
-    }
 }

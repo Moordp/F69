@@ -21,6 +21,7 @@ const actions = @import("../actions.zig");
 const state_mod = @import("../state.zig");
 const components = @import("../components.zig");
 const file_picker = @import("util_file_picker");
+const tokens = @import("ui_tokens");
 const entypo = dvui.entypo;
 
 const Frame = types.Frame;
@@ -43,7 +44,7 @@ pub fn importUrlsScreen(frame: *Frame) !bool {
         defer top.deinit();
         if (components.iconButton(@src(), "Back", entypo.chevron_left, .{})) state.screen = .library;
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 12, .h = 1 } });
-        dvui.label(@src(), "Import by F95 URL / ID", .{}, .{ .gravity_y = 0.5, .style = .highlight });
+        dvui.label(@src(), "Import by F95 URL / ID", .{}, .{ .gravity_y = 0.5, .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         if (style.button(@src(), "Import", .{}, .{ .style = .highlight })) {
             const result = doImport(frame, state.importBufSlice());
@@ -86,7 +87,7 @@ pub fn importUrlsScreen(frame: *Frame) !bool {
 
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
     if (!state.import_msg.isEmpty()) {
-        dvui.labelNoFmt(@src(), state.importMsg(), .{}, .{ .style = .highlight });
+        dvui.labelNoFmt(@src(), state.importMsg(), .{}, .{ .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
     } else {
         dvui.label(@src(), "Imported games show up as \"(unsynced)\". Click Sync on each to populate.", .{}, .{});
     }
@@ -139,7 +140,7 @@ pub fn importF95CheckerReviewScreen(frame: *Frame) !bool {
             actions.doCancelF95CheckerReview(frame);
         }
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 12, .h = 1 } });
-        dvui.labelNoFmt(@src(), "Import from F95Checker — review", .{}, .{ .gravity_y = 0.5, .style = .highlight });
+        dvui.labelNoFmt(@src(), "Import from F95Checker — review", .{}, .{ .gravity_y = 0.5, .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
     }
     _ = dvui.separator(@src(), .{ .expand = .horizontal });
 
@@ -289,7 +290,7 @@ fn renderFolderScanScreen(frame: *Frame, copy: FolderScanCopy) !bool {
         defer top.deinit();
         if (components.iconButton(@src(), "Back", entypo.chevron_left, .{})) state.screen = .library;
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 12, .h = 1 } });
-        dvui.labelNoFmt(@src(), copy.title, .{}, .{ .gravity_y = 0.5, .style = .highlight });
+        dvui.labelNoFmt(@src(), copy.title, .{}, .{ .gravity_y = 0.5, .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
     }
     _ = dvui.separator(@src(), .{ .expand = .horizontal });
 
@@ -690,7 +691,7 @@ fn renderPreviewRow(
                 const issue_text = truncStr(&label_buf, short, charsForWidth(RIGHT_BLOCK_W - 8));
                 dvui.labelNoFmt(@src(), issue_text, .{}, .{
                     .id_extra = row_id_base + 8,
-                    .color_text = .{ .r = 0xE0, .g = 0xA8, .b = 0x55 },
+                    .color_text = tokens.toDvui(tokens.active.warn, dvui.Color),
                     .font = cell_font,
                     .gravity_y = 0.5,
                 });
@@ -1106,6 +1107,13 @@ fn renderCommitRow(frame: *Frame, rows: []state_mod.FolderImportRowState) void {
     dvui.labelNoFmt(@src(), msg, .{}, .{ .gravity_y = 0.5 });
     _ = dvui.spacer(@src(), .{ .expand = .horizontal });
 
+    // A background transfer is already grinding — don't let a second
+    // commit pile on. The bottom bar shows its progress + a Cancel.
+    if (actions.folderImportActive(frame.state)) {
+        _ = style.button(@src(), "Importing… (see bottom bar)", .{}, .{});
+        return;
+    }
+
     const enabled = ticked > 0 and resolved == ticked;
     const opts: dvui.Options = if (enabled) .{ .style = .highlight } else .{};
     if (style.button(@src(), "Import ticked rows", .{}, opts)) {
@@ -1171,6 +1179,10 @@ fn engineLabel(e: importers.Engine) []const u8 {
         .qsp => "QSP",
         .tyranobuilder => "TyranoBuilder",
         .twine => "Twine",
+        .adrift => "ADRIFT",
+        .rags => "RAGS",
+        .tads => "TADS",
+        .webgl => "WebGL",
         .other => "other",
         .unknown => "(unknown)",
     };
@@ -1284,7 +1296,7 @@ fn renderResolvePopup(frame: *Frame) void {
     });
     defer body.deinit();
 
-    dvui.labelNoFmt(@src(), game.name, .{}, .{ .style = .highlight });
+    dvui.labelNoFmt(@src(), game.name, .{}, .{ .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
     if (game.version) |v| {
         var vbuf: [80]u8 = undefined;
         const vmsg = std.fmt.bufPrint(&vbuf, "version: {s}", .{v}) catch v;

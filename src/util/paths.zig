@@ -6,31 +6,46 @@ const builtin = @import("builtin");
 pub const Error = error{ NoHomeDir, OutOfMemory };
 
 /// Config base: `%APPDATA%` on Windows; `$XDG_CONFIG_HOME` or `$HOME/.config` elsewhere. Caller frees.
-pub fn configHome(alloc: std.mem.Allocator) Error![]u8 {
+pub fn configHome(environ: std.process.Environ, alloc: std.mem.Allocator) Error![]u8 {
     if (builtin.os.tag == .windows) {
-        return std.process.getEnvVarOwned(alloc, "APPDATA") catch Error.NoHomeDir;
+        return environ.getAlloc(alloc, "APPDATA") catch Error.NoHomeDir;
     }
-    if (std.process.getEnvVarOwned(alloc, "XDG_CONFIG_HOME")) |x| return x else |_| {}
-    const h = std.process.getEnvVarOwned(alloc, "HOME") catch return Error.NoHomeDir;
+    if (environ.getAlloc(alloc, "XDG_CONFIG_HOME")) |x| return x else |_| {}
+    const h = environ.getAlloc(alloc, "HOME") catch return Error.NoHomeDir;
     defer alloc.free(h);
     return std.fmt.allocPrint(alloc, "{s}/.config", .{h}) catch Error.OutOfMemory;
 }
 
 /// Cache base: `%LOCALAPPDATA%` on Windows; `$XDG_CACHE_HOME` or `$HOME/.cache` elsewhere. Caller frees.
-pub fn cacheHome(alloc: std.mem.Allocator) Error![]u8 {
+pub fn cacheHome(environ: std.process.Environ, alloc: std.mem.Allocator) Error![]u8 {
     if (builtin.os.tag == .windows) {
-        return std.process.getEnvVarOwned(alloc, "LOCALAPPDATA") catch Error.NoHomeDir;
+        return environ.getAlloc(alloc, "LOCALAPPDATA") catch Error.NoHomeDir;
     }
-    if (std.process.getEnvVarOwned(alloc, "XDG_CACHE_HOME")) |x| return x else |_| {}
-    const h = std.process.getEnvVarOwned(alloc, "HOME") catch return Error.NoHomeDir;
+    if (environ.getAlloc(alloc, "XDG_CACHE_HOME")) |x| return x else |_| {}
+    const h = environ.getAlloc(alloc, "HOME") catch return Error.NoHomeDir;
     defer alloc.free(h);
     return std.fmt.allocPrint(alloc, "{s}/.cache", .{h}) catch Error.OutOfMemory;
 }
 
 /// Home dir: `%USERPROFILE%` on Windows; `$HOME` elsewhere. Caller frees.
-pub fn home(alloc: std.mem.Allocator) Error![]u8 {
+pub fn home(environ: std.process.Environ, alloc: std.mem.Allocator) Error![]u8 {
     const key = if (builtin.os.tag == .windows) "USERPROFILE" else "HOME";
-    return std.process.getEnvVarOwned(alloc, key) catch Error.NoHomeDir;
+    return environ.getAlloc(alloc, key) catch Error.NoHomeDir;
+}
+
+/// System temp dir: `%TEMP%`/`%TMP%` on Windows; `$TMPDIR` or `/tmp`
+/// elsewhere. Never fails — falls back to a platform-conventional default
+/// so callers always get a usable scratch root (used for mod-apply
+/// staging, which on Windows must land in the real temp dir rather than
+/// a drive-root `C:\tmp`). Caller frees.
+pub fn tempDir(environ: std.process.Environ, alloc: std.mem.Allocator) error{OutOfMemory}![]u8 {
+    if (builtin.os.tag == .windows) {
+        if (environ.getAlloc(alloc, "TEMP")) |x| return x else |_| {}
+        if (environ.getAlloc(alloc, "TMP")) |x| return x else |_| {}
+        return alloc.dupe(u8, "C:\\Windows\\Temp");
+    }
+    if (environ.getAlloc(alloc, "TMPDIR")) |x| return x else |_| {}
+    return alloc.dupe(u8, "/tmp");
 }
 
 /// `<library_root>/<game_id>/<version>/`. Caller frees.
