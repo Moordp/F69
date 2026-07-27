@@ -8,6 +8,7 @@ const std = @import("std");
 const Io = std.Io;
 const library = @import("library");
 const installer = @import("installer");
+const installer_act = @import("installer.zig");
 const file_picker = @import("util_file_picker");
 const types = @import("../types.zig");
 
@@ -99,15 +100,17 @@ pub const ApplyTally = struct {
     wrong_engine: usize = 0,
     engine_unknown: usize = 0,
     opted_out: usize = 0,
+    not_installed: usize = 0,
     failed: usize = 0,
 
     pub fn describe(self: ApplyTally, buf: []u8) []const u8 {
         var w: std.Io.Writer = .fixed(buf);
-        w.print("Universal mod available on {d} game(s)", .{self.applied}) catch return "Applied.";
+        w.print("Installing universal mod into {d} game(s)", .{self.applied}) catch return "Applied.";
         const parts = [_]struct { n: usize, label: []const u8 }{
             .{ .n = self.wrong_engine, .label = "other engine" },
             .{ .n = self.engine_unknown, .label = "engine unknown" },
             .{ .n = self.opted_out, .label = "opted out" },
+            .{ .n = self.not_installed, .label = "not installed" },
             .{ .n = self.failed, .label = "failed" },
         };
         var first = true;
@@ -124,6 +127,7 @@ pub const ApplyTally = struct {
 pub fn applyUniversalMod(frame: *Frame, mod_id: i64, engine: library.Engine, modfile_path: []const u8) void {
     const alloc = frame.lib.alloc;
     const ma = installer.mod_archives;
+    const mod_name = std.fs.path.basename(modfile_path);
     var tally = ApplyTally{};
     for (frame.games) |*g| {
         if (g.engine == .unknown) {
@@ -140,23 +144,34 @@ pub fn applyUniversalMod(frame: *Frame, mod_id: i64, engine: library.Engine, mod
             log.info("universal mod {d}: skip tid={d} '{s}' — opted out for this game", .{ mod_id, g.f95_thread_id, g.name });
             continue;
         }
+        // Register it as a managed modfile so it also shows on the game's
+        // per-game Mods page (auto-preset detection etc.).
         const res = ma.addForGame(alloc, frame.io, frame.info.mod_archives_dir, g.f95_thread_id, modfile_path) catch |e| {
             tally.failed += 1;
             log.warn("universal mod {d}: tid={d} '{s}' — addForGame failed: {s}", .{ mod_id, g.f95_thread_id, g.name, @errorName(e) });
             continue;
         };
         switch (res) {
-            .added => |m| {
-                ma.freeModfile(alloc, m);
-                tally.applied += 1;
-            },
-            .duplicate => |d| {
-                ma.freeModfile(alloc, d.existing);
-                tally.applied += 1;
+            .added => |m| ma.freeModfile(alloc, m),
+            .duplicate => |d| ma.freeModfile(alloc, d.existing),
+        }
+
+        // Actually install it into the game's current install — registering
+        // alone left game files untouched ("mods don't get installed").
+        const outcome = installer_act.enqueueUniversalModInstall(frame, g, mod_id, mod_name, modfile_path) catch |e| {
+            tally.failed += 1;
+            log.warn("universal mod {d}: tid={d} '{s}' — enqueue install failed: {s}", .{ mod_id, g.f95_thread_id, g.name, @errorName(e) });
+            continue;
+        };
+        switch (outcome) {
+            .queued, .busy => tally.applied += 1,
+            .not_installed => {
+                tally.not_installed += 1;
+                log.info("universal mod {d}: tid={d} '{s}' — no install to apply into (install the base game first)", .{ mod_id, g.f95_thread_id, g.name });
             },
         }
     }
-    var buf: [160]u8 = undefined;
+    var buf: [192]u8 = undefined;
     frame.state.notifyOk(tally.describe(&buf));
 }
 
@@ -172,25 +187,25 @@ fn copyFile(io: Io, alloc: std.mem.Allocator, src: []const u8, dest: []const u8)
 }
 
 test "ApplyTally.describe: all applied — plain count, no skip tail" {
-    var buf: [160]u8 = undefined;
+    var buf: [192]u8 = undefined;
     const t = ApplyTally{ .applied = 3 };
-    try std.testing.expectEqualStrings("Universal mod available on 3 game(s).", t.describe(&buf));
+    try std.testing.expectEqualStrings("Installing universal mod into 3 game(s).", t.describe(&buf));
 }
 
 test "ApplyTally.describe: skips are itemized so 0 applied is never a mystery" {
-    var buf: [160]u8 = undefined;
-    const t = ApplyTally{ .applied = 0, .wrong_engine = 5, .engine_unknown = 2, .opted_out = 1, .failed = 1 };
+    var buf: [192]u8 = undefined;
+    const t = ApplyTally{ .applied = 0, .wrong_engine = 5, .engine_unknown = 2, .opted_out = 1, .not_installed = 4, .failed = 1 };
     try std.testing.expectEqualStrings(
-        "Universal mod available on 0 game(s) — skipped: 5 other engine, 2 engine unknown, 1 opted out, 1 failed.",
+        "Installing universal mod into 0 game(s) — skipped: 5 other engine, 2 engine unknown, 1 opted out, 4 not installed, 1 failed.",
         t.describe(&buf),
     );
 }
 
 test "ApplyTally.describe: only the skip reasons that occurred are listed" {
-    var buf: [160]u8 = undefined;
+    var buf: [192]u8 = undefined;
     const t = ApplyTally{ .applied = 2, .engine_unknown = 3 };
     try std.testing.expectEqualStrings(
-        "Universal mod available on 2 game(s) — skipped: 3 engine unknown.",
+        "Installing universal mod into 2 game(s) — skipped: 3 engine unknown.",
         t.describe(&buf),
     );
 }

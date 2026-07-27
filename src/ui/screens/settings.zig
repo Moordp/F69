@@ -476,6 +476,11 @@ fn renderAutoConvertSection(frame: *Frame) void {
 fn renderCatUpdates(frame: *Frame) void {
     renderRefreshBackendSection(frame);
     settingsSectionDivider(3);
+    // RSS update-check source is intentionally NOT surfaced in the UI for
+    // now — the code path (rssUpdateCheckWorker + the persisted
+    // `update_check_source` setting) stays wired and defaults to `builtin`,
+    // so nothing changes for users. Re-add `renderUpdateCheckSourceSection`
+    // here to expose the toggle.
     renderAutoCheckSection(frame);
     settingsSectionDivider(2);
     renderAutoUpdateDefaultSection(frame);
@@ -620,6 +625,37 @@ fn renderRefreshBackendSection(frame: *Frame) void {
     components.settingsHelpText(
         "Forum-account actions (login, bookmark import, donor DDL) always hit " ++
             "f95zone.to in either mode — the indexer doesn't proxy authenticated endpoints.",
+    );
+}
+
+/// Lets the user pick what "Check for updates" reads from: f69's own
+/// paginated latest-updates walker, or F95's official RSS feed.
+fn renderUpdateCheckSourceSection(frame: *Frame) void {
+    const state = frame.state;
+    dvui.label(@src(), "Check-for-updates source", .{}, .{ .color_text = dcol(tokens.active.acc) });
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        defer row.deinit();
+        dvui.label(@src(), "Source:", .{}, .{ .gravity_y = 0.5 });
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
+        const src_labels = &[_][]const u8{ "f69 latest-updates scan (deeper)", "F95 RSS feed (lighter)" };
+        var picked: usize = @intFromEnum(state.update_check_source);
+        if (style.dropdown(@src(), src_labels, .{ .choice = &picked }, .{}, .{
+            .min_size_content = .{ .w = 280, .h = 28 },
+            .gravity_y = 0.5,
+        })) {
+            state.update_check_source = @enumFromInt(picked);
+        }
+    }
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 10 } });
+    components.settingsHelpText(
+        "What \"Check for updates\" reads. f69 scan walks F95's latest-updates " ++
+            "pages back to your last check — deepest coverage, several requests. RSS " ++
+            "feed is a single request for the 90 newest updates (the feed's max) — " ++
+            "lighter and fast for big libraries, and still catches revived abandoned " ++
+            "games. Pick f69 scan if you check infrequently (it goes further back); " ++
+            "RSS if you check often. RSS applies in either refresh-backend mode.",
     );
 }
 
@@ -1656,6 +1692,10 @@ const LibraryStats = struct {
     engine_qsp: u32 = 0,
     engine_tyranobuilder: u32 = 0,
     engine_twine: u32 = 0,
+    engine_adrift: u32 = 0,
+    engine_rags: u32 = 0,
+    engine_tads: u32 = 0,
+    engine_webgl: u32 = 0,
     engine_other: u32 = 0,
     engine_unknown: u32 = 0,
     distinct_tags: u32 = 0,
@@ -1692,6 +1732,10 @@ fn libraryStats(games: []const library.Game) LibraryStats {
             .qsp => s.engine_qsp += 1,
             .tyranobuilder => s.engine_tyranobuilder += 1,
             .twine => s.engine_twine += 1,
+            .adrift => s.engine_adrift += 1,
+            .rags => s.engine_rags += 1,
+            .tads => s.engine_tads += 1,
+            .webgl => s.engine_webgl += 1,
             .other => s.engine_other += 1,
             .unknown => s.engine_unknown += 1,
         }

@@ -10,8 +10,10 @@ const dvui = @import("dvui");
 const types = @import("../types.zig");
 const state_mod = @import("../state.zig");
 const import_job = @import("../import_job.zig");
+const folder_import_job = @import("../folder_import_job.zig");
 const importers_mod = @import("importers");
 const file_picker = @import("util_file_picker");
+const util_paths = @import("util_paths");
 const owned_types = @import("../owned.zig");
 const job_mod = @import("../job.zig");
 const common = @import("common.zig");
@@ -63,10 +65,12 @@ const UPDATE_WALK_FIRST_RUN_LOOKBACK_S: i64 = 14 * 24 * 60 * 60;
 /// indexer-mode behavior — same semantics, zero forum traffic.
 pub fn startUpdateCheck(frame: *Frame) void {
     const state = frame.state;
-    if (state.refresh_backend == .indexer) {
+    const use_rss = state.update_check_source == .rss;
+    if (!use_rss and state.refresh_backend == .indexer) {
         // Mirrors the Refresh All flow under the hood; both buttons
         // route to the same batched `/fast` pre-flight + parallel
-        // `/full` pool in indexer mode.
+        // `/full` pool in indexer mode. RSS overrides this — it's a
+        // self-contained update source that works in either backend mode.
         sync_act.startSyncAll(frame);
         return;
     }
@@ -112,26 +116,77 @@ pub fn startUpdateCheck(frame: *Frame) void {
     else
         now_s - UPDATE_WALK_FIRST_RUN_LOOKBACK_S;
 
-    _ = job_mod.spawnJob(
-        UpdateCheckPayload,
-        updateCheckWorker,
-        alloc,
-        frame.win,
-        .{
-            .f95_svc = frame.f95_svc,
-            .io = frame.io,
-            .library_set = set,
-            .since_ts = since,
-            .mismatch_tids = .empty,
-        },
-        &state.pending_update_check,
-    ) catch {
+    const payload = UpdateCheckPayload{
+        .f95_svc = frame.f95_svc,
+        .io = frame.io,
+        .library_set = set,
+        .since_ts = since,
+        .mismatch_tids = .empty,
+    };
+    // Worker fn is a comptime param, so branch the spawn (not the fn value).
+    _ = (if (use_rss)
+        job_mod.spawnJob(UpdateCheckPayload, rssUpdateCheckWorker, alloc, frame.win, payload, &state.pending_update_check)
+    else
+        job_mod.spawnJob(UpdateCheckPayload, updateCheckWorker, alloc, frame.win, payload, &state.pending_update_check)) catch {
         set.deinit();
         return;
     };
 
-    state.setSyncMsg("scanning F95 latest updates…");
+    state.setSyncMsg(if (use_rss) "checking F95 RSS feed…" else "scanning F95 latest updates…");
     state.sync_status = .running;
+}
+
+/// F95's official "latest updates" RSS feed (games category). One
+/// request; the lightweight alternative to the paginated `cmd=list`
+/// walker in `updateCheckWorker`.
+///
+/// `rows=90` is the DEEPEST this feed goes — empirically it honors 30
+/// (default) and 90 only; any other value (95, 100, 200, …) silently
+/// falls back to 30. `page` and `sort` are IGNORED by the `cmd=rss`
+/// endpoint (unlike `cmd=list`), so 90 newest in one request is the hard
+/// ceiling — that's why the builtin walker stays the "deeper" option.
+const RSS_FEED_URL = "https://f95zone.to/sam/latest_alpha/latest_data.php?cmd=rss&cat=games&rows=90";
+
+/// RSS variant of the update-check worker. Populates the SAME
+/// `UpdateCheckPayload` (mismatch_tids / newest_seen_ts / scanned) as
+/// `updateCheckWorker`, so it flows through the identical drain. One
+/// GET + `f95.rss.parseFeed`; matches feed entries against the library
+/// tid set, honoring `since_ts` exactly like the walker.
+fn rssUpdateCheckWorker(job: *UpdateCheckJob) void {
+    const p = &job.payload;
+    if (job.cancelRequested()) {
+        p.err_name = "Cancelled";
+        job.markFailed();
+        return;
+    }
+    const body = p.f95_svc.client.get(RSS_FEED_URL) catch |e| {
+        p.err_name = @errorName(e);
+        job.markFailed();
+        return;
+    };
+    defer job.alloc.free(body);
+
+    const entries = f95.rss.parseFeed(job.alloc, body) catch |e| {
+        p.err_name = @errorName(e);
+        job.markFailed();
+        return;
+    };
+    defer job.alloc.free(entries);
+
+    for (entries) |entry| {
+        p.scanned += 1;
+        if (entry.updated) |ts| {
+            if (ts > p.newest_seen_ts) p.newest_seen_ts = ts;
+        }
+        if (!p.library_set.contains(entry.thread_id)) continue;
+        // Undated entries are always treated as "changed" (present in the
+        // latest-updates feed at all is the signal); dated ones must be at
+        // or after the last-check cutoff — same rule as the walker.
+        const changed = if (entry.updated) |ts| ts >= p.since_ts else true;
+        if (changed) p.mismatch_tids.append(job.alloc, entry.thread_id) catch {};
+    }
+
+    job.markDone();
 }
 
 fn updateCheckWorker(job: *UpdateCheckJob) void {
@@ -384,8 +439,8 @@ pub fn doStartF95CheckerReview(frame: *Frame) void {
         state.notifyErr("Couldn't read $HOME; can't locate the F95Checker DB.");
         return;
     };
-    const data_path = buildConfigDataPath(alloc, .f95checker, home) catch {
-        state.notifyErr("Out of memory resolving F95Checker DB path.");
+    const data_path = buildConfigDataPath(frame.host_launcher.environ, alloc, .f95checker) catch {
+        state.notifyErr("Couldn't resolve the F95Checker config dir (no HOME/APPDATA?).");
         return;
     };
     errdefer alloc.free(data_path);
@@ -414,7 +469,7 @@ pub fn doStartF95CheckerReview(frame: *Frame) void {
     // games-base-dir must not be (or live under) any upstream tool's
     // config dir. The review path never deletes, but Apply will,
     // depending on mode; refusing here keeps the rule consistent.
-    if (importTargetUnsafe(frame.io, alloc, games_base_dir, home)) |reason| {
+    if (importTargetUnsafe(frame.io, frame.host_launcher.environ, alloc, games_base_dir, home)) |reason| {
         defer alloc.free(reason);
         var buf: [320]u8 = undefined;
         const m = std.fmt.bufPrint(&buf, "Import refused: {s}. Pick your games folder, NOT your tool's config folder.", .{reason}) catch "Import refused: unsafe games-base-dir choice.";
@@ -601,8 +656,8 @@ fn startImport(frame: *Frame, source: import_job.Source, mode: import_job.Mode) 
         state.notifyErr("Couldn't read $HOME; pick the source data path manually instead.");
         return;
     };
-    const data_path = buildConfigDataPath(alloc, source, home) catch {
-        state.notifyErr("Out of memory resolving source data path.");
+    const data_path = buildConfigDataPath(frame.host_launcher.environ, alloc, source) catch {
+        state.notifyErr("Couldn't resolve the source config dir (no HOME/APPDATA?).");
         return;
     };
     errdefer alloc.free(data_path);
@@ -641,7 +696,7 @@ fn startImport(frame: *Frame, source: import_job.Source, mode: import_job.Mode) 
     // config this way on 2026-05-28 — see the memory note. Refuse here
     // before any filesystem mutation can start. Use absolute-path
     // resolution so symlinks / `..` / case quirks can't slip past.
-    if (importTargetUnsafe(frame.io, alloc, games_base_dir, home)) |reason| {
+    if (importTargetUnsafe(frame.io, frame.host_launcher.environ, alloc, games_base_dir, home)) |reason| {
         defer alloc.free(reason);
         var buf: [320]u8 = undefined;
         const m = std.fmt.bufPrint(&buf, "Import refused: {s}. Pick your games folder (where Babysitter-0.2.2b.-linux/, etc. live), NOT your tool's config folder.", .{reason}) catch "Import refused: unsafe games-base-dir choice.";
@@ -691,10 +746,15 @@ fn startImport(frame: *Frame, source: import_job.Source, mode: import_job.Mode) 
     state.notifyInfo("Import started. Banner shows progress.");
 }
 
-fn buildConfigDataPath(alloc: std.mem.Allocator, source: import_job.Source, home: []const u8) ![]u8 {
+fn buildConfigDataPath(environ: std.process.Environ, alloc: std.mem.Allocator, source: import_job.Source) ![]u8 {
+    // F95Checker/xLibrary follow the platform config convention: %APPDATA%
+    // on Windows, $XDG_CONFIG_HOME / ~/.config elsewhere — same as
+    // `util_paths.configHome`, so reuse it instead of hardcoding Linux paths.
+    const base = try util_paths.configHome(environ, alloc);
+    defer alloc.free(base);
     return switch (source) {
-        .f95checker => std.fmt.allocPrint(alloc, "{s}/.config/f95checker/db.sqlite3", .{home}),
-        .xlibrary => std.fmt.allocPrint(alloc, "{s}/.config/xlibrary/games-data.json", .{home}),
+        .f95checker => std.fmt.allocPrint(alloc, "{s}/f95checker/db.sqlite3", .{base}),
+        .xlibrary => std.fmt.allocPrint(alloc, "{s}/xlibrary/games-data.json", .{base}),
     };
 }
 
@@ -708,7 +768,7 @@ fn buildConfigDataPath(alloc: std.mem.Allocator, source: import_job.Source, home
 /// reason string the caller surfaces in a toast. Symlinks are followed
 /// via `realpath` before the comparison so a user can't accidentally
 /// bypass via `ln -s ~/.config/f95checker games`.
-fn importTargetUnsafe(io: std.Io, alloc: std.mem.Allocator, picked: []const u8, home: []const u8) ?[]u8 {
+fn importTargetUnsafe(io: std.Io, environ: std.process.Environ, alloc: std.mem.Allocator, picked: []const u8, home: []const u8) ?[]u8 {
     const real_z = std.Io.Dir.cwd().realPathFileAlloc(io, picked, alloc) catch null;
     const real: []const u8 = if (real_z) |r| r else picked;
     defer if (real_z) |r| alloc.free(r);
@@ -734,6 +794,24 @@ fn importTargetUnsafe(io: std.Io, alloc: std.mem.Allocator, picked: []const u8, 
             return std.fmt.allocPrint(alloc, "that's inside the {s} config directory — f69 never touches upstream tool dirs", .{sub}) catch null;
         }
     }
+
+    // Same guard rooted at the platform config dir — covers %APPDATA% on
+    // Windows and a non-default $XDG_CONFIG_HOME, which the home-relative
+    // list above misses.
+    const CONFIG_SUBS = [_][]const u8{ "f95checker", "xlibrary" };
+    if (util_paths.configHome(environ, alloc)) |cfg| {
+        defer alloc.free(cfg);
+        for (CONFIG_SUBS) |sub| {
+            var pref_buf: [512]u8 = undefined;
+            const pref = std.fmt.bufPrint(&pref_buf, "{s}{c}{s}", .{ cfg, std.fs.path.sep, sub }) catch continue;
+            if (std.mem.eql(u8, real, pref)) {
+                return std.fmt.allocPrint(alloc, "that's the {s} config directory — f69 never touches upstream tool dirs", .{sub}) catch null;
+            }
+            if (real.len > pref.len + 1 and std.mem.startsWith(u8, real, pref) and real[pref.len] == std.fs.path.sep) {
+                return std.fmt.allocPrint(alloc, "that's inside the {s} config directory — f69 never touches upstream tool dirs", .{sub}) catch null;
+            }
+        }
+    } else |_| {}
     return null;
 }
 
@@ -1406,12 +1484,33 @@ pub fn resolveFolderEntry(frame: *Frame, idx: usize, thread_id: ?u64) void {
 /// `.unresolved` or unticked are skipped.
 pub fn commitFolderImport(frame: *Frame) void {
     const state = frame.state;
+    if (state.folder_import_job != null) {
+        state.setFolderScanMsg("An import is already running — let it finish first.");
+        return;
+    }
+    // Refuse to commit while the scan is still discovering folders. The
+    // committer calls refreshLibSnapshot (which frees + refetches the
+    // library snapshot the scan tick still reads), and it would also be
+    // committing a half-scanned list. Wait for the scan to drain.
+    if (state.folder_scan_session) |sp| {
+        const session: *const ScanSession = @ptrCast(@alignCast(sp));
+        if (!session.done) {
+            state.setFolderScanMsg("Still scanning — wait for the scan to finish before importing.");
+            return;
+        }
+    }
     const bundle = folderScanBundle(state) orelse return;
     const rows = folderScanRowStates(state) orelse return;
     if (rows.len != bundle.games.len) return;
 
-    var committed: usize = 0;
+    const alloc = frame.lib.alloc;
+    var items: std.ArrayList(folder_import_job.Item) = .empty;
+    defer items.deinit(alloc);
+
+    var inline_committed: usize = 0;
     var skipped_unresolved: usize = 0;
+    // Reverse iteration so `dropEntryFromBundle` (swap-with-last) never
+    // invalidates a lower index we haven't visited yet.
     var i: usize = rows.len;
     while (i > 0) {
         i -= 1;
@@ -1421,62 +1520,74 @@ pub fn commitFolderImport(frame: *Frame) void {
             skipped_unresolved += 1;
             continue;
         }
-        commitOneRow(frame, i, r, bundle.games[i], state.folder_scan_mode) catch |e| {
+        const res = prepFolderRow(frame, i, r, bundle.games[i], state.folder_scan_mode) catch |e| {
             log.warn("folder-import row {d}: {s}", .{ i, @errorName(e) });
             continue;
         };
-        committed += 1;
+        switch (res) {
+            .skip => {},
+            .inline_done => inline_committed += 1,
+            .queued => |it| items.append(alloc, it) catch freeItem(alloc, it),
+        }
     }
 
-    // Refresh the cached library snapshot so subsequent typeahead
-    // searches see the games we just imported (especially the
-    // custom_new entries we minted). Without this, picking
-    // "+ Custom new" for a row and then trying to link a sibling
-    // folder to it would silently miss — the lib_games slice was
-    // taken at scan start and never updated.
-    if (committed > 0) refreshLibSnapshot(frame);
+    // Library rows for everything we touched exist now (prep does the
+    // insertIfMissing on the UI thread), so the typeahead snapshot is
+    // stale even while transfers are still pending.
+    refreshLibSnapshot(frame);
 
+    // Move/copy rows go to the background worker; the bottom bar shows
+    // progress and the final tally lands in `onFolderImportDone`.
+    if (items.items.len > 0) {
+        const owned = items.toOwnedSlice(alloc) catch {
+            for (items.items) |it| freeItem(alloc, it);
+            state.setFolderScanMsg("Out of memory queuing import.");
+            return;
+        };
+        if (!startFolderImportJob(frame, owned)) return; // frees owned + sets msg
+        var msg_buf: [192]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "Importing {d} folder(s) in the background\u{2026}{s}", .{
+            owned.len,
+            if (skipped_unresolved > 0) " (unresolved rows skipped)" else "",
+        }) catch "Importing\u{2026}";
+        state.setFolderScanMsg(msg);
+        if (inline_committed > 0) state.reload_requested = true;
+        return;
+    }
+
+    // Only link rows (or nothing) — no bytes to move, finalize now.
+    if (inline_committed > 0) state.reload_requested = true;
     var msg_buf: [192]u8 = undefined;
-    const msg = std.fmt.bufPrint(&msg_buf, "Imported {d} row(s); {d} unresolved skipped.", .{ committed, skipped_unresolved }) catch "Import finished";
+    const msg = std.fmt.bufPrint(&msg_buf, "Imported {d} row(s); {d} unresolved skipped.", .{ inline_committed, skipped_unresolved }) catch "Import finished";
     state.setFolderScanMsg(msg);
-    state.reload_requested = true;
 }
 
-/// Drop the cached library snapshot and grab a fresh one. Used after
-/// commits so newly-created library rows (e.g. custom_new) are
-/// visible to typeahead searches on remaining unresolved rows.
-fn refreshLibSnapshot(frame: *Frame) void {
-    const state = frame.state;
-    if (state.folder_scan_lib_snapshot) |p| {
-        const slice = @as([*]library.Game, @ptrCast(@alignCast(p)))[0..state.folder_scan_lib_count];
-        frame.lib.freeGames(slice);
-        state.folder_scan_lib_snapshot = null;
-        state.folder_scan_lib_count = 0;
-    }
-    if (frame.lib.listGames()) |gs| {
-        state.folder_scan_lib_snapshot = if (gs.len > 0) gs.ptr else null;
-        state.folder_scan_lib_count = gs.len;
-    } else |_| {}
-}
+/// Outcome of preparing one folder-scan row for import.
+const PrepResult = union(enum) {
+    /// Row dropped without a transfer (idempotent duplicate).
+    skip,
+    /// `link` mode — install row committed inline (no bytes moved).
+    inline_done,
+    /// `move`/`copy` — a transfer to hand to the background worker.
+    queued: folder_import_job.Item,
+};
 
-/// 3-state commit for a single preview row. Branches on
-/// `row.link_state` to figure out (a) the thread id, (b) what the
-/// library row should look like, and (c) whether to mint a fresh
-/// library entry. After thread id is settled, the shared
-/// "transfer the on-disk folder + write installs row" tail is the
-/// same as the legacy commit path.
-fn commitOneRow(
+/// UI-thread prep for one row: resolve the thread id, ensure the
+/// library row exists, build the src/dst paths, and either commit a
+/// link inline or return a transfer `Item` for the worker. The bundle
+/// entry is dropped here (matching the old synchronous committer) so
+/// the preview updates immediately. All SQLite work stays on this
+/// thread; the worker only moves files.
+fn prepFolderRow(
     frame: *Frame,
     idx: usize,
     row: *state_mod.FolderImportRowState,
     game: importers_mod.ImportedGame,
     mode: state_mod.ImportMode,
-) !void {
+) !PrepResult {
     const state = frame.state;
     const alloc = frame.lib.alloc;
 
-    // Pull the user-edited name + version. These win over the
-    // scanner's parse — the user may have corrected them.
     const edited_name = sliceBuf(&row.name_buf);
     const edited_version = sliceBuf(&row.version_buf);
 
@@ -1498,14 +1609,10 @@ fn commitOneRow(
     };
 
     // Step 2 — make sure a library row exists for this thread id.
-    // For linked_existing the row already exists; insertIfMissing is
-    // a no-op there. For custom_new / f95_url we provide the name we
-    // want the placeholder row to carry. Library will keep whatever
-    // existing row is there; insert only fires when the tid is new.
     const placeholder_name: []const u8 = switch (row.link_state) {
-        .linked_existing => "(linked)", // never written — row already exists
+        .linked_existing => "(linked)",
         .custom_new => if (edited_name.len > 0) edited_name else "(custom)",
-        .f95_url => "(unsynced)", // a later Sync pulls the real metadata
+        .f95_url => "(unsynced)",
         .unresolved => unreachable,
     };
     const lib_row = library.Game{
@@ -1513,77 +1620,234 @@ fn commitOneRow(
         .name = placeholder_name,
         .latest_version = if (edited_version.len > 0) edited_version else null,
     };
-    _ = frame.lib.insertIfMissing(&lib_row) catch {
-        return error.LibInsertFailed;
-    };
+    _ = frame.lib.insertIfMissing(&lib_row) catch return error.LibInsertFailed;
 
-    // Step 3 — build src/dst paths. `installDirRel` is the top-level
-    // wrapper folder, regardless of where inside it the engine
-    // fingerprint lives.
-    const folder_name = game.installDirRel() orelse {
-        return error.NoInstallDirRel;
-    };
+    // Step 3 — src/dst paths.
+    const folder_name = game.installDirRel() orelse return error.NoInstallDirRel;
     const scan_root = state.folderScanPathSlice();
     const src_path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ scan_root, folder_name });
     defer alloc.free(src_path);
 
-    const version_dir: []const u8 = if (edited_version.len > 0) edited_version else "imported";
+    // Sanitize the user-typed version into a single safe path segment
+    // BEFORE it becomes part of dst_path — otherwise `..`/separators let
+    // the destination escape library_root. The same sanitized value is
+    // reused for the DB install version so disk and record agree.
+    var version_buf: [64]u8 = undefined;
+    const version_dir: []const u8 = safeVersionDir(edited_version, &version_buf);
     const dst_path = try std.fmt.allocPrint(alloc, "{s}/{d}/{s}", .{ frame.info.library_root, tid, version_dir });
     defer alloc.free(dst_path);
 
-    // Step 4 — idempotency: skip if an install already points at
-    // exactly this destination for exactly this thread id.
+    // Step 4 — idempotency: already installed at exactly this path.
     if (installAlreadyAtPath(frame.lib, tid, dst_path)) {
         state.setFolderScanMsg("Skipped — an install already exists at that target path.");
         dropEntryFromBundle(state, idx);
-        return;
+        return .skip;
     }
 
-    // Step 5 — move/copy/link the folder. The transfer result tells
-    // us which path to put on the install row (dst for move/copy,
-    // src for link — `link` doesn't touch disk).
-    const transfer = transferImported(alloc, frame.io, src_path, dst_path, mode) catch |e| {
-        var buf: [256]u8 = undefined;
-        const verb: []const u8 = switch (mode) {
-            .copy => "copy",
-            .move => "move",
-            .link => "link",
-        };
-        const m = std.fmt.bufPrint(&buf, "Folder {s} failed ({s}). Library row kept.", .{ verb, @errorName(e) }) catch "Folder transfer failed";
-        state.setFolderScanMsg(m);
-        dropEntryFromBundle(state, idx);
-        return;
-    };
-
-    // Step 6 — install row.
     var id_buf: [36]u8 = undefined;
     generateImportUuid(frame.io, &id_buf);
-    const now = std.Io.Clock.Timestamp.now(frame.io, .real);
-    const now_s: i64 = @intCast(@divTrunc(now.raw.toNanoseconds(), 1_000_000_000));
-    frame.lib.upsertInstall(&.{
-        .id = id_buf,
-        .game_thread_id = tid,
-        .version = version_dir,
-        .install_path = transfer.install_path,
-        .recipe_id = "",
-        .installed_at = now_s,
-        .source = .manual,
-    }) catch |e| {
-        log.warn("folder-import row {d}: install upsert failed: {s}", .{ idx, @errorName(e) });
-    };
 
-    // Surface a loud warning when the cross-FS copy succeeded but the
-    // source delete failed (typical on FUSE NTFS / exFAT mounts). The
-    // destination is fine — game is fully imported — but the user
-    // needs to know the source folder is still on disk.
-    if (transfer.source_delete_failed) {
-        var buf: [320]u8 = undefined;
-        const m = std.fmt.bufPrint(&buf, "Imported '{s}' OK but source folder couldn't be deleted (likely FUSE NTFS read-only mount). Clean up manually: {s}", .{ folder_name, src_path }) catch "Imported; source not deleted (see logs)";
-        state.setFolderScanMsg(m);
-        log.warn("folder-import row {d}: source delete failed; src={s}", .{ idx, src_path });
+    // Step 5 — link commits inline (no disk mutation at all).
+    if (mode == .link) {
+        commitInstallRow(frame, tid, version_dir, src_path, id_buf);
+        dropEntryFromBundle(state, idx);
+        return .inline_done;
     }
 
+    ensureDstParent(frame.io, dst_path);
+
+    // Move tries an instant same-FS rename first; only the cross-device
+    // fallback needs the slow background copy-verify-delete (the user's
+    // 18 GB NTFS→library case lands here).
+    if (mode == .move) {
+        if (std.Io.Dir.renameAbsolute(src_path, dst_path, frame.io)) {
+            commitInstallRow(frame, tid, version_dir, dst_path, id_buf);
+            dropEntryFromBundle(state, idx);
+            return .inline_done;
+        } else |e| {
+            log.info("folder-import: rename failed ({s}); queuing copy-verify-delete", .{@errorName(e)});
+        }
+    }
+
+    // copy, or a move that couldn't rename → background transfer.
+    const item = makeItem(alloc, folder_name, src_path, dst_path, mode == .copy, tid, version_dir, id_buf) catch return error.OutOfMemory;
     dropEntryFromBundle(state, idx);
+    return .{ .queued = item };
+}
+
+/// Build a worker `Item`, duping every borrowed slice into job-owned
+/// memory. On any allocation failure all prior dups are released and
+/// the error propagates.
+fn makeItem(
+    alloc: std.mem.Allocator,
+    name: []const u8,
+    src: []const u8,
+    dst: []const u8,
+    keep_source: bool,
+    tid: u64,
+    version: []const u8,
+    id: [36]u8,
+) !folder_import_job.Item {
+    const n = try alloc.dupe(u8, name);
+    errdefer alloc.free(n);
+    const s = try alloc.dupe(u8, src);
+    errdefer alloc.free(s);
+    const d = try alloc.dupe(u8, dst);
+    errdefer alloc.free(d);
+    const v = try alloc.dupe(u8, version);
+    return .{ .name = n, .src = s, .dst = d, .keep_source = keep_source, .tid = tid, .version = v, .id = id };
+}
+
+fn freeItem(alloc: std.mem.Allocator, it: folder_import_job.Item) void {
+    alloc.free(it.name);
+    alloc.free(it.src);
+    alloc.free(it.dst);
+    alloc.free(it.version);
+}
+
+/// Spawn the background transfer worker, taking ownership of `items`
+/// (and their strings). Frees everything + sets a message and returns
+/// false if a job is already running or the spawn fails.
+fn startFolderImportJob(frame: *Frame, items: []folder_import_job.Item) bool {
+    const state = frame.state;
+    const alloc = frame.lib.alloc;
+    if (state.folder_import_job != null) {
+        for (items) |it| freeItem(alloc, it);
+        alloc.free(items);
+        state.setFolderScanMsg("An import is already running — let it finish first.");
+        return false;
+    }
+    _ = job_mod.spawnJob(folder_import_job.Payload, folder_import_job.worker, alloc, frame.win, .{
+        .io = frame.io,
+        .items = items,
+    }, &state.folder_import_job) catch {
+        for (items) |it| freeItem(alloc, it);
+        alloc.free(items);
+        state.setFolderScanMsg("Couldn't start the import worker.");
+        return false;
+    };
+    log.info("folder-import: spawned worker for {d} transfer(s)", .{items.len});
+    return true;
+}
+
+/// True while a background folder-transfer worker is running. Drives
+/// the main loop's keep-redrawing trigger so the bottom-bar byte bar
+/// animates, and the Import button's disabled state.
+pub fn folderImportActive(state: *State) bool {
+    return state.folder_import_job != null;
+}
+
+/// Ask the running folder-import worker to stop at its next item
+/// boundary (and abort the in-flight copy at its next file). The drain
+/// reaps it and commits whatever finished cleanly.
+pub fn cancelFolderImport(frame: *Frame) void {
+    if (frame.state.folder_import_job) |j| {
+        j.requestCancel();
+        log.info("folder-import: cancel requested", .{});
+    }
+}
+
+/// Per-frame reaper for the folder-import worker. Commits the install
+/// rows for completed transfers (SQLite on the UI thread) and reports
+/// the tally.
+pub fn drainFolderImport(frame: *Frame) void {
+    job_mod.drainBackgroundJob(
+        folder_import_job.Payload,
+        onFolderImportDone,
+        onFolderImportFailed,
+        frame,
+        &frame.state.folder_import_job,
+    );
+}
+
+fn onFolderImportDone(frame: *Frame, job: *folder_import_job.Job) void {
+    const state = frame.state;
+    defer folder_import_job.freePayload(job);
+
+    var ok_n: usize = 0;
+    var fail_n: usize = 0;
+    var canceled_n: usize = 0;
+    var delete_failed_n: usize = 0;
+    var first_err: ?[]const u8 = null;
+    for (job.payload.items) |*it| {
+        if (it.canceled) {
+            canceled_n += 1;
+            continue;
+        }
+        if (!it.ok) {
+            fail_n += 1;
+            if (first_err == null) first_err = it.err_name;
+            continue;
+        }
+        commitInstallRow(frame, it.tid, it.version, it.dst, it.id);
+        ok_n += 1;
+        if (it.source_delete_failed) delete_failed_n += 1;
+    }
+
+    // Build a recap that separates failed from cancelled and names the
+    // first failure's reason (previously "N failed" with no cause, and
+    // cancelled items were miscounted as failures). All backing buffers
+    // live at function scope so the pieces outlive the final bufPrint.
+    var buf: [320]u8 = undefined;
+    var tail_buf: [96]u8 = undefined;
+    var cancel_buf: [40]u8 = undefined;
+    const tail: []const u8 = if (delete_failed_n > 0)
+        (std.fmt.bufPrint(&tail_buf, "; {d} left the source behind (FUSE/NTFS) — clean up manually", .{delete_failed_n}) catch "")
+    else
+        "";
+    const cancel_part: []const u8 = if (canceled_n > 0)
+        (std.fmt.bufPrint(&cancel_buf, ", {d} cancelled", .{canceled_n}) catch "")
+    else
+        "";
+    const msg = if (fail_n > 0)
+        std.fmt.bufPrint(&buf, "Imported {d} folder(s); {d} failed ({s}){s}{s}.", .{ ok_n, fail_n, common.friendlyError(first_err orelse "?"), cancel_part, tail }) catch "Import finished"
+    else
+        std.fmt.bufPrint(&buf, "Imported {d} folder(s){s}{s}.", .{ ok_n, cancel_part, tail }) catch "Import finished";
+    state.setFolderScanMsg(msg);
+    state.reload_requested = true;
+    refreshLibSnapshot(frame);
+}
+
+fn onFolderImportFailed(frame: *Frame, job: *folder_import_job.Job) void {
+    // The worker always reports `.done`; `.failed` only fires if the
+    // carrier never ran. Free and surface a generic message.
+    folder_import_job.freePayload(job);
+    frame.state.setFolderScanMsg("Folder import worker failed to start.");
+}
+
+/// Drop the cached library snapshot and grab a fresh one. Used after
+/// commits so newly-created library rows (e.g. custom_new) are
+/// visible to typeahead searches on remaining unresolved rows.
+fn refreshLibSnapshot(frame: *Frame) void {
+    const state = frame.state;
+    if (state.folder_scan_lib_snapshot) |p| {
+        const slice = @as([*]library.Game, @ptrCast(@alignCast(p)))[0..state.folder_scan_lib_count];
+        frame.lib.freeGames(slice);
+        state.folder_scan_lib_snapshot = null;
+        state.folder_scan_lib_count = 0;
+    }
+    const fresh: []library.Game = frame.lib.listGames() catch &.{};
+    state.folder_scan_lib_snapshot = if (fresh.len > 0) fresh.ptr else null;
+    state.folder_scan_lib_count = fresh.len;
+
+    // The scan session holds NON-OWNING aliases of the slice we just
+    // freed: `session.lib_games` is the same slice, and each
+    // `session.candidates[i].name` points into `lib_games[i].name`.
+    // Repoint them at the fresh snapshot so a later scan tick (or any
+    // other reader) can't dereference the freed allocation. Candidates
+    // are rebuilt in the session's arena (the stale array leaks into the
+    // arena and is reclaimed at session teardown).
+    if (state.folder_scan_session) |sp| {
+        const session: *ScanSession = @ptrCast(@alignCast(sp));
+        session.lib_games = fresh;
+        const a = session.arena.allocator();
+        if (a.alloc(importers_mod.name_match.Candidate, fresh.len)) |cs| {
+            for (fresh, 0..) |g, i| cs[i] = .{ .thread_id = g.f95_thread_id, .name = g.name };
+            session.candidates = cs;
+        } else |_| {
+            session.candidates = &.{};
+        }
+    }
 }
 
 /// Re-scan idempotency check. Returns true when the library already
@@ -1603,6 +1867,29 @@ fn installAlreadyAtPath(lib: *library.Library, thread_id: u64, install_path: []c
 fn sliceBuf(buf: []const u8) []const u8 {
     const end = std.mem.indexOfScalar(u8, buf, 0) orelse buf.len;
     return buf[0..end];
+}
+
+/// Turn a user-editable version string into a SAFE single path segment
+/// for `<library_root>/<tid>/<version>/`. `raw` is free-text the user
+/// typed on the row, so it may contain `/`, `\`, or `..` — which would
+/// let the destination escape `library_root` (and, in Move mode, delete
+/// the source after copying somewhere outside the library). The source
+/// segment is already guarded by `installDirRel`; the destination
+/// deserves the same. Path separators are collapsed to '_' so the
+/// result is always one segment, and a segment that reduces to "."/".."
+/// falls back to "imported". Writes into `buf` (>= version_buf size);
+/// the returned slice borrows `buf` and must outlive its use.
+fn safeVersionDir(raw: []const u8, buf: []u8) []const u8 {
+    if (raw.len == 0) return "imported";
+    var n: usize = 0;
+    for (raw) |c| {
+        if (n >= buf.len) break;
+        buf[n] = if (c == '/' or c == '\\') '_' else c;
+        n += 1;
+    }
+    const seg = buf[0..n];
+    if (seg.len == 0 or std.mem.eql(u8, seg, ".") or std.mem.eql(u8, seg, "..")) return "imported";
+    return seg;
 }
 
 /// Same as `resolveFolderEntry` but takes an explicit transfer mode
@@ -1648,118 +1935,89 @@ fn resolveFolderEntryWithMode(frame: *Frame, idx: usize, thread_id: ?u64, mode: 
     };
     defer alloc.free(src_path);
 
-    const version_dir: []const u8 = if (game.version) |v| v else "imported";
+    // Sanitize into a safe single path segment — `game.version` is parsed
+    // from the scanned folder name and could carry separators or `..`.
+    var version_buf: [64]u8 = undefined;
+    const version_dir: []const u8 = safeVersionDir(if (game.version) |v| v else "", &version_buf);
     const dst_path = std.fmt.allocPrint(alloc, "{s}/{d}/{s}", .{ frame.info.library_root, tid, version_dir }) catch {
         state.setFolderScanMsg("Out of memory building destination path.");
         return;
     };
     defer alloc.free(dst_path);
 
-    const transfer = transferImported(alloc, frame.io, src_path, dst_path, mode) catch |e| {
-        var buf: [256]u8 = undefined;
-        const verb: []const u8 = switch (mode) {
-            .copy => "copy",
-            .move => "move",
-            .link => "link",
-        };
-        const m = std.fmt.bufPrint(&buf, "Folder {s} failed ({s}). Library row kept; you can install the game manually later.", .{ verb, @errorName(e) }) catch "Folder transfer failed";
-        state.setFolderScanMsg(m);
-        // Still drop the entry from the scan list — the library row
-        // is in place; the user can use Manual install later if
-        // they fix the path issue.
-        dropEntryFromBundle(state, idx);
-        return;
-    };
-
-    // Write the installs row pointing at the install path the transfer
-    // landed at (`dst` for move/copy, `src` for link).
+    // link → commit inline (no bytes move). move/copy → hand to the
+    // background worker so the GUI stays responsive and the bottom bar
+    // shows transfer progress (with a same-FS rename fast-path for move).
     var id_buf: [36]u8 = undefined;
     generateImportUuid(frame.io, &id_buf);
+
+    if (mode == .link) {
+        commitInstallRow(frame, tid, version_dir, src_path, id_buf);
+        state.reload_requested = true;
+        dropEntryFromBundle(state, idx);
+        return;
+    }
+
+    ensureDstParent(frame.io, dst_path);
+    if (mode == .move) {
+        if (std.Io.Dir.renameAbsolute(src_path, dst_path, frame.io)) {
+            commitInstallRow(frame, tid, version_dir, dst_path, id_buf);
+            state.reload_requested = true;
+            dropEntryFromBundle(state, idx);
+            return;
+        } else |e| {
+            log.info("folder-import: rename failed ({s}); queuing copy-verify-delete", .{@errorName(e)});
+        }
+    }
+
+    if (state.folder_import_job != null) {
+        state.setFolderScanMsg("An import is already running — let it finish first.");
+        return;
+    }
+    const item = makeItem(alloc, folder_name, src_path, dst_path, mode == .copy, tid, version_dir, id_buf) catch {
+        state.setFolderScanMsg("Out of memory queuing import.");
+        return;
+    };
+    const owned = alloc.alloc(folder_import_job.Item, 1) catch {
+        freeItem(alloc, item);
+        state.setFolderScanMsg("Out of memory queuing import.");
+        return;
+    };
+    owned[0] = item;
+    if (!startFolderImportJob(frame, owned)) return; // frees owned + sets msg
+    dropEntryFromBundle(state, idx);
+    var msg_buf: [160]u8 = undefined;
+    const msg = std.fmt.bufPrint(&msg_buf, "Importing '{s}' in the background\u{2026}", .{folder_name}) catch "Importing\u{2026}";
+    state.setFolderScanMsg(msg);
+}
+
+/// Write the `installs` row for a completed (or link/rename-fast-path)
+/// folder import. Centralised so every commit site — inline link,
+/// same-FS rename, and the background worker's drain — produces the
+/// same row shape. Failures are logged, not fatal (the library game
+/// row is already in place).
+fn commitInstallRow(frame: *Frame, tid: u64, version: []const u8, install_path: []const u8, id: [36]u8) void {
     const now = std.Io.Clock.Timestamp.now(frame.io, .real);
     const now_s: i64 = @intCast(@divTrunc(now.raw.toNanoseconds(), 1_000_000_000));
     frame.lib.upsertInstall(&.{
-        .id = id_buf,
+        .id = id,
         .game_thread_id = tid,
-        .version = version_dir,
-        .install_path = transfer.install_path,
+        .version = version,
+        .install_path = install_path,
         .recipe_id = "",
         .installed_at = now_s,
         .source = .manual,
     }) catch |e| {
-        log.warn("folder-import: installs row for tid {d} failed: {s}", .{ tid, @errorName(e) });
+        log.warn("folder-import: install upsert tid {d} failed: {s}", .{ tid, @errorName(e) });
     };
-
-    state.reload_requested = true;
-    dropEntryFromBundle(state, idx);
 }
 
-/// Transfer the source folder into the library — or don't, in
-/// `link` mode, where the caller records the install path as-is and
-/// no filesystem mutation happens at all.
-///
-/// `mode = .move` uses `renameAbsolute` first (cheap on same-FS) and
-/// falls back to `migrate.copyVerifyDelete` on cross-FS or any
-/// rename error. `mode = .copy` skips rename entirely and runs
-/// copy-verify with `keep_source = true` so originals stay intact.
-/// `mode = .link` does nothing on disk — `result.install_path`
-/// points at `src` so the library row references the original
-/// directory.
-///
-/// `source_delete_failed` is surfaced so the caller can notify the
-/// user when the destination copy is good but the source needs
-/// manual cleanup (FUSE NTFS / exFAT mounts often refuse delete).
-const TransferResult = struct {
-    source_delete_failed: bool = false,
-    /// The path the caller should record on the library install row.
-    /// `dst` for move/copy; `src` for link. Borrowed — has the same
-    /// lifetime as the caller's `src` and `dst` slices.
-    install_path: []const u8,
-};
-
-fn transferImported(
-    alloc: std.mem.Allocator,
-    io: std.Io,
-    src: []const u8,
-    dst: []const u8,
-    mode: @import("../state.zig").ImportMode,
-) !TransferResult {
-    switch (mode) {
-        .link => {
-            // No file mutation at all. The install row will point at
-            // the existing source directory. Safest mode — also the
-            // only one that's reversible-by-default (just delete the
-            // library row).
-            return .{ .install_path = src };
-        },
-        .move, .copy => {
-            // Make sure the destination's parent directory exists;
-            // rename won't create it for us.
-            if (std.mem.lastIndexOfScalar(u8, dst, '/')) |slash| {
-                const parent = dst[0..slash];
-                if (parent.len > 0) std.Io.Dir.cwd().createDirPath(io, parent) catch {};
-            }
-            switch (mode) {
-                .move => {
-                    // Fast path: rename. Works on same FS in one syscall.
-                    // Any error (CrossDevice, PermissionDenied, DirNotEmpty,
-                    // …) falls through to the slower copy-verify-delete;
-                    // the migrator bails up front if the destination
-                    // already exists, so we don't risk overwriting a
-                    // previous import on retry.
-                    std.Io.Dir.renameAbsolute(src, dst, io) catch |e| {
-                        log.info("folder-import: rename failed ({s}); falling back to copy-verify-delete", .{@errorName(e)});
-                        const stats = try importers_mod.migrate.copyVerifyDelete(alloc, io, src, dst, .{});
-                        return .{ .install_path = dst, .source_delete_failed = stats.source_delete_failed };
-                    };
-                    return .{ .install_path = dst };
-                },
-                .copy => {
-                    _ = try importers_mod.migrate.copyVerifyDelete(alloc, io, src, dst, .{ .keep_source = true });
-                    return .{ .install_path = dst };
-                },
-                .link => unreachable, // outer switch covers this
-            }
-        },
+/// Make sure the destination's parent dir exists (rename won't create
+/// it; `copyVerifyDelete` would, but the rename fast-path runs first).
+fn ensureDstParent(io: std.Io, dst: []const u8) void {
+    if (std.mem.lastIndexOfScalar(u8, dst, '/')) |slash| {
+        const parent = dst[0..slash];
+        if (parent.len > 0) std.Io.Dir.cwd().createDirPath(io, parent) catch {};
     }
 }
 
@@ -1797,6 +2055,20 @@ fn dropEntryFromBundle(state: *State, idx: usize) void {
         mutable.games[idx] = mutable.games[mutable.games.len - 1];
     }
     mutable.games.len -= 1;
+
+    // Keep the parallel per-row state array in lockstep with the same
+    // swap-remove. `bundle.games[i]` and `rows[i]` are a pair (the commit
+    // guard even asserts equal lengths); shrinking only the bundle would
+    // scramble the survivors after a PARTIAL commit — a surviving game
+    // would show another row's edited name/link — and leave the two
+    // arrays at different lengths.
+    if (folderScanRowStates(state)) |rows| {
+        if (idx < rows.len) {
+            if (idx < rows.len - 1) rows[idx] = rows[rows.len - 1];
+            state.folder_scan_row_count -= 1;
+        }
+    }
+
     state.folder_resolve_idx = null;
     @memset(&state.folder_resolve_url_buf, 0);
 }

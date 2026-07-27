@@ -126,6 +126,9 @@ pub const RunnerCtx = struct {
     io: std.Io,
     lib: *library.Library,
     repo: *recipe.Repo,
+    /// OS temp root for mod-apply staging (`%TEMP%` on Windows, `/tmp`
+    /// elsewhere). Resolved once at startup; see RuntimeInfo.staging_dir.
+    temp_root: []const u8 = "/tmp",
 };
 
 pub fn modJobRunner(ctx: ?*anyopaque, job: *mod_job_queue.Job) void {
@@ -220,6 +223,7 @@ fn runInstall(
         .progress_cb = jobProgressCb,
         .progress_ctx = job,
         .cancel = &job.cancel_flag,
+        .staging_root = ctx.temp_root,
     };
 
     const apply_err: ?anyerror = if (parsed_mod_opt) |*pm| blk: {
@@ -261,6 +265,24 @@ fn runInstall(
 
     if (apply_err) |e| switch (e) {
         error.Canceled => {
+            // Roll back the partial install so cancelling doesn't leave
+            // orphaned, half-tracked files in the game dir. `tracker`
+            // holds every entry recorded so far (each file is recorded
+            // then copied then cancel-checked, so a recorded file was
+            // always written); flush the FULL in-memory log to disk,
+            // reverse this mod's entries, then persist the log without
+            // them — mirroring the uninstall path.
+            job.phase.store(@intFromEnum(mod_job_queue.Phase.flushing), .release);
+            tracker.flush() catch {};
+            var log_obj = installer_mod.Tracker.load(ctx.alloc, ctx.io, layout.tracker_path) catch installer_mod.InstallLog{ .entries = &.{} };
+            defer log_obj.deinit(ctx.alloc);
+            installer_mod.uninstallMod(ctx.io, layout.game_root, mod_id_str, &log_obj) catch |ue|
+                log.warn("cancel rollback: uninstall {s} failed: {s}", .{ mod_id_str, @errorName(ue) });
+            var clean = installer_mod.Tracker.init(ctx.alloc, ctx.io, layout.tracker_path);
+            defer clean.deinit();
+            for (log_obj.entries) |le| clean.record(le) catch {};
+            clean.removeMod(mod_id_str);
+            clean.flush() catch {};
             job.phase.store(@intFromEnum(mod_job_queue.Phase.canceled), .release);
             return;
         },
@@ -528,10 +550,10 @@ pub fn doTestInstallPreview(frame: *Frame, parent_game: *const library.Game) voi
         return;
     };
 
-    // 2. Scratch dir under /tmp.
+    // 2. Scratch dir under the OS temp root (%TEMP% on Windows, /tmp else).
     var nonce: [16]u8 = undefined;
     frame.io.randomSecure(&nonce) catch frame.io.random(&nonce);
-    const scratch = std.fmt.allocPrint(alloc, "/tmp/f69-preview-{x}", .{std.fmt.bytesToHex(nonce, .lower)}) catch {
+    const scratch = std.fmt.allocPrint(alloc, "{s}/f69-preview-{x}", .{ frame.info.staging_dir, std.fmt.bytesToHex(nonce, .lower) }) catch {
         alloc.free(archive_path);
         state.pushToast(.err, "Test install: out of memory.");
         return;
@@ -835,6 +857,49 @@ pub fn doInstallMod(frame: *Frame, parent_game: *const library.Game, mod_recipe:
         const msg = std.fmt.bufPrint(&buf, "Failed to enqueue: {s}", .{@errorName(e)}) catch "Failed to enqueue install";
         state.setDownloadMsg(msg);
     };
+}
+
+pub const UniversalInstallOutcome = enum { queued, busy, not_installed };
+
+/// Enqueue a flat-overlay install of a universal mod's archive into one
+/// game's current install. Universal mods have no `ModRecipe`, so we pass
+/// a synthetic recipe id (`umod-<id>`) — the worker's `findMod` misses it
+/// and falls through to `applyModArchive` (flat extract), and the tracker
+/// keys on that slug so uninstall still works. A high-bit synthetic
+/// mod-thread id keys the busy-dedup without colliding with real F95
+/// thread ids. `archive_src` is COPIED (not consumed). Returns `.queued`,
+/// `.busy` (a job already in flight), or `.not_installed` (no install to
+/// apply against — universal mods can only go into an installed game).
+pub fn enqueueUniversalModInstall(
+    frame: *Frame,
+    game: *const library.Game,
+    mod_id: i64,
+    mod_name: []const u8,
+    archive_src: []const u8,
+) !UniversalInstallOutcome {
+    const alloc = frame.lib.alloc;
+    const synth_thread: u64 = 0x8000_0000_0000_0000 | @as(u64, @intCast(@max(0, mod_id)));
+    if (frame.mod_jobs.isModBusy(game.f95_thread_id, synth_thread)) return .busy;
+
+    const install_opt = mods_act.resolveModsPageInstall(frame, game.f95_thread_id);
+    defer if (install_opt) |i| frame.lib.freeInstall(i);
+    const install = install_opt orelse return .not_installed;
+
+    // Owned strings — enqueue takes ownership ONLY on success, so the
+    // errdefers below free them on any failure before/at enqueue.
+    const recipe_id = try std.fmt.allocPrint(alloc, "umod-{d}", .{mod_id});
+    errdefer alloc.free(recipe_id);
+    const display = try alloc.dupe(u8, mod_name);
+    errdefer alloc.free(display);
+    const archive_owned = try alloc.dupe(u8, archive_src);
+    errdefer alloc.free(archive_owned);
+
+    const backup: installer_mod.BackupMode = switch (game.mod_backup_mode) {
+        .none => .none,
+        .copy => .copy,
+    };
+    _ = try frame.mod_jobs.enqueue(.install, game.f95_thread_id, synth_thread, recipe_id, display, archive_owned, backup, install.id[0..]);
+    return .queued;
 }
 
 /// Build a queue job from a UI click. Consumes `archive_path` on success
@@ -2542,6 +2607,27 @@ pub fn doDeleteInstall(frame: *Frame, install_id: [36]u8, install_path: []const 
     const state = frame.state;
 
     if (install_path.len > 0) {
+        // Safety: never let a delete take the per-game sandbox HOME
+        // (saves) with it. Saves live at `<library_root>/<tid>/.f69-home`,
+        // a SIBLING of the version dir we delete. A well-formed
+        // install_path is `<tid>/<version>` and never IS or CONTAINS
+        // `.f69-home`; if it does, the path is malformed (points at the
+        // tid-level dir or the saves dir itself) and deleting it would
+        // wipe the player's saves — refuse instead.
+        if (std.mem.eql(u8, std.fs.path.basename(install_path), ".f69-home")) {
+            log.warn("doDeleteInstall: refusing to delete saves dir {s}", .{install_path});
+            state.setDownloadMsg("Refused: that path is the game's saves folder.");
+            return;
+        }
+        var saves_buf: [1024]u8 = undefined;
+        if (std.fmt.bufPrint(&saves_buf, "{s}/.f69-home", .{install_path})) |saves_child| {
+            if ((std.Io.Dir.cwd().access(frame.io, saves_child, .{}) catch null) != null) {
+                log.warn("doDeleteInstall: refusing to delete {s} — it contains the sandbox HOME (saves)", .{install_path});
+                state.setDownloadMsg("Refused: deleting this folder would remove the game's saves.");
+                return;
+            }
+        } else |_| {}
+
         // deleteTree's error set doesn't expose `FileNotFound` (it's
         // already considered success), so we don't special-case it
         // here. Treat NotDir as a "stale entry" caller bug — log and

@@ -54,6 +54,85 @@ fn customLogFn(
 ) void {
     if (scope == .dvui and level == .debug) return;
     std.log.defaultLog(level, scope, format, args);
+
+    // Tee the same line to the per-run log file (once opened), so a bug
+    // report can attach `<data_root>/logs/f69-<run>.log` instead of asking
+    // the user to capture stderr. Serialized by a tiny atomic spinlock —
+    // the log fn is called from every worker thread and there's no io in
+    // scope for a real mutex; log writes are short and infrequent.
+    logLock();
+    defer logUnlock();
+    const f = g_log_file orelse return;
+    const io = g_log_io orelse return;
+    var buf: [4096]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    w.print("[{s}] {s}: ", .{ @tagName(level), @tagName(scope) }) catch {};
+    w.print(format, args) catch {};
+    w.writeByte('\n') catch {};
+    f.writeStreamingAll(io, w.buffered()) catch {};
+}
+
+// Per-run log file sink. Opened once at startup after `data_root` is known;
+// `customLogFn` tees into it. Global because the std log fn has no context.
+// The io is stashed alongside the file so the log fn can write without an
+// io parameter of its own.
+var g_log_flag: std.atomic.Value(bool) = .init(false);
+var g_log_file: ?std.Io.File = null;
+var g_log_io: ?std.Io = null;
+const RUN_LOG_KEEP: usize = 10;
+
+fn logLock() void {
+    while (g_log_flag.cmpxchgWeak(false, true, .acquire, .monotonic) != null) {}
+}
+fn logUnlock() void {
+    g_log_flag.store(false, .release);
+}
+
+/// Open `<data_root>/logs/f69-<epoch>.log` for this run and prune older
+/// logs to `RUN_LOG_KEEP`. Best-effort — logging is never allowed to
+/// block or fail startup.
+fn initRunLog(io: std.Io, gpa: std.mem.Allocator, data_root: []const u8) void {
+    const dir_path = std.fmt.allocPrint(gpa, "{s}/logs", .{data_root}) catch return;
+    defer gpa.free(dir_path);
+    std.Io.Dir.cwd().createDirPath(io, dir_path) catch return;
+    pruneRunLogs(io, gpa, dir_path);
+
+    const secs = std.Io.Clock.Timestamp.now(io, .real).raw.toSeconds();
+    const path = std.fmt.allocPrint(gpa, "{s}/f69-{d}.log", .{ dir_path, secs }) catch return;
+    defer gpa.free(path);
+    const f = std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true }) catch return;
+    logLock();
+    g_log_file = f;
+    g_log_io = io;
+    logUnlock();
+    log.info("run log: {s}", .{path});
+}
+
+fn parseRunLogEpoch(name: []const u8) ?i64 {
+    if (!std.mem.startsWith(u8, name, "f69-")) return null;
+    if (!std.mem.endsWith(u8, name, ".log")) return null;
+    const mid = name["f69-".len .. name.len - ".log".len];
+    return std.fmt.parseInt(i64, mid, 10) catch null;
+}
+
+fn pruneRunLogs(io: std.Io, gpa: std.mem.Allocator, dir_path: []const u8) void {
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch return;
+    defer dir.close(io);
+    var epochs: std.ArrayList(i64) = .empty;
+    defer epochs.deinit(gpa);
+    var it = dir.iterate();
+    while (it.next(io) catch null) |entry| {
+        if (entry.kind != .file) continue;
+        const ep = parseRunLogEpoch(entry.name) orelse continue;
+        epochs.append(gpa, ep) catch continue;
+    }
+    if (epochs.items.len <= RUN_LOG_KEEP) return;
+    std.mem.sort(i64, epochs.items, {}, std.sort.asc(i64));
+    for (epochs.items[0 .. epochs.items.len - RUN_LOG_KEEP]) |ep| {
+        var nb: [64]u8 = undefined;
+        const nm = std.fmt.bufPrint(&nb, "f69-{d}.log", .{ep}) catch continue;
+        dir.deleteFile(io, nm) catch {};
+    }
 }
 
 const log = std.log.scoped(.main);
@@ -104,6 +183,9 @@ pub fn main(init: std.process.Init) !void {
     defer gpa.free(data_root);
     try std.Io.Dir.cwd().createDirPath(init.io, data_root);
     log.info("data root {s}", .{data_root});
+
+    // Start the per-run log file now that data_root exists.
+    initRunLog(init.io, gpa, data_root);
 
     // DB at `<data_root>/f69.db`.
     const db_path = try std.fmt.allocPrint(gpa, "{s}/f69.db", .{data_root});
@@ -532,6 +614,18 @@ pub fn main(init: std.process.Init) !void {
     };
     log.info("refresh backend {s}", .{@tagName(initial_refresh_backend)});
 
+    const update_check_source_path = try std.fmt.allocPrint(gpa, "{s}/update_check_source", .{data_root});
+    defer gpa.free(update_check_source_path);
+    const initial_update_check_source: ui.UpdateCheckSource = blk: {
+        const owned = util_setting.readSingleLine(init.io, gpa, update_check_source_path) catch null;
+        if (owned) |s| {
+            defer gpa.free(s);
+            break :blk ui.UpdateCheckSource.fromStr(s);
+        }
+        break :blk .builtin;
+    };
+    log.info("update check source {s}", .{@tagName(initial_update_check_source)});
+
     // F95Indexer client. `F95_INDEXER_URL` env override lets users
     // point at a self-hosted instance; absent → public cache.
     const indexer_base_url_env = init.minimal.environ.getAlloc(gpa, "F95_INDEXER_URL") catch null;
@@ -547,7 +641,7 @@ pub fn main(init: std.process.Init) !void {
     // backend-agnostic (rebuildable against dvui's testing backend for
     // headless tests). Must outlive the window dvui builds from it.
     SDLBackend.enableSDLLogging();
-    var backend = try SDLBackend.initWindow(.{
+    var backend = SDLBackend.initWindow(.{
         .io = init.io,
         .allocator = gpa,
         .size = .{ .w = 1280.0, .h = 800.0 },
@@ -555,8 +649,35 @@ pub fn main(init: std.process.Init) !void {
         .vsync = true,
         .title = "f69",
         .icon = null,
-    });
+    }) catch |e| {
+        // The SDL3 GPU backend is Vulkan on Linux with no software fallback,
+        // so "No supported SDL_GPU backend found" aborts here. Turn the raw
+        // Zig panic trace into an actionable message + clean exit.
+        if (e == error.BackendError) {
+            std.debug.print(
+                \\
+                \\f69: could not initialize the GPU (SDL3 GPU / Vulkan).
+                \\
+                \\f69 renders with Vulkan and found no usable Vulkan device.
+                \\Install a working Vulkan driver for your GPU:
+                \\  Arch/CachyOS: vulkan-radeon (AMD) | vulkan-intel (Intel) | nvidia-utils (NVIDIA)
+                \\  Debian/Ubuntu: mesa-vulkan-drivers (AMD/Intel) or the NVIDIA driver package
+                \\Verify it works:  vulkaninfo --summary   (package: vulkan-tools)
+                \\No GPU / headless? Install Mesa lavapipe (software Vulkan):
+                \\  Arch: vulkan-swrast   Debian: mesa-vulkan-drivers
+                \\
+            , .{});
+            std.process.exit(1);
+        }
+        return e;
+    };
     defer backend.deinit();
+
+    // OS temp root for mod-apply staging / test-install preview, resolved
+    // once so it isn't the "/tmp" default (which on Windows lands in a
+    // drive-root `C:\tmp`).
+    const staging_dir = try resolveTempDir(gpa, init.minimal.environ);
+    defer gpa.free(staging_dir);
 
     try ui.runMainLoop(init, &lib, &f95_service, &indexer_client, &dl_mgr, &recipe_repo, &sandbox, &host_launcher, &convert_svc, &compat_svc, rpdl_token, .{
         .exe_dir = ui_exe_dir,
@@ -564,6 +685,7 @@ pub fn main(init: std.process.Init) !void {
         .db_path = db_path,
         .covers_dir = covers_dir,
         .library_root = library_root,
+        .staging_dir = staging_dir,
         .cookie_path = cookie_path,
         .recipes_dir = recipes_dir,
         .mod_archives_dir = mod_archives_dir,
@@ -601,6 +723,8 @@ pub fn main(init: std.process.Init) !void {
         .initial_desktop_notifications = initial_desktop_notifications,
         .refresh_backend_path = refresh_backend_path,
         .initial_refresh_backend = initial_refresh_backend,
+        .update_check_source_path = update_check_source_path,
+        .initial_update_check_source = initial_update_check_source,
         .max_parallel_sync_path = max_parallel_sync_path,
         .initial_max_parallel_sync = initial_max_parallel_sync,
         .max_parallel_image_path = max_parallel_image_path,
@@ -808,10 +932,28 @@ fn resolveDataRoot(gpa: std.mem.Allocator, io: std.Io, environ: std.process.Envi
 /// Returns the literal `"aria2c"` (not a `<exe_dir>/aria2c` path) on
 /// every failure path so we never hand `Manager.init` a stale absolute
 /// path that doesn't resolve.
+/// System temp dir: `%TEMP%`/`%TMP%` on Windows; `$TMPDIR` or `/tmp`
+/// elsewhere. main.zig doesn't import util_paths, so this mirrors
+/// `util_paths.tempDir`. Caller frees.
+fn resolveTempDir(gpa: std.mem.Allocator, environ: std.process.Environ) ![]u8 {
+    if (builtin.os.tag == .windows) {
+        if (environ.getAlloc(gpa, "TEMP")) |x| return x else |_| {}
+        if (environ.getAlloc(gpa, "TMP")) |x| return x else |_| {}
+        return gpa.dupe(u8, "C:\\Windows\\Temp");
+    }
+    if (environ.getAlloc(gpa, "TMPDIR")) |x| return x else |_| {}
+    return gpa.dupe(u8, "/tmp");
+}
+
 fn resolveAria2Path(gpa: std.mem.Allocator, io: std.Io, environ: std.process.Environ) ![]u8 {
+    // The bundled binary is `aria2c.exe` on Windows; the bare fallback
+    // name still resolves via PATH+PATHEXT there. Without the `.exe` the
+    // explicit-path probe never matched and Windows always fell back to a
+    // PATH lookup, missing the binary shipped next to f69.exe.
+    const exe_name = if (builtin.os.tag == .windows) "aria2c.exe" else "aria2c";
     const exe_dir = resolveExeDir(gpa, io, environ) catch return gpa.dupe(u8, "aria2c");
     defer gpa.free(exe_dir);
-    const candidate = try std.fmt.allocPrint(gpa, "{s}/aria2c", .{exe_dir});
+    const candidate = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ exe_dir, exe_name });
     std.Io.Dir.cwd().access(io, candidate, .{}) catch {
         gpa.free(candidate);
         return gpa.dupe(u8, "aria2c");
@@ -854,6 +996,13 @@ fn maybeBackupDb(io: std.Io, gpa: std.mem.Allocator, lib: *library.Library, data
     var iter = dir.iterate();
     while (iter.next(io) catch null) |entry| {
         if (entry.kind != .file) continue;
+        // Sweep leftover `.tmp` snapshots from a previous crashed/failed
+        // backup so they don't accumulate. They never carry the canonical
+        // name, so parseBackupEpoch ignores them anyway — this is cleanup.
+        if (std.mem.endsWith(u8, entry.name, ".tmp")) {
+            dir.deleteFile(io, entry.name) catch {};
+            continue;
+        }
         const ep = parseBackupEpoch(entry.name) orelse continue;
         epochs.append(gpa, ep) catch continue;
         if (ep > newest) newest = ep;
@@ -864,8 +1013,25 @@ fn maybeBackupDb(io: std.Io, gpa: std.mem.Allocator, lib: *library.Library, data
 
     const dest = std.fmt.allocPrint(gpa, "{s}/f69-{d}.db", .{ dir_path, now }) catch return;
     defer gpa.free(dest);
-    lib.backupTo(gpa, dest) catch |e| {
-        log.warn("db backup: VACUUM INTO {s} failed: {s}", .{ dest, @errorName(e) });
+    const tmp = std.fmt.allocPrint(gpa, "{s}/f69-{d}.db.tmp", .{ dir_path, now }) catch return;
+    defer gpa.free(tmp);
+
+    // Snapshot to a `.tmp` first, then atomically rename into place. A
+    // crash or disk-full mid-VACUUM leaves only the `.tmp` (which the scan
+    // above ignores and sweeps), never a truncated `f69-<epoch>.db` that
+    // parseBackupEpoch would count as a valid backup — the old direct
+    // VACUUM INTO the final name could suppress all future backups for a
+    // day behind a corrupt file. VACUUM INTO refuses an existing dest, so
+    // clear any stale tmp from a prior backup in the same second.
+    std.Io.Dir.cwd().deleteFile(io, tmp) catch {};
+    lib.backupTo(gpa, tmp) catch |e| {
+        log.warn("db backup: VACUUM INTO {s} failed: {s}", .{ tmp, @errorName(e) });
+        std.Io.Dir.cwd().deleteFile(io, tmp) catch {};
+        return;
+    };
+    std.Io.Dir.renameAbsolute(tmp, dest, io) catch |e| {
+        log.warn("db backup: publish rename {s} -> {s} failed: {s}", .{ tmp, dest, @errorName(e) });
+        std.Io.Dir.cwd().deleteFile(io, tmp) catch {};
         return;
     };
     log.info("db backup -> {s}", .{dest});

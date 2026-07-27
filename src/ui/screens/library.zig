@@ -497,7 +497,12 @@ fn renderVirtualizedList(frame: *Frame, games: []const library.Game, query: []co
         if (state.label_filter_len > 0) {
             var set = std.AutoHashMap(u64, void).init(frame.lib.alloc);
             for (state.label_filter[0..state.label_filter_len]) |lid| {
-                const gids = frame.lib.gamesForLabel(lid) catch continue;
+                // A DB error here silently narrows the label filter (games
+                // that should match get dropped); at least leave a trail.
+                const gids = frame.lib.gamesForLabel(lid) catch |e| {
+                    std.log.scoped(.ui_library).warn("gamesForLabel({d}) failed: {s}", .{ lid, @errorName(e) });
+                    continue;
+                };
                 defer frame.lib.alloc.free(gids);
                 for (gids) |gid| set.put(gid, {}) catch {};
             }
@@ -515,9 +520,19 @@ fn renderVirtualizedList(frame: *Frame, games: []const library.Game, query: []co
                 fresh.append(frame.lib.alloc, @intCast(i)) catch break;
             }
         }
-        if (state.lib_filter_cache_indices) |old| frame.lib.alloc.free(old);
-        state.lib_filter_cache_indices = fresh.toOwnedSlice(frame.lib.alloc) catch null;
-        state.lib_filter_cache_sig = sig;
+        if (fresh.toOwnedSlice(frame.lib.alloc)) |owned| {
+            if (state.lib_filter_cache_indices) |old| frame.lib.alloc.free(old);
+            state.lib_filter_cache_indices = owned;
+            state.lib_filter_cache_sig = sig;
+        } else |_| {
+            // OOM finalizing the filter cache. DON'T blank the whole
+            // library — keep the previous cache (still held, we only free
+            // it on success) and leave the sig stale so it retries next
+            // frame. Only surface a toast when there's no prior cache to
+            // fall back on, so a transient OOM doesn't spam per frame.
+            fresh.deinit(frame.lib.alloc);
+            if (state.lib_filter_cache_indices == null) state.notifyErr("Low memory — couldn't build the library view.");
+        }
     }
     const filtered: []const u32 = state.lib_filter_cache_indices orelse &.{};
 
@@ -773,6 +788,25 @@ fn sidebar(frame: *Frame) void {
             if (style.button(@src(), "3+", .{}, .{})) state.filters.min_rating = 3.0;
             if (style.button(@src(), "4+", .{}, .{})) state.filters.min_rating = 4.0;
             if (style.button(@src(), "4.5+", .{}, .{})) state.filters.min_rating = 4.5;
+        }
+    }
+
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
+
+    {
+        var lbl_buf: [48]u8 = undefined;
+        const lbl = if (state.filters.min_user_rating) |r|
+            std.fmt.bufPrint(&lbl_buf, "My rating ({d:.0}+)", .{r}) catch "My rating"
+        else
+            @as([]const u8, "My rating");
+        if (dvui.expander(@src(), lbl, .{}, .{ .expand = .horizontal })) {
+            var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+            defer hbox.deinit();
+            if (style.button(@src(), "Any", .{}, .{})) state.filters.min_user_rating = null;
+            if (style.button(@src(), "2+", .{}, .{})) state.filters.min_user_rating = 2.0;
+            if (style.button(@src(), "3+", .{}, .{})) state.filters.min_user_rating = 3.0;
+            if (style.button(@src(), "4+", .{}, .{})) state.filters.min_user_rating = 4.0;
+            if (style.button(@src(), "5", .{}, .{})) state.filters.min_user_rating = 5.0;
         }
     }
 

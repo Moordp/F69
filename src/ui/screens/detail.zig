@@ -1032,7 +1032,7 @@ fn renderGameConfig(frame: *Frame, game: *library.Game) void {
                 const disabled = frame.lib.isUniversalModDisabled(game.f95_thread_id, m.id) catch false;
                 var enabled = !disabled;
                 if (dvui.checkbox(@src(), &enabled, m.name, .{ .id_extra = @as(u64, @bitCast(m.id)) })) {
-                    frame.lib.setUniversalModDisabled(game.f95_thread_id, m.id, !enabled) catch {};
+                    saveOrToast(frame, "mod toggle", frame.lib.setUniversalModDisabled(game.f95_thread_id, m.id, !enabled));
                 }
             }
         }
@@ -1243,7 +1243,7 @@ fn renderManualInstallPanel(frame: *Frame, game: *const library.Game) void {
     });
     defer panel.deinit();
 
-    dvui.label(@src(), "Install from file", .{}, .{ .style = .highlight });
+    dvui.label(@src(), "Install from file", .{}, .{ .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 4 } });
     components.settingsHelpText(
         "Point at any .zip / .7z / .tar.gz on disk and we'll extract it as a new install. " ++
@@ -1375,7 +1375,7 @@ fn renderConvertHelp() void {
     });
     defer help.deinit();
 
-    dvui.label(@src(), "What the toolbar buttons do", .{}, .{ .style = .highlight });
+    dvui.label(@src(), "What the toolbar buttons do", .{}, .{ .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 4 } });
     const help_lines = [_][]const u8{
         "Launch / Stop - run or kill the picked install. Grayed when there's no install.",
@@ -1614,7 +1614,7 @@ fn renderDeleteInstallPopup(frame: *Frame, inst: *const library.Install) void {
         std.fmt.bufPrint(&ver_buf, "{s} \u{2014} {s}  ({s})", .{ inst.version, inst.name.?, @tagName(inst.source) }) catch inst.version
     else
         std.fmt.bufPrint(&ver_buf, "{s}  ({s})", .{ inst.version, @tagName(inst.source) }) catch inst.version;
-    dvui.labelNoFmt(@src(), ver_text, .{}, .{ .style = .highlight });
+    dvui.labelNoFmt(@src(), ver_text, .{}, .{ .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     components.settingsHelpText(
         "Deletes the install folder from disk AND removes the install record from the database. " ++
@@ -3160,7 +3160,7 @@ fn ensureTagColors(frame: *Frame) void {
 
 /// Rebuild the override map after an edit so chips reflect the change.
 fn reloadTagColors(frame: *Frame) void {
-    if (frame.state.tag_colors) |*m| library.freeTagColors(m);
+    if (frame.state.tag_colors) |*m| library.Library.freeTagColors(m);
     frame.state.tag_colors = frame.lib.loadTagColors(frame.lib.alloc) catch null;
 }
 

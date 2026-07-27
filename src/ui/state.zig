@@ -7,6 +7,7 @@ const dvui = @import("dvui");
 const buf_mod = @import("buf.zig");
 const owned = @import("owned.zig");
 const import_job_mod = @import("import_job.zig");
+const folder_import_job_mod = @import("folder_import_job.zig");
 pub const MessageBuf = buf_mod.MessageBuf;
 
 pub const Screen = enum {
@@ -126,7 +127,7 @@ pub const FolderImportRowState = struct {
     /// stat-only and cheap enough to run inline. The user sees the
     /// matched recipes as chips on the row; after commit, the
     /// Apply Fix dialog on the detail screen takes over.
-    issues: [FOLDER_IMPORT_MAX_ISSUES]FolderImportIssue = [_]FolderImportIssue{ .{} } ** FOLDER_IMPORT_MAX_ISSUES,
+    issues: [FOLDER_IMPORT_MAX_ISSUES]FolderImportIssue = [_]FolderImportIssue{.{}} ** FOLDER_IMPORT_MAX_ISSUES,
     issue_count: u8 = 0,
 };
 /// Sort options. `weighted` uses Game.weightedRating against the
@@ -331,6 +332,27 @@ pub const RefreshBackend = enum {
     }
 };
 
+/// Data source for the "Check for updates" walker. `builtin` uses f69's
+/// own latest-updates scan (`latest_data.php?cmd=list`, paginated back to
+/// the last check); `rss` uses F95's official `cmd=rss` feed (one request,
+/// ~30 newest). RSS is lighter but shallower; builtin covers a longer
+/// window. When `rss` is chosen it applies regardless of `refresh_backend`.
+pub const UpdateCheckSource = enum {
+    builtin,
+    rss,
+
+    pub fn fromStr(s: []const u8) UpdateCheckSource {
+        return std.meta.stringToEnum(UpdateCheckSource, s) orelse .builtin;
+    }
+
+    pub fn label(self: UpdateCheckSource) []const u8 {
+        return switch (self) {
+            .builtin => "f69 latest-updates scan",
+            .rss => "F95 RSS feed",
+        };
+    }
+};
+
 /// Severity of a toast notification. Drives the leading glyph + how
 /// long the toast hangs around before auto-dismissing.
 ///   info    — plain "here's what happened" (no glyph). 3 s.
@@ -456,8 +478,11 @@ pub const AutoCheckSettings = struct {
 pub const Filters = struct {
     engine: EngineMask = .{},
     status: StatusMask = .{},
-    /// Inclusive lower bound on rating; null = no filter.
+    /// Inclusive lower bound on the community (F95) rating; null = no filter.
     min_rating: ?f32 = null,
+    /// Inclusive lower bound on the user's OWN rating (`Game.user_rating`);
+    /// null = no filter. Distinct from `min_rating` (community score).
+    min_user_rating: ?f32 = null,
     /// Tri-state filter on whether a row has ever been synced. Default
     /// `.all` shows everything; `.synced` shows only rows where
     /// `last_scraped_at != null`, `.unsynced` shows only the placeholder
@@ -492,7 +517,7 @@ pub const Filters = struct {
     pub const CensoredMask = std.EnumSet(library.CensoredState);
 
     pub fn empty(self: Filters) bool {
-        return self.min_rating == null and self.sync_state == .all and
+        return self.min_rating == null and self.min_user_rating == null and self.sync_state == .all and
             self.engine.count() == 0 and
             self.status.count() == 0 and
             self.dev_status.count() == 0 and
@@ -534,6 +559,10 @@ pub const Filters = struct {
         }
         if (self.min_rating) |min| {
             const r = g.rating orelse 0;
+            if (r < min) return false;
+        }
+        if (self.min_user_rating) |min| {
+            const r = g.user_rating orelse 0;
             if (r < min) return false;
         }
 
@@ -874,6 +903,12 @@ pub const State = struct {
     /// anyopaque so state.zig doesn't pull in the import_job module.
     /// One at a time; `actions.startImport*` rejects a second click.
     import_job: ?*import_job_mod.Job = null,
+    /// In-flight folder-import file-transfer worker (the "Import ticked
+    /// rows" / per-row resolve copy/move). One at a time; commit paths
+    /// reject a second start. UI-thread prep + post-transfer
+    /// upsertInstall keep SQLite single-threaded; the worker only
+    /// shuffles bytes. See `folder_import_job.zig`.
+    folder_import_job: ?*folder_import_job_mod.Job = null,
     /// In-flight manual-install workers (user picked an archive off
     /// disk; we hash + extract + write an `installs` row). Same
     /// lifecycle as `post_install_jobs`; held as anyopaque so this
@@ -1339,6 +1374,11 @@ pub const State = struct {
     /// the pattern used by `auto_update_default`).
     refresh_backend: RefreshBackend = .indexer,
     refresh_backend_persisted: RefreshBackend = .indexer,
+    /// Data source for "Check for updates". Persisted under
+    /// `<data_root>/update_check_source`; `_persisted` mirrors disk for
+    /// dirty detection (same pattern as `refresh_backend`).
+    update_check_source: UpdateCheckSource = .builtin,
+    update_check_source_persisted: UpdateCheckSource = .builtin,
     /// Runtime cap on simultaneous in-flight `/full` workers (indexer)
     /// / thread scrapes (scraper). Clamped to `[1, MAX_PARALLEL_SYNC]`.
     /// Settings → Sync writes this. Default 4.
