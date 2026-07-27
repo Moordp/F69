@@ -29,4 +29,11 @@ pub const Service = struct {
         // `auth.login` already calls `client.setCookie` on success.
         return auth.login(self.client, self.alloc, io, creds);
     }
+
+    /// Sign in with a session cookie the user copied from their browser (the
+    /// 2FA / passkey workaround). Verifies + applies it; returns the owned
+    /// cookie for the caller to persist. See `auth.loginWithCookie`.
+    pub fn loginWithCookie(self: *Service, io: std.Io, xf_user: []const u8, xf_session: []const u8) errs.Error![]u8 {
+        return auth.loginWithCookie(self.client, self.alloc, io, xf_user, xf_session);
+    }
 };

@@ -710,26 +710,68 @@ fn renderF95LoginCard(frame: *Frame) void {
         return;
     }
 
-    // Signed out → inline form (in-field placeholders, no labels).
-    {
-        const te = style.textEntry(@src(), .{
-            .text = .{ .buffer = &state.f95_user_buf },
-            .placeholder = "Username",
-        }, .{ .expand = .horizontal, .id_extra = 0xCB01 });
-        te.deinit();
-    }
-    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
-    {
-        const te = style.textEntry(@src(), .{
-            .text = .{ .buffer = &state.f95_pass_buf },
-            .password_char = "•",
-            .placeholder = "Password",
-        }, .{ .expand = .horizontal, .id_extra = 0xCB02 });
-        te.deinit();
-    }
-    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 10 } });
-    if (style.button(@src(), "Sign in to F95Zone", .{}, .{ .style = .highlight })) {
-        actions.doLogin(frame, state.f95UserSlice(), state.f95PassSlice());
+    // Signed out → password form, or the cookie form (the 2FA / passkey
+    // workaround). A link at the bottom toggles between them.
+    if (!state.f95_login_use_cookie) {
+        {
+            const te = style.textEntry(@src(), .{
+                .text = .{ .buffer = &state.f95_user_buf },
+                .placeholder = "Username",
+            }, .{ .expand = .horizontal, .id_extra = 0xCB01 });
+            te.deinit();
+        }
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
+        {
+            const te = style.textEntry(@src(), .{
+                .text = .{ .buffer = &state.f95_pass_buf },
+                .password_char = "•",
+                .placeholder = "Password",
+            }, .{ .expand = .horizontal, .id_extra = 0xCB02 });
+            te.deinit();
+        }
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 10 } });
+        if (style.button(@src(), "Sign in to F95Zone", .{}, .{ .style = .highlight })) {
+            actions.doLogin(frame, state.f95UserSlice(), state.f95PassSlice());
+        }
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
+        if (style.button(@src(), "Use browser cookie (2FA / passkey)", .{}, .{ .expand = .horizontal })) {
+            state.f95_login_use_cookie = true;
+            state.setLoginMsg("");
+        }
+    } else {
+        // Cookie sign-in: password login can't clear a passkey/2FA challenge,
+        // so let the user paste the session cookie from a browser that can.
+        dvui.labelNoFmt(@src(), "2FA or passkey? Sign in at f95zone.to in your browser,", .{}, .{ .color_text = td(t.ink) });
+        dvui.labelNoFmt(@src(), "then paste these two cookies (devtools → Application):", .{}, .{ .color_text = td(t.ink) });
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
+        if (style.button(@src(), "Open F95 login page", .{}, .{ .expand = .horizontal })) {
+            actions.doOpenF95Login(frame);
+        }
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
+        {
+            const te = style.textEntry(@src(), .{
+                .text = .{ .buffer = &state.f95_cookie_user_buf },
+                .placeholder = "xf_user cookie value",
+            }, .{ .expand = .horizontal, .id_extra = 0xCB03 });
+            te.deinit();
+        }
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
+        {
+            const te = style.textEntry(@src(), .{
+                .text = .{ .buffer = &state.f95_cookie_session_buf },
+                .placeholder = "xf_session cookie value (optional)",
+            }, .{ .expand = .horizontal, .id_extra = 0xCB04 });
+            te.deinit();
+        }
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 10 } });
+        if (style.button(@src(), "Sign in with cookie", .{}, .{ .style = .highlight })) {
+            actions.doLoginWithCookie(frame, state.f95CookieUserSlice(), state.f95CookieSessionSlice());
+        }
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
+        if (style.button(@src(), "Use password instead", .{}, .{ .expand = .horizontal })) {
+            state.f95_login_use_cookie = false;
+            state.setLoginMsg("");
+        }
     }
 }
 

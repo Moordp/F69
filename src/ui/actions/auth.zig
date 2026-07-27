@@ -12,6 +12,7 @@ const downloads = @import("downloads");
 const types = @import("../types.zig");
 const owned_types = @import("../owned.zig");
 const job_mod = @import("../job.zig");
+const launch_act = @import("launch.zig");
 
 const Frame = types.Frame;
 const State = types.State;
@@ -43,7 +44,11 @@ pub fn doLogin(frame: *Frame, username: []const u8, password: []const u8) void {
     }) catch |e| {
         state.login_status = .err;
         const friendly: []const u8 = switch (e) {
-            error.AuthRequired => "incorrect username or password (or 2FA — not supported yet)",
+            // Bad password AND a 2FA/passkey challenge both collapse to
+            // AuthRequired here (F95 just withholds xf_user). Point users at
+            // the cookie workaround, which is the only thing that clears a
+            // passkey.
+            error.AuthRequired => "wrong password, or your account uses 2FA/passkey — try \"Sign in with cookie\"",
             error.NetworkError => "network error — check connection",
             error.HttpStatusError => "F95Zone returned an unexpected status",
             else => @errorName(e),
@@ -69,6 +74,58 @@ pub fn doLogin(frame: *Frame, username: []const u8, password: []const u8) void {
     state.login_popup_open = false;
     state.is_donor = null;
     checkDonorStatus(frame);
+}
+
+/// Sign in with a session cookie the user copied from their browser — the
+/// only path that works for a 2FA / passkey-protected account (password login
+/// can't answer the challenge; see doLogin). Verifies the cookie against F95
+/// before accepting, then persists it exactly like a password login.
+pub fn doLoginWithCookie(frame: *Frame, xf_user: []const u8, xf_session: []const u8) void {
+    const state = frame.state;
+    if (xf_user.len == 0) {
+        state.login_status = .err;
+        state.setLoginMsg("paste your xf_user cookie value");
+        return;
+    }
+    log.info("doLoginWithCookie start (xf_user len={d}, xf_session len={d})", .{ xf_user.len, xf_session.len });
+    state.login_status = .logging_in;
+    state.setLoginMsg("verifying cookie…");
+
+    const cookie = frame.f95_svc.loginWithCookie(frame.io, xf_user, xf_session) catch |e| {
+        state.login_status = .err;
+        const friendly: []const u8 = switch (e) {
+            error.AuthRequired => "that cookie didn't work — copy a fresh xf_user + xf_session from your browser",
+            error.NetworkError => "network error — check connection",
+            else => @errorName(e),
+        };
+        var emsg: [128]u8 = undefined;
+        const m = std.fmt.bufPrint(&emsg, "cookie sign-in failed: {s}", .{friendly}) catch "cookie sign-in failed";
+        state.setLoginMsg(m);
+        return;
+    };
+    defer frame.lib.alloc.free(cookie);
+
+    persistCookie(frame.io, frame.info.cookie_path, cookie) catch |e| {
+        std.log.scoped(.ui).warn("could not persist cookie: {s}", .{@errorName(e)});
+    };
+
+    // Wipe the pasted cookie values — they're a live session token.
+    @memset(&state.f95_cookie_user_buf, 0);
+    @memset(&state.f95_cookie_session_buf, 0);
+    state.login_status = .logged_in;
+    state.setLoginMsg("logged in (cookie)");
+    state.login_popup_open = false;
+    state.is_donor = null;
+    checkDonorStatus(frame);
+}
+
+/// Open the F95Zone login page in the user's real browser so they can log in
+/// (passkey / 2FA works natively there) and then copy their cookie back.
+pub fn doOpenF95Login(frame: *Frame) void {
+    launch_act.spawnXdgOpen(frame.lib.alloc, frame.io, "https://f95zone.to/login/") catch |e| {
+        frame.state.setLoginMsg("couldn't open browser — go to f95zone.to/login");
+        std.log.scoped(.ui).warn("open F95 login failed: {s}", .{@errorName(e)});
+    };
 }
 
 // ============================================================

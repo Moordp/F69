@@ -202,6 +202,8 @@ pub const drainBookmarks = bookmarks.drainBookmarks;
 
 // ---- Auth ----
 pub const doLogin = auth.doLogin;
+pub const doLoginWithCookie = auth.doLoginWithCookie;
+pub const doOpenF95Login = auth.doOpenF95Login;
 pub const doLogout = auth.doLogout;
 pub const checkDonorStatus = auth.checkDonorStatus;
 pub const drainDonorProbe = auth.drainDonorProbe;
@@ -209,6 +211,7 @@ pub const doRpdlLogin = auth.doRpdlLogin;
 pub const doRpdlLogout = auth.doRpdlLogout;
 
 // ---- Launch / convert / running games / saves ----
+pub const doOpenLogsFolder = launch.doOpenLogsFolder;
 pub const doLaunchGame = launch.doLaunchGame;
 pub const scanCompatForInstall = launch.scanCompatForInstall;
 pub const freeCompatIssues = launch.freeCompatIssues;

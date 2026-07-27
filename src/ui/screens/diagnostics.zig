@@ -9,6 +9,7 @@ const installer_mod = @import("installer");
 
 const types = @import("../types.zig");
 const components = @import("../components.zig");
+const actions = @import("../actions.zig");
 
 const Frame = types.Frame;
 
@@ -58,6 +59,21 @@ pub fn diagnosticsScreen(frame: *Frame) !bool {
     diagRow(@src(), "cookie_path", info.cookie_path);
     diagRow(@src(), "rpdl_token_path", info.rpdl_token_path);
     diagRow(@src(), "browser_path_file", info.browser_path_file);
+
+    // Per-run logs live at <data_root>/logs/f69-<epoch>.log. Show the folder
+    // and give a one-click way to open it — this is the file to attach to a
+    // bug report.
+    {
+        var logs_buf: [768]u8 = undefined;
+        const logs_dir = std.fmt.bufPrint(&logs_buf, "{s}/logs", .{info.data_root}) catch "(path too long)";
+        diagRow(@src(), "logs_dir", logs_dir);
+    }
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .padding = .{ .x = 8, .y = 0, .w = 0, .h = 0 } });
+        defer row.deinit();
+        if (dvui.button(@src(), "Open log folder", .{}, .{})) actions.doOpenLogsFolder(frame);
+    }
 
     diagSep(@src());
 

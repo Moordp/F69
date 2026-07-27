@@ -2085,6 +2085,31 @@ pub fn doOpenGameFolder(frame: *Frame, game: *const library.Game) void {
     state.setLaunchMsg(ok_msg);
 }
 
+/// Open `<data_root>/logs/` (where the per-run logs live) in the file
+/// manager. Surfaced from the Diagnostics screen so users can actually find
+/// the log to attach to a bug report.
+pub fn doOpenLogsFolder(frame: *Frame) void {
+    const state = frame.state;
+    const alloc = frame.lib.alloc;
+
+    var buf: [640]u8 = undefined;
+    const target = std.fmt.bufPrint(&buf, "{s}/logs", .{frame.info.data_root}) catch {
+        state.setLaunchMsg("Open logs: path buffer overflow.");
+        return;
+    };
+    std.Io.Dir.cwd().createDirPath(frame.io, target) catch {}; // best-effort
+
+    spawnXdgOpen(alloc, frame.io, target) catch |e| {
+        var eb: [192]u8 = undefined;
+        const msg = std.fmt.bufPrint(&eb, "Open logs failed: {s}", .{@errorName(e)}) catch "Open logs failed";
+        state.setLaunchMsg(msg);
+        return;
+    };
+    var ok: [256]u8 = undefined;
+    const ok_msg = std.fmt.bufPrint(&ok, "Opened {s}", .{target}) catch "Opened logs";
+    state.setLaunchMsg(ok_msg);
+}
+
 pub fn doOpenSaves(frame: *Frame, game: *const library.Game) void {
     const state = frame.state;
     const alloc = frame.lib.alloc;
@@ -2164,7 +2189,7 @@ pub fn expandSavesPath(alloc: std.mem.Allocator, tmpl: []const u8, sandbox_home:
     return out.toOwnedSlice(alloc);
 }
 
-fn spawnXdgOpen(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !void {
+pub fn spawnXdgOpen(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !void {
     const path_owned = try alloc.dupe(u8, path);
     // The reaper thread takes ownership of `path_owned` + the child
     // handle; UI thread returns immediately without blocking on

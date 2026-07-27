@@ -234,7 +234,20 @@ Three tiers, first match wins:
 2. **Portable install** (binary anywhere user-writable) — `<dir-of-binary>/data/`.
 3. **System install** (binary under `/usr/bin/`, `/nix/store/...`, or `/opt/...`) — `$XDG_DATA_HOME/f69`, defaulting to `~/.local/share/f69/`.
 
-Layout under the resolved root: `f69.db`, `library/`, `covers/`, `recipes/`, `downloads/`, `f95_cookie`.
+Layout under the resolved root: `f69.db`, `library/`, `covers/`, `recipes/`, `downloads/`, `f95_cookie`, `logs/`.
+
+</details>
+
+<details>
+<summary><b>Where are the logs? (I hit a bug)</b></summary>
+
+f69 writes one log file per run to **`<data_dir>/logs/f69-<timestamp>.log`** (newest = latest run; it keeps the last 10). `<data_dir>` is resolved exactly as in *"Where does my data live?"* above, so:
+
+- **Portable bundle:** `<the folder f69 lives in>/data/logs/`
+- **Installed package** (deb/rpm/AUR/Nix): `~/.local/share/f69/logs/` (or `$XDG_DATA_HOME/f69/logs/`)
+- Or set `F69_DATA_DIR=/some/path` to force data + logs somewhere obvious.
+
+In the app: **Diagnostics** (activity bar) shows the exact `logs_dir` and has an **Open log folder** button. When reporting a bug, attach the newest file from there — it captures the same lines f69 prints to the terminal, including login failures.
 
 </details>
 
@@ -242,6 +255,20 @@ Layout under the resolved root: `f69.db`, `library/`, `covers/`, `recipes/`, `do
 <summary><b>Does f69 store my F95 password?</b></summary>
 
 No. It does an XenForo login dance once and persists the resulting session cookie at `<data_dir>/f95_cookie`. The cookie is what authenticates donor DDL pulls and the bookmark importer.
+
+</details>
+
+<details>
+<summary><b>Login fails and my account uses a passkey / 2FA</b></summary>
+
+Username/password sign-in can't answer F95's two-step or passkey challenge — a passkey in particular **can't** be done outside a real browser. Use **cookie sign-in** instead:
+
+1. In the F95 login card, click **"Use browser cookie (2FA / passkey)"** (there's an **Open F95 login page** button to get you there).
+2. Log in to f95zone.to in your browser — your passkey works there.
+3. Open devtools → **Application → Cookies → f95zone.to**, copy the **`xf_user`** value (and **`xf_session`** if present) and paste them into the two fields.
+4. **Sign in with cookie.** f69 verifies the cookie against F95 before accepting it.
+
+Plain TOTP two-step is also being added as a native code prompt; passkey users should use cookie sign-in.
 
 </details>
 

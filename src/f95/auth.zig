@@ -364,6 +364,134 @@ fn postLogin(http: *std.http.Client, alloc: std.mem.Allocator, form_body: []cons
     return jar.toOwnedSlice(alloc) catch errs.Error.OutOfMemory;
 }
 
+// ============================================================
+//  Cookie sign-in (2FA / passkey workaround)
+// ============================================================
+//
+// Password login can't clear a two-step / passkey challenge (see the header
+// note + the UI). The escape hatch: the user logs in with their real browser
+// (where the passkey works), copies the `xf_user` + `xf_session` cookie values
+// out of devtools, and pastes them here. We assemble the Cookie string, verify
+// it actually authenticates, and hand it back for the client + on-disk cookie.
+
+const BASE_URL = "https://f95zone.to/";
+
+pub const CookieCheck = enum { ok, invalid, network_error };
+
+/// Strip a value copied from browser devtools down to the bare cookie value.
+/// Tolerates the user pasting `xf_user=VALUE` (or `VALUE`), surrounding
+/// whitespace, quotes, and a trailing `;`.
+fn cleanCookieValue(name: []const u8, raw: []const u8) []const u8 {
+    var v = std.mem.trim(u8, raw, " \t\r\n\"';");
+    // "xf_user=ABC" → "ABC" (case-insensitive name match).
+    if (v.len > name.len + 1 and std.ascii.eqlIgnoreCase(v[0..name.len], name) and v[name.len] == '=') {
+        v = std.mem.trim(u8, v[name.len + 1 ..], " \t\r\n\"';");
+    }
+    return v;
+}
+
+/// Build a `xf_user=…; xf_session=…` Cookie value from the two parts the user
+/// pasted. `xf_session` is optional (some accounts authenticate on `xf_user`
+/// alone). Returns an owned slice; caller frees. Errors if `xf_user` is empty.
+pub fn buildCookieFromParts(alloc: std.mem.Allocator, xf_user_raw: []const u8, xf_session_raw: []const u8) errs.Error![]u8 {
+    const user = cleanCookieValue("xf_user", xf_user_raw);
+    const session = cleanCookieValue("xf_session", xf_session_raw);
+    if (user.len == 0) return errs.Error.AuthRequired;
+
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(alloc);
+    buf.appendSlice(alloc, "xf_user=") catch return errs.Error.OutOfMemory;
+    buf.appendSlice(alloc, user) catch return errs.Error.OutOfMemory;
+    if (session.len > 0) {
+        buf.appendSlice(alloc, "; xf_session=") catch return errs.Error.OutOfMemory;
+        buf.appendSlice(alloc, session) catch return errs.Error.OutOfMemory;
+    }
+    return buf.toOwnedSlice(alloc) catch errs.Error.OutOfMemory;
+}
+
+/// GET the site root with the candidate cookie and read the `<html>` tag's
+/// `data-logged-in` flag XenForo stamps on every page. `.ok` = the cookie
+/// authenticates, `.invalid` = it doesn't, `.network_error` = couldn't tell.
+pub fn verifyCookie(alloc: std.mem.Allocator, io: Io, cookie: []const u8) CookieCheck {
+    var http: std.http.Client = .{ .allocator = alloc, .io = io };
+    defer http.deinit();
+
+    const uri = std.Uri.parse(BASE_URL) catch return .network_error;
+    const headers = [_]std.http.Header{
+        .{ .name = "accept", .value = "text/html" },
+        .{ .name = "cookie", .value = cookie },
+    };
+    var req = http.request(.GET, uri, .{
+        .keep_alive = false,
+        .headers = .{ .user_agent = .{ .override = USER_AGENT } },
+        .extra_headers = &headers,
+    }) catch return .network_error;
+    defer req.deinit();
+
+    req.sendBodiless() catch return .network_error;
+    if (req.connection) |c| c.flush() catch {};
+
+    var redir_buf: [8192]u8 = undefined;
+    var response = req.receiveHead(&redir_buf) catch return .network_error;
+    if (response.head.status != .ok) {
+        log.warn("verifyCookie: GET {s} status {d}", .{ BASE_URL, @intFromEnum(response.head.status) });
+        return .network_error;
+    }
+
+    var transfer_buf: [4096]u8 = undefined;
+    var decompress_state: std.http.Decompress = undefined;
+    var decompress_buf: [64 * 1024]u8 = undefined;
+    const body_reader = response.readerDecompressing(&transfer_buf, &decompress_state, &decompress_buf);
+
+    // The flag lives in the `<html …>` tag at the very top, so scan only the
+    // opening chunk. Keep a small carry so a marker split across reads still
+    // matches.
+    var scanned: usize = 0;
+    var carry: [64]u8 = undefined;
+    var carry_len: usize = 0;
+    while (scanned < 256 * 1024) {
+        var chunk: [16 * 1024]u8 = undefined;
+        @memcpy(chunk[0..carry_len], carry[0..carry_len]);
+        const got = body_reader.readSliceShort(chunk[carry_len..]) catch return .network_error;
+        if (got == 0) break;
+        const view = chunk[0 .. carry_len + got];
+        scanned += got;
+        if (std.mem.indexOf(u8, view, "data-logged-in=\"true\"") != null) {
+            _ = body_reader.discardRemaining() catch {};
+            return .ok;
+        }
+        if (std.mem.indexOf(u8, view, "data-logged-in=\"false\"") != null) {
+            _ = body_reader.discardRemaining() catch {};
+            return .invalid;
+        }
+        carry_len = @min(carry.len, view.len);
+        @memcpy(carry[0..carry_len], view[view.len - carry_len ..]);
+    }
+    // No marker on this skin — inconclusive rather than a hard reject.
+    log.warn("verifyCookie: no data-logged-in marker found", .{});
+    return .network_error;
+}
+
+/// Cookie sign-in end to end: assemble → verify → apply to the client.
+/// Returns the owned cookie (caller persists + frees), mirroring `login`.
+pub fn loginWithCookie(client: *Client, alloc: std.mem.Allocator, io: Io, xf_user: []const u8, xf_session: []const u8) errs.Error![]u8 {
+    const cookie = try buildCookieFromParts(alloc, xf_user, xf_session);
+    errdefer alloc.free(cookie);
+    switch (verifyCookie(alloc, io, cookie)) {
+        .ok => log.info("cookie sign-in verified OK", .{}),
+        .invalid => {
+            log.warn("cookie sign-in rejected — F95 reports not-logged-in for the pasted cookie", .{});
+            return errs.Error.AuthRequired;
+        },
+        // Couldn't reach F95 to confirm — accept optimistically; the first
+        // authenticated action will surface a bad cookie. Better than blocking
+        // a user who's briefly offline behind a false "cookie invalid".
+        .network_error => log.warn("cookie sign-in: could not verify (network) — applying unverified", .{}),
+    }
+    try client.setCookie(cookie);
+    return cookie;
+}
+
 /// `xf_user=ABC; Path=/; HttpOnly` → `xf_user=ABC`.
 fn trimSetCookieAttrs(value: []const u8) []const u8 {
     const semi = std.mem.indexOfScalar(u8, value, ';') orelse return std.mem.trim(u8, value, " \t");
@@ -398,6 +526,28 @@ test "trimSetCookieAttrs strips attrs" {
         "xf_session=xyz",
         trimSetCookieAttrs("  xf_session=xyz "),
     );
+}
+
+test "cleanCookieValue strips name= prefix, quotes, whitespace" {
+    try std.testing.expectEqualStrings("ABC123", cleanCookieValue("xf_user", "xf_user=ABC123"));
+    try std.testing.expectEqualStrings("ABC123", cleanCookieValue("xf_user", "  xf_user=ABC123 ; "));
+    try std.testing.expectEqualStrings("ABC123", cleanCookieValue("xf_user", "\"ABC123\""));
+    try std.testing.expectEqualStrings("ABC123", cleanCookieValue("xf_user", "ABC123"));
+}
+
+test "buildCookieFromParts joins both, session optional, empty user errors" {
+    const a = std.testing.allocator;
+    {
+        const c = try buildCookieFromParts(a, "xf_user=U1", "S1");
+        defer a.free(c);
+        try std.testing.expectEqualStrings("xf_user=U1; xf_session=S1", c);
+    }
+    {
+        const c = try buildCookieFromParts(a, "U1", "");
+        defer a.free(c);
+        try std.testing.expectEqualStrings("xf_user=U1", c);
+    }
+    try std.testing.expectError(errs.Error.AuthRequired, buildCookieFromParts(a, "  ", "S1"));
 }
 
 test "appendUrlEncoded reserved chars" {

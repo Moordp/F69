@@ -1232,6 +1232,13 @@ pub const State = struct {
     /// F95 login form state.
     f95_user_buf: [128]u8 = [_]u8{0} ** 128,
     f95_pass_buf: [128]u8 = [_]u8{0} ** 128,
+    // Cookie sign-in (the 2FA / passkey workaround): the two values the user
+    // pastes from their browser. The `xf_user` token can be long, so 512.
+    f95_cookie_user_buf: [512]u8 = [_]u8{0} ** 512,
+    f95_cookie_session_buf: [512]u8 = [_]u8{0} ** 512,
+    /// When true, the F95 login card shows the cookie form instead of the
+    /// username/password form.
+    f95_login_use_cookie: bool = false,
     login_status: LoginStatus = .unknown,
     login_msg: buf_mod.MessageBuf(128) = .{},
     /// Donor-tier check result. `null` = not yet probed (either
@@ -1654,6 +1661,14 @@ pub const State = struct {
     pub fn f95UserSlice(self: *State) []u8 {
         const end = std.mem.indexOfScalar(u8, &self.f95_user_buf, 0) orelse self.f95_user_buf.len;
         return self.f95_user_buf[0..end];
+    }
+    pub fn f95CookieUserSlice(self: *State) []u8 {
+        const end = std.mem.indexOfScalar(u8, &self.f95_cookie_user_buf, 0) orelse self.f95_cookie_user_buf.len;
+        return self.f95_cookie_user_buf[0..end];
+    }
+    pub fn f95CookieSessionSlice(self: *State) []u8 {
+        const end = std.mem.indexOfScalar(u8, &self.f95_cookie_session_buf, 0) orelse self.f95_cookie_session_buf.len;
+        return self.f95_cookie_session_buf[0..end];
     }
     pub fn f95PassSlice(self: *State) []u8 {
         const end = std.mem.indexOfScalar(u8, &self.f95_pass_buf, 0) orelse self.f95_pass_buf.len;
