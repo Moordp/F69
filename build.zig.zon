@@ -9,7 +9,7 @@
 
 .{
     .name = .f69,
-    .version = "0.10.1",
+    .version = "0.11.0",
 
     // Project fingerprint. Zig validates the low 32 bits encode the
     // package name; if the build complains, paste the suggested value here.

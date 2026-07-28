@@ -412,6 +412,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v7
         with:
           path: artifacts/
@@ -420,9 +421,17 @@ jobs:
           mkdir -p release/
           find artifacts/ -type f -exec cp {} release/ \;
           ls -la release/
+      - name: Extract release notes from CHANGELOG.md
+        # Grab the newest version section (the first `## [...]` block), minus
+        # the link-reference footer, so the GitHub Release shows the curated,
+        # user-facing changelog rather than a raw commit list.
+        run: |
+          awk '/^## \[/{c++} c==1 && !/^\[[0-9]/{print}' CHANGELOG.md > RELEASE_NOTES.md
+          echo "----- release notes -----"; cat RELEASE_NOTES.md
       - name: Create Release
         uses: softprops/action-gh-release@v3
         with:
           files: release/*
-          generate_release_notes: true
+          body_path: RELEASE_NOTES.md
+          generate_release_notes: false
           fail_on_unmatched_files: false
