@@ -322,6 +322,18 @@ jobs:
         # tolerates the network call but is non-hermetic; a downstream
         # packager would replace this with a vendored fetchZigDeps.
         run: nix build .#f69 --impure || echo "nix build failed (impure fetch story TBD)"
+      - name: Smoke-test nix result
+        # Same headless battery as the other packages, run against the built
+        # store prefix (./result → bin/f69, a wrapProgram wrapper over the
+        # real ELF). Skips cleanly if the (best-effort) build above produced
+        # no result.
+        run: |
+          if [ -e result/bin/f69 ]; then
+            VER=$(awk -F'"' '/\.version = / { print $2; exit }' build.zig.zon)
+            F69_EXPECT_VERSION="$VER" bash scripts/smoke-package.sh "$(readlink -f result)"
+          else
+            echo "no result/ — skipping nix smoke (build did not produce a package)"
+          fi
 
   # ----- Smoke: install each built package in its target distro + run it -----
   # Headless per-package acceptance test (scripts/smoke-package.sh): install

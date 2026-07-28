@@ -142,6 +142,28 @@ for art in "${ARTIFACTS[@]}"; do
     fi
 done
 
+# ----- Nix: build the flake package + smoke its result prefix (host, no
+# container — needs the local nix + store). Best-effort: the flake build is
+# impure (Zig fetch), so a build miss is reported, not a hard error.
+if command -v nix >/dev/null 2>&1; then
+    echo
+    echo "########################################################"
+    echo "# nix build .#f69  →  result/"
+    echo "########################################################"
+    TOTAL=$((TOTAL + 1))
+    if nix build "$ROOT#f69" --impure --out-link "$ROOT/result-smoke" 2>&1 | tail -3; [ -e "$ROOT/result-smoke/bin/f69" ]; then
+        VER=$(awk -F'"' '/\.version = / { print $2; exit }' "$ROOT/build.zig.zon")
+        F69_EXPECT_VERSION="$VER" bash "$ROOT/scripts/smoke-package.sh" "$(readlink -f "$ROOT/result-smoke")" || {
+            FAILED=$((FAILED + 1)); FAILED_NAMES="$FAILED_NAMES nix"; }
+        rm -f "$ROOT/result-smoke"
+    else
+        echo "nix build produced no result (impure-fetch story) — counting as failed"
+        FAILED=$((FAILED + 1)); FAILED_NAMES="$FAILED_NAMES nix"
+    fi
+else
+    echo "-- skip nix leg (nix not installed)"
+fi
+
 echo
 echo "========================================================"
 if [ "$FAILED" -eq 0 ]; then

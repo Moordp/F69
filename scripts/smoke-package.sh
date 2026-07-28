@@ -35,19 +35,29 @@ set -uo pipefail
 
 # ----- args ----------------------------------------------------------------
 if [ "$#" -ne 1 ]; then
-    echo "usage: $0 <artifact.(deb|rpm|pkg.tar.zst|tar.gz)>" >&2
+    echo "usage: $0 <artifact.(deb|rpm|pkg.tar.zst|tar.gz|zip) | install-prefix-dir>" >&2
     exit 2
 fi
 ARTIFACT="$1"
-if [ ! -f "$ARTIFACT" ]; then
+if [ ! -e "$ARTIFACT" ]; then
     echo "smoke: artifact not found: $ARTIFACT" >&2
     exit 2
 fi
-ARTIFACT="$(cd "$(dirname "$ARTIFACT")" && pwd)/$(basename "$ARTIFACT")"
+# A directory argument is an install PREFIX (e.g. a Nix build's ./result, whose
+# bin/f69 is already in place) rather than a package file to install/extract.
+PREFIX_MODE=0
+if [ -d "$ARTIFACT" ]; then
+    PREFIX_MODE=1
+    ARTIFACT="$(cd "$ARTIFACT" && pwd)"
+else
+    ARTIFACT="$(cd "$(dirname "$ARTIFACT")" && pwd)/$(basename "$ARTIFACT")"
+fi
 BASENAME="$(basename "$ARTIFACT")"
 
-# Version expected in the binary, derived from the filename (f69-<ver>-...).
+# Version expected in the binary: from the filename (f69-<ver>-…) for a package,
+# else the F69_EXPECT_VERSION env (prefix mode has no versioned name).
 EXPECT_VER="$(printf '%s\n' "$BASENAME" | sed -n 's/^f69-\([0-9][0-9.]*\)-.*/\1/p')"
+[ -z "$EXPECT_VER" ] && EXPECT_VER="${F69_EXPECT_VERSION:-}"
 
 # ----- reporting -----------------------------------------------------------
 PASS=0
@@ -164,8 +174,19 @@ EXTRA_FILES=""
 # its own glibc), not the host loader — otherwise a bundle built on newer
 # glibc than the host looks "broken" when it actually self-supplies glibc.
 BUNDLE_LIB=""
+# Override for the ldd check when the runnable entry isn't itself an ELF (the
+# Nix package's bin/f69 is a makeWrapper shell script over bin/.f69-wrapped).
+LDD_BIN=""
 
 # ----- 1. install / extract ------------------------------------------------
+if [ "$PREFIX_MODE" -eq 1 ]; then
+    info "install prefix (already built): $ARTIFACT"
+    BIN="$ARTIFACT/bin/f69"
+    ENTRY="$BIN"
+    [ -x "$ARTIFACT/bin/run.sh" ] && ENTRY="$ARTIFACT/bin/run.sh"
+    # Nix wraps bin/f69 → ldd the real ELF behind the wrapper.
+    [ -f "$ARTIFACT/bin/.f69-wrapped" ] && LDD_BIN="$ARTIFACT/bin/.f69-wrapped"
+else
 case "$BASENAME" in
     *.deb)
         info "installing .deb"
@@ -217,6 +238,7 @@ case "$BASENAME" in
         exit 2
         ;;
 esac
+fi
 
 if [ -x "$BIN" ]; then
     pass "install/extract produced $BIN"
@@ -264,7 +286,7 @@ if [ -n "$BUNDLE_LIB" ]; then
         info "bundled lib dir has no ld-linux loader — skipping ldd"
     fi
 elif command -v ldd >/dev/null 2>&1; then
-    MISSING="$(ldd "$BIN" 2>/dev/null | grep 'not found' || true)"
+    MISSING="$(ldd "${LDD_BIN:-$BIN}" 2>/dev/null | grep 'not found' || true)"
     if [ -z "$MISSING" ]; then
         pass "ldd: no missing shared libraries"
     else
