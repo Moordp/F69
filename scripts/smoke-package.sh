@@ -174,9 +174,13 @@ EXTRA_FILES=""
 # its own glibc), not the host loader — otherwise a bundle built on newer
 # glibc than the host looks "broken" when it actually self-supplies glibc.
 BUNDLE_LIB=""
-# Override for the ldd check when the runnable entry isn't itself an ELF (the
-# Nix package's bin/f69 is a makeWrapper shell script over bin/.f69-wrapped).
-LDD_BIN=""
+# Set when the runnable entry is a wrapper (Nix's bin/f69 is a makeWrapper
+# shell script over bin/.f69-wrapped that injects LD_LIBRARY_PATH). A raw ldd
+# of the wrapped ELF resolves against the host loader, NOT the wrapper's env —
+# on a non-NixOS runner that mismatches the store glibc and false-fails. The
+# wrapper-invoked --version + launch checks are the real lib-resolution proof,
+# so skip the raw ldd in that case.
+SKIP_LDD=0
 
 # ----- 1. install / extract ------------------------------------------------
 if [ "$PREFIX_MODE" -eq 1 ]; then
@@ -184,8 +188,7 @@ if [ "$PREFIX_MODE" -eq 1 ]; then
     BIN="$ARTIFACT/bin/f69"
     ENTRY="$BIN"
     [ -x "$ARTIFACT/bin/run.sh" ] && ENTRY="$ARTIFACT/bin/run.sh"
-    # Nix wraps bin/f69 → ldd the real ELF behind the wrapper.
-    [ -f "$ARTIFACT/bin/.f69-wrapped" ] && LDD_BIN="$ARTIFACT/bin/.f69-wrapped"
+    [ -f "$ARTIFACT/bin/.f69-wrapped" ] && SKIP_LDD=1
 else
 case "$BASENAME" in
     *.deb)
@@ -266,7 +269,9 @@ fi
 # self-supplies glibc, so the host loader would wrongly report it broken).
 # For a native package / slim bundle, plain ldd against the host loader is
 # correct — those DO use the system glibc.
-if [ -n "$BUNDLE_LIB" ]; then
+if [ "$SKIP_LDD" -eq 1 ]; then
+    info "wrapped binary (nix) — lib resolution validated via the wrapper's --version + launch, skipping raw ldd"
+elif [ -n "$BUNDLE_LIB" ]; then
     # The loader sits under lib/glibc/; libs span lib/glibc/ + lib/. Mirror
     # run.sh's search order (glibc, then app libs, then the host GPU dirs for
     # system libs the bundle deliberately doesn't ship) so we don't flag a
@@ -286,7 +291,7 @@ if [ -n "$BUNDLE_LIB" ]; then
         info "bundled lib dir has no ld-linux loader — skipping ldd"
     fi
 elif command -v ldd >/dev/null 2>&1; then
-    MISSING="$(ldd "${LDD_BIN:-$BIN}" 2>/dev/null | grep 'not found' || true)"
+    MISSING="$(ldd "$BIN" 2>/dev/null | grep 'not found' || true)"
     if [ -z "$MISSING" ]; then
         pass "ldd: no missing shared libraries"
     else
