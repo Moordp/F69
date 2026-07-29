@@ -42,6 +42,17 @@ pub fn init(io: std.Io, alloc: std.mem.Allocator, environ: std.process.Environ) 
     g_crash_io = io;
 }
 
+/// Frees what `init` allocated. Call via `defer` right after `init` in
+/// `main` — since it's one of the first defers pushed, it runs one of
+/// the last on the way out, keeping the crash dir valid for (almost)
+/// the whole process lifetime while still satisfying the allocator's
+/// leak check on a normal exit.
+pub fn deinit(alloc: std.mem.Allocator) void {
+    if (g_crash_dir) |d| alloc.free(d);
+    g_crash_dir = null;
+    g_crash_io = null;
+}
+
 pub fn panicHandler(message: []const u8, first_trace_addr: ?usize) noreturn {
     // Best-effort log write — never block the panic from completing.
     writeLog(message) catch {};

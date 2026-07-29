@@ -2,6 +2,30 @@
 
 All notable, user-facing changes. Dates are YYYY-MM-DD.
 
+## [0.11.1] - 2026-07-29
+
+A Windows-focused fix release.
+
+### Windows
+- **Fixed importing from F95Checker or xLibrary on Windows silently skipping
+  every game's install folder** — games showed up in your library but marked
+  "not installed," with no explanation. The importer only understood Unix-style
+  paths; it now reads Windows-style paths correctly too.
+- **F95Checker/xLibrary import no longer dead-ends on a nonstandard setup.** If
+  the app can't auto-detect the source database (moved config folder, portable
+  install, unusual environment), you're now offered a file picker to point at
+  it directly instead of just failing.
+- Fixed the bundled `aria2c.exe` download-helper detection and the underlying
+  exe-folder resolution it depends on, which never worked on a native Windows
+  launch.
+- Settings → Browser auto-detect now actually finds installed browsers on
+  Windows (it silently found nothing there before).
+
+### Reliability
+- **Crashes are now logged** to a file (`%LOCALAPPDATA%\f69\crashes` on
+  Windows, `~/.cache/f69/crashes` on Linux/macOS) you can attach to a bug
+  report — this never worked on any platform before.
+
 ## [0.11.0] - 2026-07-28
 
 A big release focused on getting **everyone logged in**, protecting your data,
@@ -74,4 +98,5 @@ and making the app readable and reliable across distros.
   Nix), fuzz targets, and headless UI integration tests. CI actions moved off
   the deprecated Node 20 runtime.
 
+[0.11.1]: https://github.com/Moordp/F69/releases/tag/v0.11.1
 [0.11.0]: https://github.com/Moordp/F69/releases/tag/v0.11.0

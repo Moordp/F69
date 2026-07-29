@@ -208,7 +208,7 @@
         # each other. Keep in sync with `.version` in build.zig.zon (the
         # binary's own `--version` is single-sourced from the zon in
         # build.zig; parsing the zon here would need a fragile Nix regex).
-        f69Version = "0.11.0";
+        f69Version = "0.11.1";
 
         f69NativeBuildInputs = with pkgs; [
           zig

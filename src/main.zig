@@ -151,7 +151,11 @@ pub fn main(init: std.process.Init) !void {
     // Wire the crash-log side channel as early as possible — a panic
     // before this line simply doesn't get a log file (crash.writeLog
     // no-ops until init() runs), which is fine for a best-effort feature.
+    // The paired deinit is one of the first defers pushed, so it runs
+    // one of the last on the way out — the crash dir stays valid for
+    // nearly all of main()'s lifetime, including most other cleanup.
     crash.init(init.io, gpa, init.minimal.environ);
+    defer crash.deinit(gpa);
 
     // CLI flags — handled before any setup so `f69 --version` works
     // even if the data root can't be created (e.g. read-only mount).
