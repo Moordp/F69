@@ -435,23 +435,13 @@ pub fn doStartF95CheckerReview(frame: *Frame) void {
     }
     const alloc = frame.lib.alloc;
 
-    const home = frame.info.host.home orelse {
-        state.notifyErr("Couldn't read $HOME; can't locate the F95Checker DB.");
-        return;
-    };
-    const data_path = buildConfigDataPath(frame.host_launcher.environ, alloc, .f95checker) catch {
-        state.notifyErr("Couldn't resolve the F95Checker config dir (no HOME/APPDATA?).");
-        return;
-    };
+    const home = frame.info.host.home;
+    // Auto-detects the DB at its platform-conventional config path;
+    // falls back to a manual file picker (and posts its own toast) on
+    // any failure, so a nonstandard/moved F95Checker install isn't a
+    // dead end.
+    const data_path = resolveSourceDataPath(frame, .f95checker) orelse return;
     errdefer alloc.free(data_path);
-
-    std.Io.Dir.cwd().access(frame.io, data_path, .{}) catch {
-        var buf: [320]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "F95Checker DB not found at {s}", .{data_path}) catch "F95Checker DB not found";
-        state.notifyErr(msg);
-        alloc.free(data_path);
-        return;
-    };
 
     const games_base_dir = file_picker.openFolder(alloc, null) catch |e| {
         alloc.free(data_path);
@@ -651,27 +641,12 @@ fn startImport(frame: *Frame, source: import_job.Source, mode: import_job.Mode) 
     }
     const alloc = frame.lib.alloc;
 
-    // Source data path — upstream-default per source kind.
-    const home = frame.info.host.home orelse {
-        state.notifyErr("Couldn't read $HOME; pick the source data path manually instead.");
-        return;
-    };
-    const data_path = buildConfigDataPath(frame.host_launcher.environ, alloc, source) catch {
-        state.notifyErr("Couldn't resolve the source config dir (no HOME/APPDATA?).");
-        return;
-    };
+    // Source data path — upstream-default per source kind, falling back
+    // to a manual file picker (see resolveSourceDataPath) when auto-detect
+    // fails.
+    const home = frame.info.host.home;
+    const data_path = resolveSourceDataPath(frame, source) orelse return;
     errdefer alloc.free(data_path);
-
-    // Verify the data file exists before bothering the user with a
-    // picker. Surfaces "you don't actually have F95Checker installed"
-    // up front.
-    std.Io.Dir.cwd().access(frame.io, data_path, .{}) catch {
-        var buf: [320]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "Source data not found at {s}", .{data_path}) catch "Source data not found";
-        state.notifyErr(msg);
-        alloc.free(data_path);
-        return;
-    };
 
     // Folder picker — user points at the dir containing the per-game
     // sub-folders (e.g. .../games/ that holds Babysitter-0.2.2b.-linux/,
@@ -758,6 +733,50 @@ fn buildConfigDataPath(environ: std.process.Environ, alloc: std.mem.Allocator, s
     };
 }
 
+/// Resolve the source tool's data file — F95Checker's `db.sqlite3` or
+/// xLibrary's `games-data.json` — at its platform-conventional config
+/// path. Auto-detect can legitimately fail (no HOME/APPDATA, a
+/// nonstandard or portable install, a relocated config dir), and that
+/// used to be a dead end for the whole import feature; now it falls
+/// back to letting the user point the file picker at the file
+/// directly. Every failure path posts its own toast; returns null
+/// either after doing so, or silently once the user has already been
+/// told why the fallback picker appeared and then cancels it.
+fn resolveSourceDataPath(frame: *Frame, source: import_job.Source) ?[]u8 {
+    const state = frame.state;
+    const alloc = frame.lib.alloc;
+
+    if (buildConfigDataPath(frame.host_launcher.environ, alloc, source)) |p| {
+        if (std.Io.Dir.cwd().access(frame.io, p, .{})) {
+            return p;
+        } else |_| {
+            alloc.free(p);
+        }
+    } else |_| {}
+
+    const label: []const u8 = switch (source) {
+        .f95checker => "F95Checker's db.sqlite3",
+        .xlibrary => "xLibrary's games-data.json",
+    };
+    var info_buf: [192]u8 = undefined;
+    const info_msg = std.fmt.bufPrint(&info_buf, "Couldn't auto-detect {s} — pick it manually.", .{label}) catch
+        "Couldn't auto-detect the source data file — pick it manually.";
+    state.notifyInfo(info_msg);
+
+    const filter: file_picker.FilterItem = switch (source) {
+        .f95checker => .{ .name = "F95Checker database", .spec = "sqlite3" },
+        .xlibrary => .{ .name = "xLibrary data", .spec = "json" },
+    };
+    const picked = file_picker.open(alloc, &.{filter}, null) catch |e| {
+        var buf: [192]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "File picker failed: {s}", .{@errorName(e)}) catch "File picker failed";
+        state.notifyErr(msg);
+        return null;
+    } orelse return null; // user cancelled — the info toast above already explained why the dialog appeared
+
+    return picked;
+}
+
 /// Hard refusal list — paths f69 must never touch as the games-base-dir
 /// because the import worker eventually calls `migrate.copyVerifyDelete`
 /// which DELETES the source after copy. A user already lost their F95Checker
@@ -768,30 +787,34 @@ fn buildConfigDataPath(environ: std.process.Environ, alloc: std.mem.Allocator, s
 /// reason string the caller surfaces in a toast. Symlinks are followed
 /// via `realpath` before the comparison so a user can't accidentally
 /// bypass via `ln -s ~/.config/f95checker games`.
-fn importTargetUnsafe(io: std.Io, environ: std.process.Environ, alloc: std.mem.Allocator, picked: []const u8, home: []const u8) ?[]u8 {
+fn importTargetUnsafe(io: std.Io, environ: std.process.Environ, alloc: std.mem.Allocator, picked: []const u8, home: ?[]const u8) ?[]u8 {
     const real_z = std.Io.Dir.cwd().realPathFileAlloc(io, picked, alloc) catch null;
     const real: []const u8 = if (real_z) |r| r else picked;
     defer if (real_z) |r| alloc.free(r);
 
     // Build the absolute forbidden prefixes. Each ends in '/' so we can
     // match either equality OR strict sub-path containment with a single
-    // `startsWith`.
-    const FORBIDDEN_SUBS = [_][]const u8{
-        ".config/f95checker",
-        ".config/xlibrary",
-        ".local/share/f95checker",
-        ".local/share/xlibrary",
-    };
-    for (FORBIDDEN_SUBS) |sub| {
-        var pref_buf: [512]u8 = undefined;
-        const pref = std.fmt.bufPrint(&pref_buf, "{s}/{s}", .{ home, sub }) catch continue;
-        // Equality (user picked the dir itself).
-        if (std.mem.eql(u8, real, pref)) {
-            return std.fmt.allocPrint(alloc, "that's the {s} config directory — f69 never touches upstream tool dirs", .{sub}) catch null;
-        }
-        // Strict sub-path: prefix + "/".
-        if (real.len > pref.len + 1 and std.mem.startsWith(u8, real, pref) and real[pref.len] == '/') {
-            return std.fmt.allocPrint(alloc, "that's inside the {s} config directory — f69 never touches upstream tool dirs", .{sub}) catch null;
+    // `startsWith`. Skipped entirely when `home` is unavailable — the
+    // platform-config-dir guard below (which doesn't need `home`) still
+    // catches the equivalent Windows/XDG-override danger paths.
+    if (home) |h| {
+        const FORBIDDEN_SUBS = [_][]const u8{
+            ".config/f95checker",
+            ".config/xlibrary",
+            ".local/share/f95checker",
+            ".local/share/xlibrary",
+        };
+        for (FORBIDDEN_SUBS) |sub| {
+            var pref_buf: [512]u8 = undefined;
+            const pref = std.fmt.bufPrint(&pref_buf, "{s}/{s}", .{ h, sub }) catch continue;
+            // Equality (user picked the dir itself).
+            if (std.mem.eql(u8, real, pref)) {
+                return std.fmt.allocPrint(alloc, "that's the {s} config directory — f69 never touches upstream tool dirs", .{sub}) catch null;
+            }
+            // Strict sub-path: prefix + "/".
+            if (real.len > pref.len + 1 and std.mem.startsWith(u8, real, pref) and real[pref.len] == '/') {
+                return std.fmt.allocPrint(alloc, "that's inside the {s} config directory — f69 never touches upstream tool dirs", .{sub}) catch null;
+            }
         }
     }
 

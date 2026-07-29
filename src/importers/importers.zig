@@ -67,14 +67,17 @@ pub const ImportedGame = struct {
     /// the user-selected directory. This is HOW
     /// `~/.config/f95checker/` got nuked for users who pointed the
     /// games-base-dir picker at their f95checker config folder.
+    ///
+    /// Separator handling: the source tool wrote this path on
+    /// whatever OS it was running on, so it may use `/` (Linux/macOS
+    /// F95Checker/xLibrary) or `\` (Windows). Both are treated as
+    /// segment separators, and both a leading `/` or `\` and a
+    /// drive-letter prefix (`C:\...`, `C:/...`) count as absolute.
     pub fn installDirRel(self: *const ImportedGame) ?[]const u8 {
         const p = self.install_executable_rel orelse return null;
-        // Reject absolute paths — they're not "relative to games-base-dir"
-        // at all, even though the field name implies otherwise. F95Checker
-        // stores absolute paths here.
-        if (p.len == 0 or p[0] == '/') return null;
-        const slash = std.mem.indexOfScalar(u8, p, '/') orelse return null;
-        const seg = p[0..slash];
+        if (p.len == 0 or isAbsolutePath(p)) return null;
+        const sep = std.mem.indexOfAny(u8, p, "/\\") orelse return null;
+        const seg = p[0..sep];
         // Reject empty and traversal segments. `..` would land src_dir
         // at games_base_dir's PARENT, an even bigger blast radius.
         if (seg.len == 0) return null;
@@ -82,6 +85,16 @@ pub const ImportedGame = struct {
         return seg;
     }
 };
+
+/// True for `/foo`, `\foo`, `\\server\share`, or a drive-letter path
+/// (`C:\foo`, `C:/foo`) — every absolute-path convention the source
+/// tool might have written this field with, on any OS.
+fn isAbsolutePath(p: []const u8) bool {
+    if (p.len == 0) return false;
+    if (p[0] == '/' or p[0] == '\\') return true;
+    if (p.len >= 2 and std.ascii.isAlphabetic(p[0]) and p[1] == ':') return true;
+    return false;
+}
 
 /// Owns every string referenced by `games`. Caller frees with `deinit`.
 pub const Bundle = struct {
@@ -160,5 +173,25 @@ test "installDirRel: legitimate relative path returns the first segment" {
 
 test "installDirRel: top-level executable (no slash) returns null" {
     const g = ImportedGame{ .thread_id = 1, .name = "x", .install_executable_rel = "Game.sh" };
+    try testing.expect(g.installDirRel() == null);
+}
+
+test "installDirRel: Windows drive-letter absolute path returns null" {
+    const g = ImportedGame{ .thread_id = 1, .name = "x", .install_executable_rel = "C:\\Users\\u\\games\\Foo\\Foo.exe" };
+    try testing.expect(g.installDirRel() == null);
+}
+
+test "installDirRel: Windows leading backslash returns null" {
+    const g = ImportedGame{ .thread_id = 1, .name = "x", .install_executable_rel = "\\Foo\\Foo.exe" };
+    try testing.expect(g.installDirRel() == null);
+}
+
+test "installDirRel: Windows-style relative path returns the first segment" {
+    const g = ImportedGame{ .thread_id = 1, .name = "x", .install_executable_rel = "Babysitter-0.2.2b-win\\Babysitter.exe" };
+    try testing.expectEqualStrings("Babysitter-0.2.2b-win", g.installDirRel().?);
+}
+
+test "installDirRel: Windows-style parent traversal returns null" {
+    const g = ImportedGame{ .thread_id = 1, .name = "x", .install_executable_rel = "..\\escape\\Foo.exe" };
     try testing.expect(g.installDirRel() == null);
 }

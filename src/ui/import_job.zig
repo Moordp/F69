@@ -247,9 +247,9 @@ fn processOne(job: *Job, imp_g: *const importers.ImportedGame) !void {
         // in the parser from rolling into `migrate.copyVerifyDelete →
         // deleteTree(games_base_dir)`. Lives next to the bufPrint to
         // make the invariant obvious at the call site.
-        if (sub_dir.len == 0 or sub_dir[0] == '/' or
+        if (sub_dir.len == 0 or sub_dir[0] == '/' or sub_dir[0] == '\\' or
             std.mem.eql(u8, sub_dir, "..") or std.mem.eql(u8, sub_dir, ".") or
-            std.mem.indexOf(u8, sub_dir, "/") != null or
+            std.mem.indexOfAny(u8, sub_dir, "/\\") != null or
             std.mem.indexOf(u8, sub_dir, "..") != null)
         {
             staged.migrate_err = try std.fmt.allocPrint(job.alloc, "unsafe install sub-path rejected: '{s}'", .{sub_dir});
@@ -305,7 +305,7 @@ fn processOne(job: *Job, imp_g: *const importers.ImportedGame) !void {
         // Build the Install row. Path = install_dir_owned (dst for
         // move/copy, src for link); executable = `<dir>/<exe_basename>`.
         const exe_rel = imp_g.install_executable_rel.?; // implied by installDirRel != null
-        const exe_basename = if (std.mem.indexOfScalar(u8, exe_rel, '/')) |slash| exe_rel[slash + 1 ..] else exe_rel;
+        const exe_basename = if (std.mem.indexOfAny(u8, exe_rel, "/\\")) |sep| exe_rel[sep + 1 ..] else exe_rel;
         const version_str = imp_g.version orelse "unversioned";
 
         var inst_id: [36]u8 = undefined;

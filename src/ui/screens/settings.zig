@@ -425,8 +425,10 @@ fn relocateGamesFolder(frame: *Frame) void {
     }) orelse return; // cancelled
     defer alloc.free(picked);
 
-    // Normalise: drop a trailing slash so the prefix boundary matches cleanly.
-    const new_root = std.mem.trimEnd(u8, picked, "/");
+    // Normalise: drop a trailing separator so the prefix boundary matches
+    // cleanly. Windows drive-root picks (`D:\`) come back with a trailing
+    // backslash, not `/` — strip either.
+    const new_root = std.mem.trimEnd(u8, picked, "/\\");
     if (new_root.len == 0) return;
     if (std.mem.eql(u8, new_root, old_root)) {
         frame.state.notifyInfo("That's already the current games folder.");

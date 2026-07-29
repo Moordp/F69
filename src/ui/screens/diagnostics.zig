@@ -84,7 +84,7 @@ pub fn diagnosticsScreen(frame: *Frame) !bool {
     // --- host env snapshot ---
     diagSep(@src());
     diagSection(@src(), "Host env (captured at startup)");
-    diagRow(@src(), "$HOME", info.host.home orelse "(unset)");
+    diagRow(@src(), "$HOME / %USERPROFILE%", info.host.home orelse "(unset)");
     diagRow(@src(), "$XDG_RUNTIME_DIR", info.host.xdg_runtime_dir orelse "(unset)");
     diagRow(@src(), "$WAYLAND_DISPLAY", info.host.wayland_display orelse "(unset)");
     diagRow(@src(), "$DISPLAY", info.host.x11_display orelse "(unset)");

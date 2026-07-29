@@ -20,6 +20,7 @@ const state_mod = @import("../state.zig");
 const owned_types = @import("../owned.zig");
 const job_mod = @import("../job.zig");
 const mods_act = @import("mods.zig");
+const common = @import("common.zig");
 
 const Frame = types.Frame;
 const State = types.State;
@@ -2209,24 +2210,10 @@ pub fn spawnXdgOpen(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !voi
             defer a.alloc.destroy(a);
             // Per-OS file-manager / opener: Windows opens Explorer (or the
             // default handler) via `start`, macOS via `open`, Linux via
-            // `xdg-open`. A literal `xdg-open` doesn't exist off Linux.
+            // `xdg-open`. Shared with the browser/URL opener so the two
+            // don't drift — see `common.systemOpenArgv`.
             var argv_buf: [5][]const u8 = undefined;
-            const open_argv: []const []const u8 = switch (builtin.os.tag) {
-                .windows => blk: {
-                    argv_buf = .{ "cmd", "/c", "start", "", a.path };
-                    break :blk argv_buf[0..5];
-                },
-                .macos => blk: {
-                    argv_buf[0] = "open";
-                    argv_buf[1] = a.path;
-                    break :blk argv_buf[0..2];
-                },
-                else => blk: {
-                    argv_buf[0] = "xdg-open";
-                    argv_buf[1] = a.path;
-                    break :blk argv_buf[0..2];
-                },
-            };
+            const open_argv = common.systemOpenArgv("", a.path, &argv_buf);
             var child = std.process.spawn(a.io, .{
                 .argv = open_argv,
                 .stdin = .ignore,

@@ -25,6 +25,14 @@ const SDLBackend = @import("sdl3gpu-backend");
 const util_setting = @import("util_setting");
 const theme_store = @import("ui_theme_store");
 const build_options = @import("build_options");
+const crash = @import("util_crash");
+
+/// Adds a side-channel crash log file (`<cache_dir>/f69/crashes/`) on
+/// top of Zig's normal panic behavior — `crash.panicHandler` always
+/// delegates to `std.debug.defaultPanic` for the actual message/stack
+/// trace/abort, so this changes nothing about what a panic looks like,
+/// it just also persists it somewhere a bug report can point to.
+pub const panic = std.debug.FullPanic(crash.panicHandler);
 
 /// Override the stdlib's default log level so `log.debug(...)` actually
 /// reaches stderr. While we're still in phase-1 alpha, debug-level
@@ -139,6 +147,11 @@ const log = std.log.scoped(.main);
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
+
+    // Wire the crash-log side channel as early as possible — a panic
+    // before this line simply doesn't get a log file (crash.writeLog
+    // no-ops until init() runs), which is fine for a best-effort feature.
+    crash.init(init.io, gpa, init.minimal.environ);
 
     // CLI flags — handled before any setup so `f69 --version` works
     // even if the data root can't be created (e.g. read-only mount).
@@ -441,7 +454,15 @@ pub fn main(init: std.process.Init) !void {
     defer if (host_wayland) |v| gpa.free(v);
     const host_x11 = init.minimal.environ.getAlloc(gpa, "DISPLAY") catch null;
     defer if (host_x11) |v| gpa.free(v);
-    const host_home = init.minimal.environ.getAlloc(gpa, "HOME") catch null;
+    // `%USERPROFILE%` on Windows, `$HOME` elsewhere — mirrors
+    // `util_paths.home` (main.zig doesn't import util_paths). Without this,
+    // native Windows shells (no $HOME) fail "Couldn't read $HOME; can't
+    // locate the F95Checker DB" even though the DB itself resolves fine
+    // via %APPDATA%.
+    const host_home = if (builtin.os.tag == .windows)
+        init.minimal.environ.getAlloc(gpa, "USERPROFILE") catch null
+    else
+        init.minimal.environ.getAlloc(gpa, "HOME") catch null;
     defer if (host_home) |v| gpa.free(v);
     const host: sandbox_mod.HostInfo = .{
         .xdg_runtime_dir = host_xdg_runtime,
@@ -775,26 +796,35 @@ fn loadAutoCheck(io: std.Io, gpa: std.mem.Allocator, path: []const u8) !ui.AutoC
 const BrowserCandidate = struct {
     display: []const u8,
     exe: []const u8,
+    /// Override `exe` on Windows, for browsers whose Windows binary
+    /// name doesn't match their Linux package name (Chrome ships as
+    /// `chrome.exe`, not `google-chrome-stable.exe`; Edge as
+    /// `msedge.exe`). Null means `exe` is the same on both OSes
+    /// (Firefox, LibreWolf, Waterfox, Brave, Vivaldi, Opera all are).
+    win_exe: ?[]const u8 = null,
 };
 
-/// Common Linux browsers we know how to launch URLs through. `xdg-open`
-/// always lands first if present so the system default works without
-/// any configuration.
+/// Common browsers we know how to launch URLs through, probed via
+/// `$PATH`/`%PATH%`. `xdg-open` always lands first if present so the
+/// Linux system default works without any configuration; it's simply
+/// never found on Windows (no such binary there), which is fine — the
+/// "system default" setting value is a sentinel string handled
+/// separately wherever it's consumed, not dependent on this probe.
 const BROWSER_CANDIDATES = [_]BrowserCandidate{
     .{ .display = "System default (xdg-open)", .exe = "xdg-open" },
     .{ .display = "Firefox", .exe = "firefox" },
     .{ .display = "LibreWolf", .exe = "librewolf" },
     .{ .display = "Waterfox", .exe = "waterfox" },
     .{ .display = "Chromium", .exe = "chromium" },
-    .{ .display = "Google Chrome", .exe = "google-chrome-stable" },
-    .{ .display = "Google Chrome", .exe = "google-chrome" },
+    .{ .display = "Google Chrome", .exe = "google-chrome-stable", .win_exe = "chrome" },
+    .{ .display = "Google Chrome", .exe = "google-chrome", .win_exe = "chrome" },
     .{ .display = "Brave", .exe = "brave" },
     .{ .display = "Brave", .exe = "brave-browser" },
     .{ .display = "Vivaldi", .exe = "vivaldi-stable" },
     .{ .display = "Vivaldi", .exe = "vivaldi" },
     .{ .display = "Opera", .exe = "opera" },
-    .{ .display = "Microsoft Edge", .exe = "microsoft-edge-stable" },
-    .{ .display = "Microsoft Edge", .exe = "microsoft-edge" },
+    .{ .display = "Microsoft Edge", .exe = "microsoft-edge-stable", .win_exe = "msedge" },
+    .{ .display = "Microsoft Edge", .exe = "microsoft-edge", .win_exe = "msedge" },
 };
 
 /// Walk `$PATH` looking for known browser executables. Returns a slice
@@ -818,11 +848,20 @@ fn detectBrowsers(io: std.Io, gpa: std.mem.Allocator, environ: std.process.Envir
         out.deinit(gpa);
     }
 
+    // `%PATH%` is `;`-separated on Windows, `:` elsewhere; executables
+    // there also need the `.exe` suffix (`std.Io.Dir.access` doesn't do
+    // PATHEXT resolution the way spawning through the shell would).
+    const path_sep: u8 = if (builtin.os.tag == .windows) ';' else ':';
+
     candidates: for (BROWSER_CANDIDATES) |c| {
-        var dir_iter = std.mem.tokenizeScalar(u8, path_env, ':');
+        const exe_name = if (builtin.os.tag == .windows) (c.win_exe orelse c.exe) else c.exe;
+        var dir_iter = std.mem.tokenizeScalar(u8, path_env, path_sep);
         while (dir_iter.next()) |dir| {
             var path_buf: [512]u8 = undefined;
-            const full = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir, c.exe }) catch continue;
+            const full = if (builtin.os.tag == .windows)
+                std.fmt.bufPrint(&path_buf, "{s}/{s}.exe", .{ dir, exe_name }) catch continue
+            else
+                std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir, exe_name }) catch continue;
             std.Io.Dir.cwd().access(io, full, .{ .execute = true }) catch continue;
             // Dedupe — `/usr/bin/firefox` and `/usr/local/bin/firefox` etc.
             for (out.items) |existing| {
@@ -847,21 +886,22 @@ fn freeBrowsers(gpa: std.mem.Allocator, browsers: []ui.Browser) void {
 ///   1. `$F69_EXE_DIR` — set by `run.sh` to the bundle dir. This
 ///      exists because `run.sh` execs the bundled loader directly
 ///      (`exec lib/ld-linux-x86-64.so.2 ./f69 …`), which makes
-///      `/proc/self/exe` resolve to the loader inside `lib/` — not
-///      to the f69 binary. The env var sidesteps that ambiguity.
-///   2. `dirname(/proc/self/exe)` — for direct `./f69` launches
-///      (dev shells, `zig build run`, system installs where
-///      `f69` is symlinked from `/usr/bin`).
+///      `/proc/self/exe` (what tier 2 resolves under the hood on
+///      Linux) resolve to the loader inside `lib/` — not to the f69
+///      binary. The env var sidesteps that ambiguity.
+///   2. `std.process.executableDirPathAlloc` — for direct `./f69` /
+///      `f69.exe` launches (dev shells, `zig build run`, system
+///      installs where `f69` is symlinked from `/usr/bin`, and every
+///      native Windows launch). This is the real cross-platform exe-
+///      path API (procfs on Linux, `GetModuleFileNameW` on Windows
+///      under the hood via the `Io` vtable) — no per-OS branch needed
+///      here, unlike the old hand-rolled `/proc/self/exe` readlink
+///      this replaced, which simply had no Windows implementation.
 ///
 /// Caller frees.
 fn resolveExeDir(gpa: std.mem.Allocator, io: std.Io, environ: std.process.Environ) ![]u8 {
     if (environ.getAlloc(gpa, "F69_EXE_DIR")) |x| return x else |_| {}
-
-    var link_buf: [4096]u8 = undefined;
-    const n = try std.Io.Dir.cwd().readLink(io, "/proc/self/exe", &link_buf);
-    const exe_path = link_buf[0..n];
-    const dir = std.fs.path.dirname(exe_path) orelse return error.NoExeDir;
-    return gpa.dupe(u8, dir);
+    return std.process.executableDirPathAlloc(io, gpa);
 }
 
 /// **Portable mode** — resolve the directory where the f69 executable

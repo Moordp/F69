@@ -50,9 +50,11 @@ pub fn build(b: *std.Build) void {
     const util_db_mod = mod(b, "util_db", "src/util/db.zig", target, optimize);
     util_db_mod.addImport("zqlite", zqlite_dep.module("zqlite"));
     const util_crash_mod = mod(b, "util_crash", "src/util/crash.zig", target, optimize);
+    util_crash_mod.addImport("util_paths", util_paths_mod);
     const util_version_mod = mod(b, "util_version", "src/util/version.zig", target, optimize);
     const util_renpy_mod = mod(b, "util_renpy", "src/util/renpy.zig", target, optimize);
     const util_atomic_io_mod = mod(b, "util_atomic_io", "src/util/atomic_io.zig", target, optimize);
+    util_crash_mod.addImport("util_atomic_io", util_atomic_io_mod);
     const util_domain_mod = mod(b, "util_domain", "src/util/domain.zig", target, optimize);
     const util_http_mod = mod(b, "util_http", "src/util/http.zig", target, optimize);
     util_http_mod.addImport("build_options", build_opts_mod);
@@ -65,6 +67,7 @@ pub fn build(b: *std.Build) void {
     // only referenced inside `test {}` blocks, which the release build
     // drops.
     util_atomic_io_mod.addImport("util_test_env", util_test_env_mod);
+    util_crash_mod.addImport("util_test_env", util_test_env_mod);
 
     // util_archive: thin Zig wrapper around libarchive's read API.
     // Used by downloads/archive.zig for the formats stdlib doesn't
