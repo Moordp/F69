@@ -307,12 +307,9 @@ test "headless: game recipe saves to disk and reloads by thread (F7)" {
     // plain `readFileAlloc` variants, with and without the tmp+rename dance,
     // with Defender exclusions in place. See the header of util/atomic_io.zig.
     //
-    // RETESTED 2026-08-12 on the VM: still parks, precisely at
-    // findGameByThread after saveGame completes (report shows the park
-    // between those two tlogs). Meanwhile util_setting's readFileAlloc
-    // read-back (ui_scale test) passes in the same binary — the defect
-    // boundary is the zon read path, not read-after-write in general.
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    // Windows skip retired 2026-08-12 (second attempt): the zon read now
+    // goes through libc on Windows (zon_loader readFileSentinel), which
+    // sidesteps the std.Io read park entirely.
     const gpa = std.testing.allocator;
     var env = try TestEnv.init(gpa, "headless-recipe");
     defer env.deinit();

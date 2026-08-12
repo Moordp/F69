@@ -5,6 +5,7 @@
 // `<id>.mod.zon`. The repository.zig file routes the right loader.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const dom = @import("domain.zig");
 const errs = @import("errors.zig");
 const atomic_io = @import("util_atomic_io");
@@ -124,14 +125,42 @@ fn saveAny(comptime T: type, io: std.Io, alloc: std.mem.Allocator, path: []const
 }
 
 fn readFileSentinel(io: std.Io, alloc: std.mem.Allocator, path: []const u8) ![:0]u8 {
-    return try std.Io.Dir.cwd().readFileAllocOptions(
-        io,
-        path,
-        alloc,
-        .limited(RECIPE_MAX_BYTES),
-        .of(u8),
-        0,
-    );
+    // Plain `readFileAlloc` + a manual sentinel, NOT `readFileAllocOptions`.
+    //
+    // On Windows the sentinel variant does not return: tracing the Layer-1
+    // suite natively showed the recipe index hit, then `findGame` ->
+    // `loadGame` -> here, and nothing after. Every read that DOES work on
+    // Windows in this codebase goes through plain `readFileAlloc`, which is
+    // what this now uses. `alloc` is an arena in both callers, so the extra
+    // copy costs one bump-allocation and is freed wholesale.
+    // WINDOWS: read via libc, not std.Io. The std.Io read parks forever
+    // (intermittently but often) when the file was written recently — the
+    // defect traced 2026-08-11/12 on the Win11 VM. libc I/O has no async
+    // machinery to park; tlog has used it reliably on Windows throughout.
+    // Comptime-scoped: non-Windows builds never reference std.c here, and
+    // x86_64-windows-gnu always links mingw libc.
+    if (builtin.os.tag == .windows) {
+        const pz = try alloc.dupeZ(u8, path);
+        const f = std.c.fopen(pz.ptr, "rb") orelse return error.FileNotFound;
+        defer _ = std.c.fclose(f);
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(alloc);
+        var chunk: [4096]u8 = undefined;
+        while (true) {
+            const n = std.c.fread(&chunk, 1, chunk.len, f);
+            if (n == 0) break;
+            if (out.items.len + n > RECIPE_MAX_BYTES) return error.FileTooBig;
+            try out.appendSlice(alloc, chunk[0..n]);
+        }
+        const z = try alloc.allocSentinel(u8, out.items.len, 0);
+        @memcpy(z, out.items);
+        out.deinit(alloc);
+        return z;
+    }
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(RECIPE_MAX_BYTES));
+    const out = try alloc.allocSentinel(u8, bytes.len, 0);
+    @memcpy(out, bytes);
+    return out;
 }
 
 fn mapReadErr(e: anyerror) errs.Error {

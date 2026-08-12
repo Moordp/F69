@@ -67,7 +67,13 @@ pub const TestEnv = struct {
         // one. That is exactly how the Windows VM (2 visible cores) parked
         // forever in the recipe index while the 16-core Linux host never
         // contended. Tests must not be sensitive to core count.
-        var io_threaded = std.Io.Threaded.init(alloc, .{ .async_limit = .limited(8) });
+        // smp_allocator, NOT the caller's `alloc` (which is almost always
+        // std.testing.allocator — single-threaded by design): Threaded's
+        // WORKER threads allocate through this allocator, and a non-thread-
+        // safe one intermittently parks/corrupts under contention. This is
+        // the strongest candidate for the "std.Io Windows park": suites on
+        // smp-backed io (gui-test.exe) never parked; TestEnv-io suites did.
+        var io_threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(8) });
         errdefer io_threaded.deinit();
         const io = io_threaded.io();
 
