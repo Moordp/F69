@@ -630,10 +630,29 @@ pub fn build(b: *std.Build) void {
         integration_mod.addImport("resolver", resolver_mod);
         integration_mod.addImport("util_reltime", util_reltime_mod);
 
+        // The GUI suite is a SEPARATE root/exe from the headless one: the
+        // headless io-heavy tests are the std.Io Windows park risk, and a
+        // park in one exe must never take the GUI coverage with it —
+        // test-windows-vm.sh watchdogs each exe independently.
+        const integration_gui_mod = b.createModule(.{
+            .root_source_file = b.path("src/testkit/integration_gui.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        integration_gui_mod.addImport("ui", ui_test_mod);
+        integration_gui_mod.addImport("dvui", dvui_testing);
+        integration_gui_mod.addImport("library", library_mod);
+        integration_gui_mod.addImport("util_test_env", util_test_env_mod);
+        integration_gui_mod.addImport("util_file_picker", file_picker_mod);
+        integration_gui_mod.addImport("sandbox", sandbox_mod);
+
         const integration_tests = b.addTest(.{ .root_module = integration_mod });
+        const integration_gui_tests = b.addTest(.{ .name = "gui-test", .root_module = integration_gui_mod });
         const run_integration = b.addRunArtifact(integration_tests);
+        const run_integration_gui = b.addRunArtifact(integration_gui_tests);
         const integration_step = b.step("test-integration", "Headless action-layer integration tests (dvui testing backend)");
         integration_step.dependOn(&run_integration.step);
+        integration_step.dependOn(&run_integration_gui.step);
 
         // Same suite, built but NOT run — so it can be cross-compiled and
         // executed natively on a foreign target:
@@ -649,11 +668,15 @@ pub fn build(b: *std.Build) void {
         const integration_install = b.addInstallArtifact(integration_tests, .{
             .dest_dir = .{ .override = .{ .custom = "test" } },
         });
+        const integration_gui_install = b.addInstallArtifact(integration_gui_tests, .{
+            .dest_dir = .{ .override = .{ .custom = "test" } },
+        });
         const integration_exe_step = b.step(
             "test-integration-exe",
             "Build (don't run) the Layer-1 suite into zig-out/test/ for running on a foreign target",
         );
         integration_exe_step.dependOn(&integration_install.step);
+        integration_exe_step.dependOn(&integration_gui_install.step);
 
         // Unit-test exes for the modules whose Windows arms matter most.
         // Zig only collects tests from a compilation's ROOT module — a
