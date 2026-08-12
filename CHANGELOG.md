@@ -2,6 +2,13 @@
 
 All notable, user-facing changes. Dates are YYYY-MM-DD.
 
+## [0.12.1] - 2026-08-12
+
+- Fixed the 0.12.0 release failing to build on every non-Windows platform
+  (portable, deb, rpm, AUR) — the Fedora launch-crash fix used a libc
+  binding that Zig 0.16 no longer exposes. No functional change beyond
+  making 0.12.0's fixes actually installable.
+
 ## [0.12.0] - 2026-08-12
 
 ### Windows

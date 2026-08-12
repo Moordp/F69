@@ -677,7 +677,14 @@ pub fn main(init: std.process.Init) !void {
     // This masks what is almost certainly an upstream SDL bug rather than
     // fixing it — worth reporting once there's a minimal repro.
     if (builtin.os.tag != .windows) {
-        _ = std.c.unsetenv("DESKTOP_STARTUP_ID");
+        // Own extern decl: zig 0.16's std.c doesn't expose unsetenv, and
+        // this broke every non-Windows package build of 0.12.0 (the test
+        // suites never analyze main(), so `zig build test` can't catch
+        // main-only code — release checks must include a plain `zig build`).
+        const c_env = struct {
+            extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+        };
+        _ = c_env.unsetenv("DESKTOP_STARTUP_ID");
     }
 
     SDLBackend.enableSDLLogging();
