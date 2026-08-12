@@ -61,6 +61,10 @@ pub fn build(b: *std.Build) void {
     const util_proc_mod = mod(b, "util_proc", "src/util/proc.zig", target, optimize);
     const util_setting_mod = mod(b, "util_setting", "src/util/setting.zig", target, optimize);
     const util_test_env_mod = mod(b, "util_test_env", "src/util/test_env.zig", target, optimize);
+    // std.c.getenv for the platform temp dir (%TEMP% on Windows, $TMPDIR
+    // elsewhere) — the tmpdir root used to be a hardcoded POSIX /tmp, which is
+    // meaningless on Windows and hung the suite there.
+    util_test_env_mod.link_libc = true;
     // Tests-only fixture. Every module whose test block hand-rolled a
     // tmpdir pre-R11 follow-up now imports `util_test_env` for the
     // shared `TestEnv`. Imports are no-ops at runtime — the type is
@@ -247,6 +251,7 @@ pub fn build(b: *std.Build) void {
     sandbox_mod.addImport("util_paths", util_paths_mod);
     sandbox_mod.addImport("util_domain", util_domain_mod);
     sandbox_mod.addImport("util_proc", util_proc_mod);
+    sandbox_mod.addImport("util_test_env", util_test_env_mod);
 
     const server_mod = mod(b, "server", "src/server/server.zig", target, optimize);
     server_mod.addImport("library", library_mod);
@@ -617,11 +622,62 @@ pub fn build(b: *std.Build) void {
         integration_mod.addImport("f95", f95_mod_);
         integration_mod.addImport("f95_indexer", f95_indexer_mod);
         integration_mod.addImport("installer", installer_mod);
+        integration_mod.addImport("util_file_picker", file_picker_mod);
+        integration_mod.addImport("importers", importers_mod);
+        integration_mod.addImport("util_version", util_version_mod);
+        integration_mod.addImport("util_argv", util_argv_mod);
+        integration_mod.addImport("util_archive", util_archive_mod);
+        integration_mod.addImport("resolver", resolver_mod);
+        integration_mod.addImport("util_reltime", util_reltime_mod);
 
         const integration_tests = b.addTest(.{ .root_module = integration_mod });
         const run_integration = b.addRunArtifact(integration_tests);
         const integration_step = b.step("test-integration", "Headless action-layer integration tests (dvui testing backend)");
         integration_step.dependOn(&run_integration.step);
+
+        // Same suite, built but NOT run — so it can be cross-compiled and
+        // executed natively on a foreign target:
+        //
+        //   scripts/test-windows-vm.sh   ->  zig-out/test/*.exe  ->  the Win11 VM
+        //
+        // The Layer-1 harness needs no display (dvui testing backend), so the
+        // binary runs fine over SSH in the guest. That is the only way to get
+        // automated coverage of the OS-specific behaviour — launcher
+        // discovery, path handling, sandbox backend selection — which is
+        // exactly where the Windows bug reports come from. `addRunArtifact`
+        // can't do this: the host cannot execute a Windows binary.
+        const integration_install = b.addInstallArtifact(integration_tests, .{
+            .dest_dir = .{ .override = .{ .custom = "test" } },
+        });
+        const integration_exe_step = b.step(
+            "test-integration-exe",
+            "Build (don't run) the Layer-1 suite into zig-out/test/ for running on a foreign target",
+        );
+        integration_exe_step.dependOn(&integration_install.step);
+
+        // Unit-test exes for the modules whose Windows arms matter most.
+        // Zig only collects tests from a compilation's ROOT module — a
+        // `test { _ = @import("sandbox") }` in integration.zig pulls in
+        // nothing across the module boundary — so each module ships as its
+        // own exe and test-windows-vm.sh runs every zig-out/test/*.exe.
+        // util_atomic_io is NOT on this roster. Tried 2026-08-12: its very
+        // first test (write → readFileAlloc round-trip) parks forever as a
+        // STANDALONE exe on the Win11 VM — while the exact same operation
+        // (writeFileAtomic → util_setting readFileAlloc, ui_scale test)
+        // passes inside the integration binary. The park is therefore
+        // binary-context-dependent, not primitive-dependent; atomic-io-test
+        // .exe is the minimal repro for the upstream std.Io report.
+        const win_unit_tests = [_]struct { name: []const u8, m: *std.Build.Module }{
+            .{ .name = "sandbox-test", .m = sandbox_mod },
+            .{ .name = "util-paths-test", .m = util_paths_mod },
+        };
+        for (win_unit_tests) |wt| {
+            const unit = b.addTest(.{ .name = wt.name, .root_module = wt.m });
+            const unit_install = b.addInstallArtifact(unit, .{
+                .dest_dir = .{ .override = .{ .custom = "test" } },
+            });
+            integration_exe_step.dependOn(&unit_install.step);
+        }
     }
 
     const test_targets = [_]*std.Build.Module{

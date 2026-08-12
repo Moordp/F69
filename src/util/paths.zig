@@ -77,6 +77,122 @@ pub fn bundledMkxpZLibsDir(alloc: std.mem.Allocator, exe_dir: []const u8) ![]u8 
     return resolveBundledDataPath(alloc, exe_dir, "compat-resources/mkxp-z-fhs-libs/lib");
 }
 
+const testing = std.testing;
+
+// Synthetic environs are POSIX-only: on Windows `Environ.Block` is
+// `GlobalBlock` (real process env or empty — nothing in between), so the
+// Windows tests below use `.empty` for the error/fallback arms and the
+// global environ (self-consistency against a direct key lookup) for the
+// happy path. That split is why every test here carries an OS guard.
+
+test "configHome: XDG_CONFIG_HOME wins (POSIX)" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const block = [_:null]?[*:0]const u8{ "XDG_CONFIG_HOME=/x/cfg", "HOME=/home/u" };
+    const environ: std.process.Environ = .{ .block = .{ .slice = &block } };
+    const got = try configHome(environ, testing.allocator);
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("/x/cfg", got);
+}
+
+test "configHome: falls back to HOME/.config (POSIX)" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const block = [_:null]?[*:0]const u8{"HOME=/home/u"};
+    const environ: std.process.Environ = .{ .block = .{ .slice = &block } };
+    const got = try configHome(environ, testing.allocator);
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("/home/u/.config", got);
+}
+
+test "configHome + cacheHome + home: no HOME anywhere is NoHomeDir" {
+    // Same assertion on both OSes: `.empty` has no APPDATA / LOCALAPPDATA /
+    // USERPROFILE on Windows and no XDG_* / HOME on POSIX.
+    try testing.expectError(Error.NoHomeDir, configHome(.empty, testing.allocator));
+    try testing.expectError(Error.NoHomeDir, cacheHome(.empty, testing.allocator));
+    try testing.expectError(Error.NoHomeDir, home(.empty, testing.allocator));
+}
+
+test "cacheHome: XDG_CACHE_HOME wins, else HOME/.cache (POSIX)" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    {
+        const block = [_:null]?[*:0]const u8{ "XDG_CACHE_HOME=/x/cache", "HOME=/home/u" };
+        const environ: std.process.Environ = .{ .block = .{ .slice = &block } };
+        const got = try cacheHome(environ, testing.allocator);
+        defer testing.allocator.free(got);
+        try testing.expectEqualStrings("/x/cache", got);
+    }
+    {
+        const block = [_:null]?[*:0]const u8{"HOME=/home/u"};
+        const environ: std.process.Environ = .{ .block = .{ .slice = &block } };
+        const got = try cacheHome(environ, testing.allocator);
+        defer testing.allocator.free(got);
+        try testing.expectEqualStrings("/home/u/.cache", got);
+    }
+}
+
+test "tempDir: TMPDIR wins, else /tmp (POSIX)" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    {
+        const block = [_:null]?[*:0]const u8{"TMPDIR=/var/scratch"};
+        const environ: std.process.Environ = .{ .block = .{ .slice = &block } };
+        const got = try tempDir(environ, testing.allocator);
+        defer testing.allocator.free(got);
+        try testing.expectEqualStrings("/var/scratch", got);
+    }
+    {
+        const got = try tempDir(.empty, testing.allocator);
+        defer testing.allocator.free(got);
+        try testing.expectEqualStrings("/tmp", got);
+    }
+}
+
+test "tempDir: empty environ falls back to C:\\Windows\\Temp (Windows)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    // The mod-apply staging bug this guards: without the fallback, staging
+    // landed in a drive-root `C:\tmp` (see tempDir's doc comment).
+    const got = try tempDir(.empty, testing.allocator);
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("C:\\Windows\\Temp", got);
+}
+
+test "Windows base dirs map to the right known folders (Windows)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    // Self-consistency against a direct key lookup on the REAL process env:
+    // configHome must be %APPDATA% specifically (not LOCALAPPDATA), cacheHome
+    // %LOCALAPPDATA%, home %USERPROFILE%. A swapped key here would scatter the
+    // user's config/cache across the wrong roaming profile silently.
+    const environ: std.process.Environ = .{ .block = .global };
+    const cases = [_]struct { key: []const u8, got: Error![]u8 }{
+        .{ .key = "APPDATA", .got = configHome(environ, testing.allocator) },
+        .{ .key = "LOCALAPPDATA", .got = cacheHome(environ, testing.allocator) },
+        .{ .key = "USERPROFILE", .got = home(environ, testing.allocator) },
+    };
+    for (cases) |case| {
+        const want = environ.getAlloc(testing.allocator, case.key) catch {
+            // Var genuinely unset on this host — the resolver must agree.
+            try testing.expectError(Error.NoHomeDir, case.got);
+            continue;
+        };
+        defer testing.allocator.free(want);
+        const got = try case.got;
+        defer testing.allocator.free(got);
+        try testing.expectEqualStrings(want, got);
+        try testing.expect(got.len > 0);
+    }
+}
+
+test "installDir + sandboxHome: path shapes" {
+    {
+        const got = try installDir(testing.allocator, "/lib/root", "181313", "final");
+        defer testing.allocator.free(got);
+        try testing.expectEqualStrings("/lib/root/181313/final", got);
+    }
+    {
+        const got = try sandboxHome(testing.allocator, "/home/u/.config", "181313");
+        defer testing.allocator.free(got);
+        try testing.expectEqualStrings("/home/u/.config/f69/sandbox/181313", got);
+    }
+}
+
 fn resolveBundledDataPath(alloc: std.mem.Allocator, exe_dir: []const u8, sub: []const u8) ![]u8 {
     // FHS first — when exe_dir is /usr/bin, /usr/share/f69/data/... is
     // where the .rpm / .deb packaging lands the bundle. `std.Io.Dir.cwd().access`

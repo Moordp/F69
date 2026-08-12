@@ -818,7 +818,10 @@ pub const Daemon = struct {
             .stdout = .ignore,
             .stderr = .inherit,
         }) catch |e| {
-            log.err(
+            // warn, not err: the caller surfaces AriaSpawnFailed to the UI,
+            // and the test runner counts err-level logs as test failures —
+            // this exact path is regression-tested with a missing binary.
+            log.warn(
                 "aria2 spawn failed ({s}). Is '{s}' installed and on PATH? " ++
                     "Try: which aria2c. On NixOS: nix profile add nixpkgs#aria2",
                 .{ @errorName(e), self.aria2_path },
@@ -845,7 +848,9 @@ pub const Daemon = struct {
                 log.info("aria2 still starting… ({d}ms, last error {s})", .{ attempts * 50, @errorName(last_err) });
             }
         }
-        log.err(
+        // warn, not err: surfaced to the UI as AriaStartTimeout (see the
+        // spawn-failure note above).
+        log.warn(
             "aria2 startup timed out after 5s on port {d}. Probable causes: " ++
                 "aria2c not installed, port collision, bad flag combo " ++
                 "(check stderr above for aria2's own message). Last error: {s}",

@@ -80,6 +80,13 @@ pub const Bwrap = struct {
         log.info("launching {d}-arg bwrap (exe={s})", .{ argv.items.len, cfg.executable });
         for (argv.items) |a| log.debug("  arg: {s}", .{a});
 
+        // Test seam: capture the composed bwrap command line instead of
+        // spawning (bwrap redirects HOME via bind args, not env — nothing
+        // env-shaped to record here).
+        if (dom.spawn_hook.active) {
+            return dom.spawn_hook.record("bwrap", argv.items, null, null);
+        }
+
         const child = std.process.spawn(self.io, .{
             .argv = argv.items,
             .stdin = .ignore,

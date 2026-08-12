@@ -58,9 +58,20 @@ pub const persistUiScaleIfDirty = actions.persistUiScaleIfDirty;
 pub const Filters = state_mod.Filters;
 pub const Screen = state_mod.Screen;
 pub const startSyncAll = actions.startSyncAll;
+pub const syncGame = actions.syncGame;
 pub const doLogin = actions.doLogin;
 pub const doFolderScan = actions.doFolderScan;
+pub const findLinuxLauncher = actions.findLinuxLauncher;
+pub const findWindowsLauncher = actions.findWindowsLauncher;
+pub const findLauncher = actions.findLauncher;
+pub const doLogout = actions.doLogout;
+pub const commitFolderImport = actions.commitFolderImport;
+pub const doOpenLogsFolder = actions.doOpenLogsFolder;
+/// External-open recording seam, for flow tests that click "Open folder".
+pub const external_open_hook = @import("actions/common.zig").external_open_hook;
 pub const tickFolderScan = actions.tickFolderScan;
+pub const folderScanRowStates = actions.folderScanRowStates;
+pub const FolderImportLinkState = state_mod.FolderImportLinkState;
 /// Register the bundled Design-B fonts onto a dvui window (Layer-2 GUI
 /// tests need this before rendering, just like runMainLoop does, else the
 /// theme's font families log "not in dvui database" errors).
@@ -70,6 +81,9 @@ pub fn registerBundledFonts(win: *dvui.Window) void {
 /// Headless test harness — builds the full service graph + a Frame on a
 /// caller-supplied dvui testing window. See src/ui/test_harness.zig.
 pub const Harness = @import("test_harness.zig").Harness;
+/// Exposed for the test harness's widget census (style.widgets_built /
+/// widgets_tagged) — see the layer2b tests in src/testkit/integration.zig.
+pub const style = @import("style.zig");
 pub const Frame = types.Frame;
 pub const RuntimeInfo = types.RuntimeInfo;
 pub const Browser = types.Browser;

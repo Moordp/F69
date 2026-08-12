@@ -13,6 +13,7 @@ const util_proc = @import("util_proc");
 const dom = @import("domain.zig");
 pub const SandboxConfig = dom.SandboxConfig;
 pub const SpawnResult = dom.SpawnResult;
+pub const spawn_hook = dom.spawn_hook;
 pub const HostInfo = dom.HostInfo;
 pub const Distro = dom.Distro;
 pub const EnvOverride = dom.EnvOverride;
@@ -80,9 +81,10 @@ pub const Sandbox = union(enum) {
     pub fn lastError(self: *const Sandbox) []const u8 {
         return switch (self.*) {
             .none => |*x| x.lastError(),
-            // bwrap / sandboxie don't track this yet — they fall back
-            // to the empty string so the UI just shows the bare
-            // `LaunchFailed` plus the backend name as before.
+            .sandboxie => |*x| x.lastError(),
+            // bwrap doesn't track this yet — falls back to the empty
+            // string so the UI shows the bare `LaunchFailed` plus the
+            // backend name as before.
             else => "",
         };
     }
@@ -198,7 +200,11 @@ pub const NoSandbox = struct {
         // no-op after the first call. The shim file just `exit 0`s
         // so xdg-open returns success without doing anything.
         const shim_dir = "/tmp/f69-game-shim";
-        ensureShimDir(self.io, shim_dir);
+        // Under the spawn seam, skip materializing the shim: its chmod
+        // shellout deadlocks the single-threaded test io, and no process
+        // will consult PATH anyway. The PATH string itself is still built
+        // and captured, so the prepend stays covered.
+        if (!dom.spawn_hook.active) ensureShimDir(self.io, shim_dir);
 
         // Prepend shim_dir to PATH. Falls through to host PATH so
         // every other tool the game might call (sh, awk, etc.) still
@@ -255,6 +261,20 @@ pub const NoSandbox = struct {
             return errs.Error.LaunchFailed;
         };
 
+        // Test seam: capture the composed spawn (argv + effective env
+        // redirect) instead of running a real process. Sits after the
+        // access probe and env composition (both asserted by tests) but
+        // before the chmod pass — chmod shells out through util_proc.run,
+        // which deadlocks under the single-threaded test io, and a spawn
+        // no test may perform makes exec bits moot anyway.
+        if (dom.spawn_hook.active) {
+            var hook_argv: std.ArrayList([]const u8) = .empty;
+            defer hook_argv.deinit(alloc);
+            hook_argv.append(alloc, abs_exe) catch return errs.Error.OutOfMemory;
+            for (cfg.launch_args) |a| hook_argv.append(alloc, a) catch return errs.Error.OutOfMemory;
+            return dom.spawn_hook.record("none", hook_argv.items, map.get("HOME"), map.get("USERPROFILE"));
+        }
+
         // Flip the exec bit recursively across the install tree.
         // Single-file chmod on the launcher isn't enough for games
         // whose .sh wrapper exec's a real binary inside (Ren'Py packs
@@ -292,12 +312,21 @@ pub const NoSandbox = struct {
                     "kernel couldn't find {s} at exec time (race? unmounted?)",
                     .{abs_exe},
                 ),
+                // The OS loader read the file and refused it. On Windows that
+                // means "not a PE" — which is exactly what a Ren'Py `Game.sh`
+                // looks like. Name the cause instead of echoing the enum, so
+                // a bad launcher pick diagnoses itself.
+                error.InvalidExe => self.setLastError(
+                    "{s} is not an executable this OS can run (a Linux .sh / .AppImage on Windows?). Set the launcher explicitly on the install if the auto-pick chose wrong.",
+                    .{abs_exe},
+                ),
                 else => self.setLastError(
                     "spawn failed: {s} (argv[0]={s}, cwd={s})",
                     .{ @errorName(e), abs_exe, cfg.install_path },
                 ),
             }
-            std.log.scoped(.sandbox).warn(
+            // err, not warn: the launch the user asked for did not happen.
+            std.log.scoped(.sandbox).err(
                 "spawn failed: {s} (argv[0]={s}, cwd={s})",
                 .{ @errorName(e), abs_exe, cfg.install_path },
             );
@@ -396,4 +425,161 @@ fn runChmod(alloc: std.mem.Allocator, io: std.Io, argv: []const []const u8) void
 // linux_bwrap.zig silently no-op.
 test {
     _ = @import("linux_bwrap.zig");
+    _ = @import("windows_sandboxie.zig");
+}
+
+const testing = std.testing;
+const test_env = @import("util_test_env");
+
+test "pickBackend: empty environ yields a usable backend on every OS" {
+    var env = try test_env.TestEnv.init(testing.allocator, "pick-backend");
+    defer env.deinit();
+    var sb = pickBackend(testing.allocator, env.io, .empty, "");
+    defer sb.deinit();
+    try testing.expect(sb.backendName().len > 0);
+    if (builtin.os.tag == .windows) {
+        // No %ProgramFiles% in an empty environ and no override → the ONLY
+        // correct outcome is the unsandboxed fallback, never a crash.
+        try testing.expectEqualStrings("none", sb.backendName());
+    }
+    // Whatever was picked, the failure-detail contract holds from the start.
+    try testing.expectEqualStrings("", sb.lastError());
+}
+
+test "pickBackend: real environ detects an actual Sandboxie install (Windows)" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    var env = try test_env.TestEnv.init(testing.allocator, "pick-backend-real");
+    defer env.deinit();
+
+    // The REAL process environment — this is the only test that probes the
+    // machine's actual %ProgramFiles% for a genuine Sandboxie install.
+    // Environment-sensing by design: both outcomes have hard invariants,
+    // and the print says which arm ran on this host.
+    const environ: std.process.Environ = .{ .block = .global };
+    var sb = pickBackend(testing.allocator, env.io, environ, "");
+    defer sb.deinit();
+
+    if (std.mem.eql(u8, sb.backendName(), "sandboxie")) {
+        std.debug.print("pickBackend-real: Sandboxie detected at {s}\n", .{sb.sandboxiePath()});
+        try testing.expect(std.mem.endsWith(u8, sb.sandboxiePath(), "\\Start.exe"));
+
+        // Launch a real on-disk exe through the DETECTED install — the seam
+        // captures the exact command line one step short of the spawn.
+        try env.writeFile("games/Real/Real.exe", "MZ fake");
+        const install = try env.path("games/Real");
+        defer testing.allocator.free(install);
+        dom.spawn_hook.install(0);
+        defer dom.spawn_hook.reset();
+        _ = try sb.launch(testing.allocator, .{
+            .sandbox_home = "",
+            .install_path = install,
+            .executable = "Real.exe",
+        });
+        try testing.expectEqual(@as(usize, 1), dom.spawn_hook.calls);
+        try testing.expectEqualStrings(sb.sandboxiePath(), dom.spawn_hook.arg(0).?);
+        try testing.expectEqualStrings("/box:f69", dom.spawn_hook.arg(1).?);
+    } else {
+        // No Sandboxie on this host: the only correct outcome is the
+        // unsandboxed fallback, never a crash or a half-picked backend.
+        std.debug.print("pickBackend-real: no Sandboxie on this host — fallback to none\n", .{});
+        try testing.expectEqualStrings("none", sb.backendName());
+    }
+}
+
+test "NoSandbox.launch: sandbox_home redirects HOME (and USERPROFILE on Windows)" {
+    var env = try test_env.TestEnv.init(testing.allocator, "nosandbox-home");
+    defer env.deinit();
+    try env.writeFile("install/Game.sh", "#!/bin/sh\nexit 0\n");
+    try env.mkdirP("sbhome");
+    const install = try env.path("install");
+    defer testing.allocator.free(install);
+    const sbhome = try env.path("sbhome");
+    defer testing.allocator.free(sbhome);
+
+    var ns = NoSandbox.init(env.io, .empty);
+    dom.spawn_hook.install(777);
+    defer dom.spawn_hook.reset();
+
+    const res = try ns.launch(testing.allocator, .{
+        .sandbox_home = sbhome,
+        .install_path = install,
+        .executable = "Game.sh",
+    });
+    try testing.expectEqual(@as(i32, 777), res.pid);
+    try testing.expectEqual(@as(usize, 1), dom.spawn_hook.calls);
+    try testing.expectEqualStrings(sbhome, dom.spawn_hook.envHome());
+    if (builtin.os.tag == .windows) {
+        // Windows games read USERPROFILE, not HOME — without this redirect the
+        // per-game save isolation is a silent no-op (sandbox.zig:160-167).
+        try testing.expectEqualStrings(sbhome, dom.spawn_hook.envUserProfile());
+    }
+    // argv[0] must be the ABSOLUTE launcher path — a bare relative argv[0]
+    // becomes a PATH lookup at exec time and fails ENOENT.
+    const argv0 = dom.spawn_hook.arg(0).?;
+    try testing.expect(std.fs.path.isAbsolute(argv0));
+    try testing.expect(std.mem.endsWith(u8, argv0, "Game.sh"));
+}
+
+test "NoSandbox.launch: empty sandbox_home leaves HOME untouched" {
+    var env = try test_env.TestEnv.init(testing.allocator, "nosandbox-nohome");
+    defer env.deinit();
+    try env.writeFile("install/Game.sh", "#!/bin/sh\nexit 0\n");
+    const install = try env.path("install");
+    defer testing.allocator.free(install);
+
+    var ns = NoSandbox.init(env.io, .empty);
+    dom.spawn_hook.install(1);
+    defer dom.spawn_hook.reset();
+    _ = try ns.launch(testing.allocator, .{
+        .sandbox_home = "",
+        .install_path = install,
+        .executable = "Game.sh",
+    });
+    // Empty environ snapshot + no override → the game sees no HOME at all.
+    // A non-empty capture here would mean the opt-out path stopped opting out.
+    try testing.expectEqualStrings("", dom.spawn_hook.envHome());
+    try testing.expectEqualStrings("", dom.spawn_hook.envUserProfile());
+}
+
+test "NoSandbox.launch: missing launcher fails before spawn with a 'not found' detail" {
+    var env = try test_env.TestEnv.init(testing.allocator, "nosandbox-missing");
+    defer env.deinit();
+    try env.mkdirP("install");
+    const install = try env.path("install");
+    defer testing.allocator.free(install);
+
+    var ns = NoSandbox.init(env.io, .empty);
+    dom.spawn_hook.install(1);
+    defer dom.spawn_hook.reset();
+    try testing.expectError(errs.Error.LaunchFailed, ns.launch(testing.allocator, .{
+        .sandbox_home = "",
+        .install_path = install,
+        .executable = "Gone.sh",
+    }));
+    // Failed BEFORE reaching the spawn seam — the access probe caught it.
+    try testing.expectEqual(@as(usize, 0), dom.spawn_hook.calls);
+    try testing.expect(std.mem.indexOf(u8, ns.lastError(), "not found") != null);
+}
+
+test "applySandboxiePath: rejects junk everywhere, accepts a real file on Windows" {
+    var env = try test_env.TestEnv.init(testing.allocator, "apply-sbie");
+    defer env.deinit();
+    var sb: Sandbox = .{ .none = NoSandbox.init(env.io, .empty) };
+    defer sb.deinit();
+
+    // Nonexistent path: rejected on every OS, backend untouched.
+    const missing = try env.path("nope/Start.exe");
+    defer testing.allocator.free(missing);
+    try testing.expect(!sb.applySandboxiePath(testing.allocator, env.io, missing));
+    try testing.expectEqualStrings("none", sb.backendName());
+    try testing.expectEqualStrings("", sb.sandboxiePath());
+
+    if (builtin.os.tag == .windows) {
+        try env.writeFile("Sandboxie Portable/Start.exe", "MZ fake");
+        const p = try env.path("Sandboxie Portable/Start.exe");
+        defer testing.allocator.free(p);
+        try testing.expect(sb.applySandboxiePath(testing.allocator, env.io, p));
+        try testing.expectEqualStrings("sandboxie", sb.backendName());
+        try testing.expectEqualStrings(p, sb.sandboxiePath());
+    }
 }

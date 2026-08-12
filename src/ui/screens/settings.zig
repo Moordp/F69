@@ -357,12 +357,12 @@ fn renderSandboxDefaultSection(frame: *Frame) void {
             );
         }
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
-        if (dvui.button(@src(), "Browse to Sandboxie Start.exe\u{2026}", .{}, .{})) {
+        if (dvui.button(@src(), "Browse to Sandboxie Start.exe\u{2026}", .{}, .{ .tag = "set-sandboxie-browse" })) {
             pickSandboxieStartExe(frame);
         }
         if (cur.len > 0) {
             _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 4 } });
-            if (dvui.button(@src(), "Clear override", .{}, .{})) {
+            if (dvui.button(@src(), "Clear override", .{}, .{ .tag = "set-sandboxie-clear" })) {
                 clearSandboxieOverride(frame);
             }
         }
