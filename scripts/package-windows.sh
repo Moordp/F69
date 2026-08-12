@@ -44,12 +44,40 @@ rm -rf "$OUT"; mkdir -p "$OUT"
 cp -f "$EXE" "$OUT/"
 for d in "${closure[@]}"; do cp -fL "$d" "$OUT/"; done
 
+# ---- aria2c.exe -------------------------------------------------------------
+# Bundle the official aria2 build: downloads are dead without it — the app's
+# resolveAria2Path probes for aria2c.exe NEXT TO f69.exe first, and a clean
+# Windows machine has no aria2 on PATH (gap found 2026-08-12: Linux portable
+# bundles aria2c, the Windows zip never did). Pinned upstream release, sha256
+# verified, cached under /tmp/f69-win so packaging stays offline after the
+# first run.
+ARIA2_VER=1.37.0
+ARIA2_ZIP="$W/aria2/aria2.zip"
+ARIA2_URL="https://github.com/aria2/aria2/releases/download/release-${ARIA2_VER}/aria2-${ARIA2_VER}-win-64bit-build1.zip"
+ARIA2_SHA256=67d015301eef0b612191212d564c5bb0a14b5b9c4796b76454276a4d28d9b288
+mkdir -p "$W/aria2"
+[ -f "$ARIA2_ZIP" ] || curl -sL -o "$ARIA2_ZIP" "$ARIA2_URL"
+echo "$ARIA2_SHA256  $ARIA2_ZIP" | sha256sum -c - >/dev/null || {
+  echo "error: aria2 zip sha256 mismatch — refusing to bundle" >&2; exit 1; }
+python3 - "$ARIA2_ZIP" "$OUT" <<'PY'
+import sys, zipfile, pathlib
+z, out = zipfile.ZipFile(sys.argv[1]), pathlib.Path(sys.argv[2])
+exe = next(n for n in z.namelist() if n.endswith("aria2c.exe"))
+(out / "aria2c.exe").write_bytes(z.read(exe))
+lic = next((n for n in z.namelist() if n.endswith("COPYING")), None)
+if lic: (out / "aria2-COPYING.txt").write_bytes(z.read(lic))
+PY
+echo "== bundled aria2c.exe ${ARIA2_VER} =="
+
 cat > "$OUT/README.txt" <<'TXT'
 f69 — Windows build
 ===================
 Run f69.exe in place; the bundled .dll files must stay alongside it.
 
 Data location: %APPDATA%\f69  (database, covers, library)
+
+Downloads: the bundled aria2c.exe must stay alongside f69.exe (it is the
+download engine; aria2 is GPLv2, see aria2-COPYING.txt).
 
 Sandboxing (optional): install Sandboxie-Plus (https://sandboxie-plus.com).
 f69 auto-detects Start.exe under %ProgramFiles%\Sandboxie-Plus\ (or classic
