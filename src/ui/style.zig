@@ -84,12 +84,30 @@ pub const letterbox_fill: dvui.Color = .{ .r = 0x00, .g = 0x00, .b = 0x00 };
 // =============================================================
 
 /// `dvui.button` with the app's standard outer height.
+/// Census counters for the test sweep. Every interactive widget built in a
+/// frame bumps `widgets_built`; those carrying a `.tag` (and so reachable by
+/// `dvui.testing.moveTo`) bump `widgets_tagged`. The gap is the set of buttons
+/// no automated test can click, which is otherwise invisible — see
+/// docs/superpowers/specs/2026-08-10-exhaustive-test-harness-design.md.
+///
+/// Live in all builds on purpose: the enforcement tests have to measure the
+/// configuration we actually ship, and the cost is one increment per widget.
+pub var widgets_built: usize = 0;
+pub var widgets_tagged: usize = 0;
+
+pub fn resetWidgetCensus() void {
+    widgets_built = 0;
+    widgets_tagged = 0;
+}
+
 pub fn button(
     src: std.builtin.SourceLocation,
     label: []const u8,
     init_opts: dvui.ButtonWidget.InitOptions,
     opts: dvui.Options,
 ) bool {
+    widgets_built += 1;
+    if (opts.tag != null) widgets_tagged += 1;
     const defaults: dvui.Options = .{
         .min_size_content = .{ .w = 0, .h = button_h },
     };

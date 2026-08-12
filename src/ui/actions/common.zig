@@ -188,6 +188,10 @@ fn browserWorker(job: *BrowserJob) void {
         job.alloc.destroy(job);
     }
     var argv_buf: [5][]const u8 = undefined;
+    if (external_open_hook.active) {
+        external_open_hook.record(job.url);
+        return;
+    }
     const argv = systemOpenArgv(job.exe, job.url, &argv_buf);
     var child = std.process.spawn(job.io, .{
         .argv = argv,
@@ -205,6 +209,50 @@ fn browserWorker(job: *BrowserJob) void {
 /// Windows `cmd /c start "" <t>`, macOS `open <t>`, Linux `xdg-open <t>`.
 /// Without this, every open-in-external-app action spawned a literal
 /// `xdg-open` that doesn't exist on Windows/macOS. `buf` backs the result.
+
+// --- external-open test seam ---------------------------------------------
+// Opening a URL or a folder spawns a REAL browser / file manager. In an
+// automated flow that leaks processes onto the test machine and asserts
+// nothing. When active, the spawn is skipped and the target is RECORDED
+// instead, so a flow can assert "clicking Open folder would have opened
+// exactly this path" — coverage rather than a silenced no-op.
+//
+// Inactive in production: one bool check.
+pub const external_open_hook = struct {
+    pub var active: bool = false;
+    var buf: [16][256]u8 = undefined;
+    var lens: [16]usize = @splat(0);
+    pub var count: usize = 0;
+
+    pub fn install() void {
+        active = true;
+        count = 0;
+    }
+    pub fn reset() void {
+        active = false;
+        count = 0;
+    }
+    pub fn record(target: []const u8) void {
+        if (count >= buf.len) return;
+        const n = @min(target.len, buf[count].len);
+        @memcpy(buf[count][0..n], target[0..n]);
+        lens[count] = n;
+        count += 1;
+    }
+    /// Targets recorded so far, oldest first.
+    pub fn get(i: usize) []const u8 {
+        if (i >= count) return "";
+        return buf[i][0..lens[i]];
+    }
+    pub fn sawTarget(needle: []const u8) bool {
+        var i: usize = 0;
+        while (i < count) : (i += 1) {
+            if (std.mem.indexOf(u8, get(i), needle) != null) return true;
+        }
+        return false;
+    }
+};
+
 pub fn systemOpenArgv(custom_exe: []const u8, target: []const u8, buf: *[5][]const u8) []const []const u8 {
     const use_default = custom_exe.len == 0 or std.mem.eql(u8, custom_exe, "xdg-open");
     if (!use_default) {

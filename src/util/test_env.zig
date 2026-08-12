@@ -20,6 +20,34 @@
 // debugger can inspect it.
 
 const std = @import("std");
+const builtin = @import("builtin");
+
+/// Platform temp root, owned by `alloc`.
+///
+/// This module used to hardcode `/tmp`. Windows has no `/tmp` — the path
+/// resolves against the current drive root instead — and because the suite had
+/// never been run on Windows, nothing caught it. Mirrors `util/paths.zig`
+/// `tempDir()`, inlined rather than imported: `util_test_env` is a dependency
+/// of nearly every other module's tests, so it stays dependency-free.
+fn tempBase(alloc: std.mem.Allocator) error{OutOfMemory}![]u8 {
+    // `std.c.getenv` rather than the Environ API: this needs no allocator and
+    // no Environ threaded down, and it's the pattern already used in ui.zig.
+    const primary = if (builtin.os.tag == .windows) "TEMP" else "TMPDIR";
+    if (std.c.getenv(primary)) |z| {
+        const s = std.mem.span(z);
+        if (s.len > 0) return alloc.dupe(u8, s);
+    }
+    if (builtin.os.tag == .windows) {
+        if (std.c.getenv("TMP")) |z| {
+            const s = std.mem.span(z);
+            if (s.len > 0) return alloc.dupe(u8, s);
+        }
+        return alloc.dupe(u8, "C:\\Windows\\Temp");
+    }
+    return alloc.dupe(u8, "/tmp");
+}
+
+const sep = if (builtin.os.tag == .windows) "\\" else "/";
 
 pub const TestEnv = struct {
     alloc: std.mem.Allocator,
@@ -33,7 +61,13 @@ pub const TestEnv = struct {
     /// Create a fresh tmpdir at `/tmp/f69-test-<name>-<rand>/`. The
     /// random suffix prevents parallel tests stomping each other.
     pub fn init(alloc: std.mem.Allocator, name: []const u8) !TestEnv {
-        var io_threaded = std.Io.Threaded.init(alloc, .{});
+        // EXPLICIT async_limit. The default is `.limited(cpu_count - 1)`, so a
+        // 2-core machine gets ONE async slot — and a single slot deadlocks:
+        // `Dir.openDir` holds it while `Dir.iterate().next()` waits for a free
+        // one. That is exactly how the Windows VM (2 visible cores) parked
+        // forever in the recipe index while the 16-core Linux host never
+        // contended. Tests must not be sensitive to core count.
+        var io_threaded = std.Io.Threaded.init(alloc, .{ .async_limit = .limited(8) });
         errdefer io_threaded.deinit();
         const io = io_threaded.io();
 
@@ -41,10 +75,12 @@ pub const TestEnv = struct {
         var nonce_buf: [4]u8 = undefined;
         io.randomSecure(&nonce_buf) catch io.random(&nonce_buf);
 
+        const base = try tempBase(alloc);
+        defer alloc.free(base);
         const root = try std.fmt.allocPrint(
             alloc,
-            "/tmp/f69-test-{s}-{x}",
-            .{ name, std.fmt.bytesToHex(nonce_buf, .lower) },
+            "{s}" ++ sep ++ "f69-test-{s}-{x}",
+            .{ base, name, std.fmt.bytesToHex(nonce_buf, .lower) },
         );
         errdefer alloc.free(root);
 

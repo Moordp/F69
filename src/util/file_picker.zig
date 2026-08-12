@@ -46,6 +46,44 @@ fn ensureInit() Error!void {
     initialized = true;
 }
 
+
+// --- test seam ------------------------------------------------------------
+// Both entry points below normally raise a NATIVE MODAL dialog, which an
+// automated flow can never dismiss — every import / add-modfile / browse-to-exe
+// flow would park forever. So the harness can preload answers here.
+//
+// `queue` is consumed in order (one entry per picker call), which lets a single
+// flow drive several pickers. An empty queue with `active` set means "the user
+// cancelled", so the cancel path is testable too. `calls` records how many
+// times a picker was raised, so a test can assert a picker appeared at all.
+//
+// Unset in production: `active` is false, so there is no behaviour change and
+// no cost beyond one bool check.
+pub const test_hook = struct {
+    pub var active: bool = false;
+    pub var queue: []const []const u8 = &.{};
+    pub var calls: usize = 0;
+
+    pub fn install(answers: []const []const u8) void {
+        active = true;
+        queue = answers;
+        calls = 0;
+    }
+    pub fn reset() void {
+        active = false;
+        queue = &.{};
+        calls = 0;
+    }
+    /// Next preloaded answer, or null to simulate a cancelled dialog.
+    fn take(alloc: std.mem.Allocator) Error!?[]u8 {
+        calls += 1;
+        if (queue.len == 0) return null;
+        const next = queue[0];
+        queue = queue[1..];
+        return alloc.dupe(u8, next) catch Error.OutOfMemory;
+    }
+};
+
 /// Show a single-file open dialog. Returns the picked path (owned
 /// by `alloc`, free with `alloc.free`), or `null` when the user
 /// cancels. Filter items use NFDe's compact format: `spec` is a
@@ -55,6 +93,7 @@ pub fn open(
     filters: []const FilterItem,
     default_path: ?[]const u8,
 ) Error!?[]u8 {
+    if (test_hook.active) return test_hook.take(alloc);
     try ensureInit();
 
     // Build the NUL-terminated C arrays NFDe expects. Each filter
@@ -119,6 +158,7 @@ pub fn openFolder(
     alloc: std.mem.Allocator,
     default_path: ?[]const u8,
 ) Error!?[]u8 {
+    if (test_hook.active) return test_hook.take(alloc);
     try ensureInit();
 
     var default_z_owned: ?[:0]u8 = null;

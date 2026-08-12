@@ -129,25 +129,51 @@ pub fn doLaunchGame(frame: *Frame, game: *const library.Game) void {
         log.info("launch: custom override '{s}' under {s}", .{ custom, install_path });
     };
 
-    if (exe_storage.len == 0 and findLinuxLauncher(frame.io, alloc, install_path, &exe_buf) == null) {
-        const conv_spec = mods_act.resolveConvertSpec(frame, install_path);
-        if (conv_spec != .none) {
-            state.setLaunchMsg("Converting before launch...");
-            frame.convert_svc.convert(install_path, conv_spec, false) catch |e| {
-                var buf: [256]u8 = undefined;
-                const msg = std.fmt.bufPrint(&buf, "Auto-convert failed: {s}", .{@errorName(e)}) catch "Auto-convert failed";
-                state.setLaunchMsg(msg);
-                return;
-            };
+    // Auto-convert is a Windows->Linux translation, so it only makes
+    // sense when we're the ones running Linux. On Windows the .exe in the
+    // install IS the thing to run: converting would be nonsense, and the
+    // "Converting before launch..." toast used to fire there for any game
+    // that shipped without a `.sh`.
+    if (builtin.os.tag != .windows) {
+        if (exe_storage.len == 0 and findLauncher(frame.io, alloc, install_path, &exe_buf) == null) {
+            const conv_spec = mods_act.resolveConvertSpec(frame, install_path);
+            if (conv_spec != .none) {
+                state.setLaunchMsg("Converting before launch...");
+                frame.convert_svc.convert(install_path, conv_spec, false) catch |e| {
+                    var buf: [256]u8 = undefined;
+                    const msg = std.fmt.bufPrint(&buf, "Auto-convert failed: {s}", .{@errorName(e)}) catch "Auto-convert failed";
+                    state.setLaunchMsg(msg);
+                    return;
+                };
+            }
         }
     }
 
     // Second pass post-convert (or first pass when no convert was
     // needed). The launcher should exist now if everything worked.
+    // `findLauncher` is OS-aware: `.exe`/`.bat`/`.cmd` on Windows,
+    // `.sh`/`.AppImage` elsewhere. Never let the Linux finder pick on
+    // Windows — a Ren'Py `Game.sh` handed to Sandboxie fails InvalidExe.
     if (exe_storage.len == 0) {
-        if (findLinuxLauncher(frame.io, alloc, install_path, &exe_buf)) |found| {
+        if (findLauncher(frame.io, alloc, install_path, &exe_buf)) |found| {
             exe_storage = found;
             log.info("launch: auto-picked launcher '{s}' under {s}", .{ found, install_path });
+        } else if (builtin.os.tag == .windows) {
+            // No .exe/.bat/.cmd. A Linux-only build (or a converted one)
+            // can't run here, and saying so beats "nothing runnable".
+            if (findLinuxLauncher(frame.io, alloc, install_path, &exe_buf)) |lin| {
+                var buf: [352]u8 = undefined;
+                const msg = std.fmt.bufPrint(
+                    &buf,
+                    "Only a Linux launcher ({s}) is in this install — it can't run on Windows. Re-download the Windows build.",
+                    .{lin},
+                ) catch "Linux-only build — re-download the Windows version.";
+                state.notifyErr(msg);
+            } else {
+                var nbuf: [384]u8 = undefined;
+                state.notifyErr(noRunnableMsg(&nbuf, install_path));
+            }
+            return;
         } else {
             // Nothing Linux-native on disk. Look for a Windows .exe so we
             // can give an actionable message.
@@ -160,13 +186,8 @@ pub fn doLaunchGame(frame: *Frame, game: *const library.Game) void {
                 ) catch "Windows build — click Convert first.";
                 state.notifyErr(msg);
             } else {
-                var buf: [384]u8 = undefined;
-                const msg = std.fmt.bufPrint(
-                    &buf,
-                    "No runnable found under {s}. Either the archive didn't extract cleanly (re-download), or the install layout is non-standard (open the folder and check what's there).",
-                    .{install_path},
-                ) catch "No runnable found in the install dir.";
-                state.notifyErr(msg);
+                var nbuf: [384]u8 = undefined;
+                state.notifyErr(noRunnableMsg(&nbuf, install_path));
             }
             return;
         }
@@ -370,6 +391,10 @@ pub const MissingLibsResult = struct {
 /// `error while loading shared libraries` in the toast bar and we
 /// fall back to the existing failure path.
 pub fn findMissingLibs(alloc: std.mem.Allocator, io: std.Io, exe_path: []const u8) MissingLibsResult {
+    // `ldd` is glibc tooling — there is no equivalent on Windows, and this
+    // runs before EVERY launch, so without the gate each Windows launch
+    // spawned a process that cannot exist.
+    if (builtin.os.tag == .windows) return .{ .combined = alloc.dupe(u8, "") catch &.{} };
     const result = std.process.run(alloc, io, .{
         .argv = &.{ "ldd", exe_path },
     }) catch {
@@ -510,6 +535,11 @@ pub fn runPreLaunchDiagnostics(
     io: std.Io,
     exe_path: []const u8,
 ) ?LaunchDiagnosis {
+    // Every check in here is ELF/glibc-shaped (unresolved .so deps, host
+    // GPU driver paths). None of it applies to a PE, so on Windows there
+    // is nothing to diagnose and we must not block the launch on it.
+    if (builtin.os.tag == .windows) return null;
+
     // Check 1: ldd unresolved libs.
     var ldd_out_buf: std.ArrayList(u8) = .empty;
     defer ldd_out_buf.deinit(alloc);
@@ -1300,6 +1330,200 @@ fn findWindowsExe(io: std.Io, alloc: std.mem.Allocator, install_path: []const u8
         }
     }
     return null;
+}
+
+/// Shared "nothing to run here" text. Writes into a caller-owned buffer —
+/// returning a slice into a local would dangle.
+fn noRunnableMsg(buf: []u8, install_path: []const u8) []const u8 {
+    return std.fmt.bufPrint(
+        buf,
+        "No runnable found under {s}. Either the archive didn't extract cleanly (re-download), or the install layout is non-standard (open the folder and check what's there).",
+        .{install_path},
+    ) catch "No runnable found in the install dir.";
+}
+
+// ============================================================
+//  Windows launcher discovery
+// ============================================================
+//
+// Windows needs its own finder, not `findLinuxLauncher`. Ren'Py (and
+// most engines) ship `Game.sh` *and* `Game.exe` side by side, so the
+// Linux finder happily returns the shell script on Windows; Sandboxie
+// then gets a `.sh` as argv[0] and CreateProcess fails with
+// `InvalidExe`. Picking has to be extension-aware per OS.
+//
+// A game dir also holds plenty of `.exe` files that are not the game
+// (uninstallers, redist bundlers, Unity's crash handler, Ren'Py's
+// bundled python). Rather than "first `.exe` readdir hands us" — which
+// is both wrong and non-deterministic — every candidate is scored and
+// the best one wins, ties broken on name so repeated launches agree.
+
+/// Never the game, whatever else is on disk. Matched case-insensitively:
+/// `.prefix` against the start of the name, `.sub` anywhere in it.
+const WinExeReject = union(enum) { prefix: []const u8, sub: []const u8 };
+const WIN_EXE_REJECT = [_]WinExeReject{
+    .{ .prefix = "unins" }, // unins000.exe, uninstall.exe
+    .{ .prefix = "python" }, // Ren'Py bundles python.exe / pythonw.exe
+    .{ .sub = "unitycrashhandler" },
+    .{ .sub = "crashreporter" },
+    .{ .sub = "crashpad_handler" },
+    .{ .sub = "vcredist" },
+    .{ .sub = "vc_redist" },
+    .{ .sub = "dxsetup" },
+    .{ .sub = "dxwebsetup" },
+    .{ .sub = "oalinst" }, // OpenAL redist
+    .{ .sub = "notification_helper" },
+};
+
+/// Subdirectories that hold shipped dependencies, never the launcher.
+const WIN_SKIP_DIRS = [_][]const u8{
+    "lib", "libs", "redist", "_commonredist", "directx", "vcredist", "__redist",
+};
+
+fn winRejected(name: []const u8) bool {
+    for (WIN_EXE_REJECT) |r| switch (r) {
+        .prefix => |p| if (std.ascii.startsWithIgnoreCase(name, p)) return true,
+        .sub => |s| if (std.ascii.indexOfIgnoreCase(name, s) != null) return true,
+    };
+    return false;
+}
+
+/// Basename of a path, tolerating either separator. `std.fs.path.basename`
+/// is target-flavoured, and these strings come from the DB / the source
+/// app, so they can carry `\` even on a POSIX build.
+fn baseNameAnySep(p: []const u8) []const u8 {
+    var end = p.len;
+    while (end > 0 and (p[end - 1] == '/' or p[end - 1] == '\\')) end -= 1;
+    const trimmed = p[0..end];
+    if (std.mem.lastIndexOfAny(u8, trimmed, "/\\")) |i| return trimmed[i + 1 ..];
+    return trimmed;
+}
+
+fn stemOf(name: []const u8) []const u8 {
+    if (std.mem.lastIndexOfScalar(u8, name, '.')) |dot| if (dot > 0) return name[0..dot];
+    return name;
+}
+
+/// Score a Windows launcher candidate. Higher wins; `null` means reject
+/// outright. `dir_base` is the basename of the directory the *install*
+/// lives in, which for Ren'Py matches the exe stem (`Adverse Effect/`
+/// holds `AdverseEffect.exe`, close enough after separator/space
+/// normalisation is skipped — exact match is a bonus, not a requirement).
+///
+/// Pure function on purpose: the filesystem walk is untestable across
+/// OSes in unit tests, the ranking is the part that actually decides
+/// behaviour, so the ranking is what gets tested.
+fn scoreWindowsCandidate(name: []const u8, depth: u8, dir_base: []const u8) ?i32 {
+    var score: i32 = 0;
+    if (std.ascii.endsWithIgnoreCase(name, ".exe")) {
+        score += 300;
+    } else if (std.ascii.endsWithIgnoreCase(name, ".bat") or
+        std.ascii.endsWithIgnoreCase(name, ".cmd"))
+    {
+        // A batch wrapper works but is a weaker signal than a real PE.
+        score += 100;
+    } else return null;
+
+    if (winRejected(name)) return null;
+
+    const stem = stemOf(name);
+    if (std.ascii.eqlIgnoreCase(stem, dir_base)) score += 200;
+    if (std.ascii.eqlIgnoreCase(name, "nw.exe")) score += 150; // RPGM MV/MZ
+    if (std.ascii.eqlIgnoreCase(stem, "game") or
+        std.ascii.eqlIgnoreCase(stem, "launcher")) score += 120;
+
+    // Installer-ish names: usable as a last resort, never preferred.
+    if (std.ascii.eqlIgnoreCase(stem, "setup") or
+        std.ascii.eqlIgnoreCase(stem, "install")) score -= 150;
+
+    // Root beats a subdirectory.
+    if (depth == 0) score += 50;
+    return score;
+}
+
+/// Windows counterpart to `findLinuxLauncher`: walks `install_path` (root,
+/// then one level down) and returns the best-scoring `.exe` / `.bat` /
+/// `.cmd` relative to `install_path`. Null when nothing runnable is
+/// there. Never returns a `.sh` or `.AppImage`.
+pub fn findWindowsLauncher(io: std.Io, alloc: std.mem.Allocator, install_path: []const u8, buf: []u8) ?[]const u8 {
+    _ = alloc;
+    var root = std.Io.Dir.cwd().openDir(io, install_path, .{ .iterate = true }) catch return null;
+    defer root.close(io);
+
+    const dir_base = baseNameAnySep(install_path);
+    var best_score: i32 = std.math.minInt(i32);
+    var best_buf: [320]u8 = undefined;
+    var best_len: usize = 0;
+
+    const consider = struct {
+        fn f(
+            rel: []const u8,
+            name: []const u8,
+            depth: u8,
+            dbase: []const u8,
+            bs: *i32,
+            bb: []u8,
+            bl: *usize,
+        ) void {
+            const s = scoreWindowsCandidate(name, depth, dbase) orelse return;
+            // Deterministic tie-break: lexicographically smaller relative
+            // path wins, so two launches never disagree.
+            const better = s > bs.* or
+                (s == bs.* and bl.* > 0 and std.mem.order(u8, rel, bb[0..bl.*]) == .lt);
+            if (!better) return;
+            if (rel.len > bb.len) return;
+            @memcpy(bb[0..rel.len], rel);
+            bl.* = rel.len;
+            bs.* = s;
+        }
+    }.f;
+
+    // Pass 1: install root. `.unknown` is accepted alongside `.file` for
+    // the same reason the Linux finder does it — FUSE mounts (NTFS-3g,
+    // exFAT) report every entry without a d_type.
+    var it = root.iterate();
+    while (it.next(io) catch null) |entry| {
+        if (entry.kind != .file and entry.kind != .unknown) continue;
+        consider(entry.name, entry.name, 0, dir_base, &best_score, &best_buf, &best_len);
+    }
+
+    // Pass 2: one level down — archives commonly wrap the game in a
+    // single subdir (which is the layout in the Adverse Effect report).
+    var it2 = root.iterate();
+    while (it2.next(io) catch null) |entry| {
+        if (entry.kind != .directory and entry.kind != .unknown) continue;
+        var skip = false;
+        for (WIN_SKIP_DIRS) |d| if (std.ascii.eqlIgnoreCase(entry.name, d)) {
+            skip = true;
+            break;
+        };
+        if (skip) continue;
+
+        var sub_path_buf: [320]u8 = undefined;
+        const sub_path = std.fmt.bufPrint(&sub_path_buf, "{s}/{s}", .{ install_path, entry.name }) catch continue;
+        var sub = std.Io.Dir.cwd().openDir(io, sub_path, .{ .iterate = true }) catch continue;
+        defer sub.close(io);
+        var sub_it = sub.iterate();
+        while (sub_it.next(io) catch null) |sub_entry| {
+            if (sub_entry.kind != .file and sub_entry.kind != .unknown) continue;
+            var rel_buf: [320]u8 = undefined;
+            const rel = std.fmt.bufPrint(&rel_buf, "{s}/{s}", .{ entry.name, sub_entry.name }) catch continue;
+            // Score against the *subdir* name: a wrapper dir means the exe
+            // is usually named after the inner folder, not the install dir.
+            consider(rel, sub_entry.name, 1, entry.name, &best_score, &best_buf, &best_len);
+        }
+    }
+
+    if (best_len == 0) return null;
+    return std.fmt.bufPrint(buf, "{s}", .{best_buf[0..best_len]}) catch null;
+}
+
+/// OS-correct launcher discovery. This is what the launch path must use —
+/// calling `findLinuxLauncher` directly on Windows is how a Ren'Py
+/// `Game.sh` ended up being handed to Sandboxie.
+pub fn findLauncher(io: std.Io, alloc: std.mem.Allocator, install_path: []const u8, buf: []u8) ?[]const u8 {
+    if (builtin.os.tag == .windows) return findWindowsLauncher(io, alloc, install_path, buf);
+    return findLinuxLauncher(io, alloc, install_path, buf);
 }
 
 // ============================================================
@@ -2191,6 +2415,15 @@ pub fn expandSavesPath(alloc: std.mem.Allocator, tmpl: []const u8, sandbox_home:
 }
 
 pub fn spawnXdgOpen(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !void {
+    // Record on the CALLING thread, not in the reaper below. The recording used
+    // to live inside the detached thread, which made it a race: on Linux the
+    // thread won and the flow test saw the target, on Windows it lost and the
+    // test saw zero. A test seam that is only sometimes right is worse than
+    // none, and it looked like a Windows behaviour difference for a while.
+    if (common.external_open_hook.active) {
+        common.external_open_hook.record(path);
+        return;
+    }
     const path_owned = try alloc.dupe(u8, path);
     // The reaper thread takes ownership of `path_owned` + the child
     // handle; UI thread returns immediately without blocking on
@@ -2232,6 +2465,105 @@ pub fn spawnXdgOpen(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !voi
 }
 
 const testing = std.testing;
+
+// ---- Windows launcher ranking ----------------------------------------
+// The filesystem walk can't be exercised for Windows from a Linux test
+// run, but the ranking is what decides which file gets launched, so the
+// ranking is what's pinned here.
+
+test "scoreWindowsCandidate: never accepts a Linux launcher" {
+    try testing.expect(scoreWindowsCandidate("AdverseEffect.sh", 0, "final") == null);
+    try testing.expect(scoreWindowsCandidate("Game.AppImage", 0, "final") == null);
+    try testing.expect(scoreWindowsCandidate("readme.txt", 0, "final") == null);
+}
+
+test "scoreWindowsCandidate: .exe beats a batch wrapper" {
+    const exe = scoreWindowsCandidate("Foo.exe", 0, "x").?;
+    const bat = scoreWindowsCandidate("Foo.bat", 0, "x").?;
+    try testing.expect(exe > bat);
+}
+
+test "scoreWindowsCandidate: rejects redist / uninstaller / bundled python noise" {
+    for ([_][]const u8{
+        "unins000.exe",       "uninstall.exe",
+        "python.exe",         "pythonw.exe",
+        "UnityCrashHandler64.exe", "vcredist_x64.exe",
+        "vc_redist.x64.exe",  "DXSETUP.exe",
+        "oalinst.exe",        "notification_helper.exe",
+    }) |name| {
+        try testing.expect(scoreWindowsCandidate(name, 0, "game") == null);
+    }
+}
+
+test "scoreWindowsCandidate: name matching the install dir wins" {
+    const named = scoreWindowsCandidate("AdverseEffect.exe", 0, "AdverseEffect").?;
+    const other = scoreWindowsCandidate("zzz.exe", 0, "AdverseEffect").?;
+    try testing.expect(named > other);
+}
+
+test "scoreWindowsCandidate: root beats a subdirectory" {
+    try testing.expect(scoreWindowsCandidate("Foo.exe", 0, "x").? >
+        scoreWindowsCandidate("Foo.exe", 1, "x").?);
+}
+
+test "scoreWindowsCandidate: setup.exe is last resort, not preferred" {
+    const setup = scoreWindowsCandidate("setup.exe", 0, "x").?;
+    const plain = scoreWindowsCandidate("whatever.exe", 0, "x").?;
+    try testing.expect(setup < plain);
+    // Still usable when it's all there is.
+    try testing.expect(setup > std.math.minInt(i32));
+}
+
+test "scoreWindowsCandidate: nw.exe preferred for RPGM MV layouts" {
+    try testing.expect(scoreWindowsCandidate("nw.exe", 0, "www").? >
+        scoreWindowsCandidate("other.exe", 0, "www").?);
+}
+
+test "scoreWindowsCandidate: Ren'Py ships .sh and .exe together — .exe is the only candidate" {
+    // The exact shape from the Adverse Effect bug report.
+    try testing.expect(scoreWindowsCandidate("AdverseEffect.sh", 1, "Adverse Effect") == null);
+    try testing.expect(scoreWindowsCandidate("AdverseEffect.exe", 1, "Adverse Effect") != null);
+}
+
+// --- hostile inputs -------------------------------------------------
+
+test "hostile: launcher scoring survives adversarial names" {
+    // Nothing here may crash or be chosen over a real game binary.
+    try std.testing.expect(scoreWindowsCandidate("", 0, "dir") == null);
+    try std.testing.expect(scoreWindowsCandidate(".exe", 0, "dir") != null); // odd but a real PE name
+    try std.testing.expect(scoreWindowsCandidate("Game.EXE", 0, "Game") != null); // case
+    try std.testing.expect(scoreWindowsCandidate("UNINS000.EXE", 0, "Game") == null); // case-insensitive deny
+    try std.testing.expect(scoreWindowsCandidate("Game.exe.bak", 0, "Game") == null); // not an exe
+    // A 300-char name must not overflow anything.
+    var long: [300]u8 = @splat('a');
+    try std.testing.expect(scoreWindowsCandidate(&long, 0, "dir") == null);
+    // Real game beats installer-ish sibling.
+    const game = scoreWindowsCandidate("MyGame.exe", 0, "MyGame").?;
+    const setup = scoreWindowsCandidate("setup.exe", 0, "MyGame").?;
+    try std.testing.expect(game > setup);
+}
+
+test "hostile: baseNameAnySep on degenerate paths" {
+    try std.testing.expectEqualStrings("", baseNameAnySep(""));
+    try std.testing.expectEqualStrings("", baseNameAnySep("///"));
+    try std.testing.expectEqualStrings("", baseNameAnySep("\\\\\\"));
+    try std.testing.expectEqualStrings("x", baseNameAnySep("a/b\\c/x"));
+    try std.testing.expectEqualStrings("C:", baseNameAnySep("C:"));
+}
+
+test "baseNameAnySep: handles both separators and trailing slashes" {
+    try testing.expectEqualStrings("final", baseNameAnySep("C:/games/181313/final"));
+    try testing.expectEqualStrings("final", baseNameAnySep("C:\\games\\181313\\final"));
+    try testing.expectEqualStrings("final", baseNameAnySep("C:\\games\\181313\\final\\"));
+    try testing.expectEqualStrings("final", baseNameAnySep("final"));
+    try testing.expectEqualStrings("", baseNameAnySep("/"));
+}
+
+test "stemOf: strips only the last extension" {
+    try testing.expectEqualStrings("Game", stemOf("Game.exe"));
+    try testing.expectEqualStrings("Game.v1.2", stemOf("Game.v1.2.exe"));
+    try testing.expectEqualStrings("noext", stemOf("noext"));
+}
 
 test "expandSavesPath: $HOME substitution" {
     const got = try expandSavesPath(testing.allocator, "$HOME/.renpy/save", "/games/14014/.f69-home");
