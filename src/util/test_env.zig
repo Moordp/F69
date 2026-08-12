@@ -49,6 +49,31 @@ fn tempBase(alloc: std.mem.Allocator) error{OutOfMemory}![]u8 {
 
 const sep = if (builtin.os.tag == .windows) "\\" else "/";
 
+// mingw libc's directory-create — one arg, no mode. Used on Windows instead
+// of std.Io.Dir.createDirPath, which is the documented std.Io parker there
+// (see util/atomic_io.zig header + the 2026-08-12 uiscale-persist trace).
+extern "c" fn _mkdir(path: [*:0]const u8) c_int;
+
+/// Best-effort `mkdir -p` via libc for an ABSOLUTE Windows path. Failures
+/// (including already-exists) are ignored — the following fopen surfaces a
+/// real problem with a clearer error.
+fn winMkdirP(path: []const u8) void {
+    var buf: [1024:0]u8 = undefined;
+    if (path.len >= buf.len) return;
+    var i: usize = 0;
+    while (i < path.len) : (i += 1) {
+        const c = path[i];
+        buf[i] = if (c == '/') '\\' else c;
+        if ((c == '/' or c == '\\') and i > 2) { // skip the drive root "C:\"
+            buf[i] = 0;
+            _ = _mkdir(&buf);
+            buf[i] = '\\';
+        }
+    }
+    buf[path.len] = 0;
+    _ = _mkdir(&buf);
+}
+
 pub const TestEnv = struct {
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -78,8 +103,19 @@ pub const TestEnv = struct {
         const io = io_threaded.io();
 
         // Random 8 hex chars so concurrent test runs don't collide.
+        // PRNG seeded from clock+ASLR, NOT io.randomSecure — no std.Io op
+        // before the first test body on Windows (any of them can park), and
+        // this is a tmpdir nonce, not key material.
+        // Seed: per-process ASLR (global's address) + per-init counter.
+        // Distinct across processes AND across inits in one process — all a
+        // tmpdir nonce needs.
+        const Seed = struct {
+            var counter: u64 = 0;
+        };
+        Seed.counter +%= 0x9E3779B97F4A7C15;
         var nonce_buf: [4]u8 = undefined;
-        io.randomSecure(&nonce_buf) catch io.random(&nonce_buf);
+        var prng = std.Random.DefaultPrng.init(@intFromPtr(&Seed.counter) +% Seed.counter);
+        prng.random().bytes(&nonce_buf);
 
         const base = try tempBase(alloc);
         defer alloc.free(base);
@@ -90,8 +126,13 @@ pub const TestEnv = struct {
         );
         errdefer alloc.free(root);
 
-        std.Io.Dir.cwd().deleteTree(io, root) catch {};
-        try std.Io.Dir.cwd().createDirPath(io, root);
+        if (builtin.os.tag == .windows) {
+            // libc mkdir; the nonce guarantees a fresh name so no pre-clean.
+            winMkdirP(root);
+        } else {
+            std.Io.Dir.cwd().deleteTree(io, root) catch {};
+            try std.Io.Dir.cwd().createDirPath(io, root);
+        }
 
         return .{
             .alloc = alloc,
@@ -102,7 +143,12 @@ pub const TestEnv = struct {
     }
 
     pub fn deinit(self: *TestEnv) void {
-        std.Io.Dir.cwd().deleteTree(self.io, self.root) catch {};
+        // Windows: deleteTree walks the tree via std.Io — park risk. The
+        // nonce'd dirs live under %TEMP%; leaking them is the lesser evil
+        // and the OS temp cleanup collects them eventually.
+        if (builtin.os.tag != .windows) {
+            std.Io.Dir.cwd().deleteTree(self.io, self.root) catch {};
+        }
         self.alloc.free(self.root);
         self.io_threaded.deinit();
     }
@@ -117,6 +163,18 @@ pub const TestEnv = struct {
     pub fn writeFile(self: *TestEnv, rel: []const u8, bytes: []const u8) !void {
         const full = try std.fmt.allocPrint(self.alloc, "{s}/{s}", .{ self.root, rel });
         defer self.alloc.free(full);
+        if (builtin.os.tag == .windows) {
+            // libc all the way — see the module header note on the std.Io park.
+            if (std.fs.path.dirname(full)) |d| winMkdirP(d);
+            var pz_buf: [1024]u8 = undefined;
+            const pz = std.fmt.bufPrintZ(&pz_buf, "{s}", .{full}) catch return error.NameTooLong;
+            const f = std.c.fopen(pz.ptr, "wb") orelse return error.FileNotFound;
+            defer _ = std.c.fclose(f);
+            if (bytes.len > 0 and std.c.fwrite(bytes.ptr, 1, bytes.len, f) != bytes.len) {
+                return error.WriteFailed;
+            }
+            return;
+        }
         if (std.fs.path.dirname(full)) |d| try std.Io.Dir.cwd().createDirPath(self.io, d);
         var f = try std.Io.Dir.cwd().createFile(self.io, full, .{ .truncate = true });
         defer f.close(self.io);
@@ -138,6 +196,10 @@ pub const TestEnv = struct {
     pub fn mkdirP(self: *TestEnv, rel: []const u8) !void {
         const full = try std.fmt.allocPrint(self.alloc, "{s}/{s}", .{ self.root, rel });
         defer self.alloc.free(full);
+        if (builtin.os.tag == .windows) {
+            winMkdirP(full);
+            return;
+        }
         try std.Io.Dir.cwd().createDirPath(self.io, full);
     }
 };

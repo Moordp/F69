@@ -42,6 +42,29 @@ pub fn writeFileAtomic(io: Io, path: []const u8, bytes: []const u8) Error!void {
     // in place trades the atomicity window for a file that can actually be read
     // back. Revisit once the read path is fixed, ideally via ReplaceFileW which
     // is the real Win32 equivalent of an atomic replace.
+    // WINDOWS: the whole write goes through libc — the std.Io write path
+    // (createFile/writer) is where the lean headless test exe parks
+    // deterministically on the VM (2026-08-12, uiscale-persist), same std.Io
+    // defect family as the reads shimmed in zon_loader/util_setting. libc
+    // I/O has no async machinery to park; windows-gnu always links mingw
+    // libc. Write-in-place was already the Windows semantic here (see the
+    // header note); ReplaceFileW-based atomicity stays future work.
+    if (builtin.os.tag == .windows) {
+        var pz_buf: [4096]u8 = undefined;
+        const pz = std.fmt.bufPrintZ(&pz_buf, "{s}", .{path}) catch return Error.WriteFailed;
+        const f = std.c.fopen(pz.ptr, "wb") orelse blk: {
+            // Parent dir likely missing — build it, then retry once.
+            if (std.fs.path.dirname(path)) |dir| {
+                std.Io.Dir.cwd().createDirPath(io, dir) catch return Error.WriteFailed;
+            }
+            break :blk std.c.fopen(pz.ptr, "wb") orelse return Error.WriteFailed;
+        };
+        defer _ = std.c.fclose(f);
+        if (bytes.len > 0 and std.c.fwrite(bytes.ptr, 1, bytes.len, f) != bytes.len) {
+            return Error.WriteFailed;
+        }
+        return;
+    }
     var tmp_buf: [4096]u8 = undefined;
     const tmp_path = if (builtin.os.tag == .windows) path else blk: {
         break :blk std.fmt.bufPrint(&tmp_buf, "{s}.tmp", .{path}) catch return Error.WriteFailed;
