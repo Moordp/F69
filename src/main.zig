@@ -665,6 +665,21 @@ pub fn main(init: std.process.Init) !void {
     // Window backend — created + owned here so the `ui` module stays
     // backend-agnostic (rebuildable against dvui's testing backend for
     // headless tests). Must outlive the window dvui builds from it.
+    // SDL's Wayland backend reads DESKTOP_STARTUP_ID at window creation to
+    // hand off focus via xdg-activation. On Fedora 44 that path segfaults:
+    // launching from a terminal or the .desktop entry (both of which set the
+    // variable) died with SIGSEGV, while running /usr/bin/f69 directly — no
+    // variable — worked. Reported by a user with `env -u DESKTOP_STARTUP_ID`
+    // as the workaround; doing it here covers both launch routes on every
+    // distro instead of only patching the desktop entry. All we lose is the
+    // startup-notification focus handoff.
+    //
+    // This masks what is almost certainly an upstream SDL bug rather than
+    // fixing it — worth reporting once there's a minimal repro.
+    if (builtin.os.tag != .windows) {
+        _ = std.c.unsetenv("DESKTOP_STARTUP_ID");
+    }
+
     SDLBackend.enableSDLLogging();
     var backend = SDLBackend.initWindow(.{
         .io = init.io,
