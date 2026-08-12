@@ -13,6 +13,9 @@ pub const DownloadLink = dom.DownloadLink;
 pub const BookmarkEntry = dom.BookmarkEntry;
 
 pub const Client = cli.Client;
+/// Login/session parsing. Exposed so the test suite can exercise the pure
+/// parsers against hostile server responses without a network.
+pub const auth = @import("auth.zig");
 pub const Service = svc.Service;
 pub const Credentials = auth_mod.Credentials;
 

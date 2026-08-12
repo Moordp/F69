@@ -107,6 +107,17 @@ fn looksLikeVersion(seg: []const u8) bool {
     return false;
 }
 
+/// Strip a leading `v` / `V` so display code can render `"v{s}"`
+/// unconditionally without producing `vv1.2.4` for the many F95 OPs who
+/// already publish the prefix themselves. Only strips when a digit
+/// follows, so a version that legitimately starts with a letter
+/// (`"Final"`, `"Very Early Build"`) is left alone. Returns a slice
+/// into `s`.
+pub fn stripVPrefix(s: []const u8) []const u8 {
+    if (s.len >= 2 and (s[0] == 'v' or s[0] == 'V') and std.ascii.isDigit(s[1])) return s[1..];
+    return s;
+}
+
 /// Total ordering on version strings. Drives "newest install on top"
 /// in the picker. Best-effort — F95 versions aren't strictly
 /// orderable (you can encounter `Ep11 v0.20` vs `Final` vs `0.21a`
@@ -761,4 +772,17 @@ fn fuzzSeed(comptime payload: []const u8) []const u8 {
         };
     };
     return &S.entry;
+}
+
+test "stripVPrefix: avoids the vv1.2.4 double prefix" {
+    try std.testing.expectEqualStrings("1.2.4", stripVPrefix("v1.2.4"));
+    try std.testing.expectEqualStrings("1.2.4", stripVPrefix("V1.2.4"));
+    try std.testing.expectEqualStrings("1.2.4", stripVPrefix("1.2.4"));
+}
+
+test "stripVPrefix: leaves non-numeric versions alone" {
+    try std.testing.expectEqualStrings("Final", stripVPrefix("Final"));
+    try std.testing.expectEqualStrings("Very Early", stripVPrefix("Very Early"));
+    try std.testing.expectEqualStrings("v", stripVPrefix("v"));
+    try std.testing.expectEqualStrings("", stripVPrefix(""));
 }

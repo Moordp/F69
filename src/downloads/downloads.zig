@@ -17,6 +17,8 @@ pub const Manager = mgr.Manager;
 pub const Handler = hnd.Handler;
 
 pub const Aria2Daemon = aria2_rpc.Daemon;
+/// aria2 command-line construction — covered by the test suite.
+pub const aria2_args = @import("aria2_args.zig");
 pub const Aria2Status = aria2_rpc.Status;
 
 pub const Format = arc.Format;

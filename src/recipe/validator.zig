@@ -83,10 +83,17 @@ const SafePathVisitor = struct {
 
 /// Reject `..` segments and absolute paths in recipe-driven file ops —
 /// install steps must stay within the install dir.
-fn checkSafePath(p: []const u8) errs.Error!void {
+pub fn checkSafePath(p: []const u8) errs.Error!void {
     if (p.len == 0) return errs.Error.MissingRequiredField;
-    if (p[0] == '/') return errs.Error.UnsafePath;
-    var it = std.mem.splitScalar(u8, p, '/');
+    // BOTH separators. This used to split on '/' only, so `..\\windows`
+    // sailed straight through — a recipe could escape the install directory on
+    // Windows, where the backslash IS the separator. Recipes are downloadable
+    // content, so this is the boundary that keeps a malicious one from writing
+    // outside the game folder.
+    if (p[0] == '/' or p[0] == '\\') return errs.Error.UnsafePath;
+    // Drive-absolute (`C:\\...`, `C:/...`) is absolute too.
+    if (p.len >= 2 and p[1] == ':' and std.ascii.isAlphabetic(p[0])) return errs.Error.UnsafePath;
+    var it = std.mem.splitAny(u8, p, "/\\");
     while (it.next()) |seg| {
         if (std.mem.eql(u8, seg, "..")) return errs.Error.UnsafePath;
     }
@@ -103,6 +110,20 @@ test "checkSafePath rejects escapes" {
     try std.testing.expectError(errs.Error.UnsafePath, checkSafePath("../../home"));
     try std.testing.expectError(errs.Error.UnsafePath, checkSafePath("game/../../etc"));
     try checkSafePath("./game/data");
+}
+
+test "checkSafePath rejects Windows-shaped escapes" {
+    // Found by the hostile suite: only '/' was treated as a separator, so every
+    // one of these was ACCEPTED and could write outside the install dir.
+    try std.testing.expectError(errs.Error.UnsafePath, checkSafePath("..\\windows"));
+    try std.testing.expectError(errs.Error.UnsafePath, checkSafePath("game\\..\\..\\windows"));
+    try std.testing.expectError(errs.Error.UnsafePath, checkSafePath("\\windows\\system32"));
+    try std.testing.expectError(errs.Error.UnsafePath, checkSafePath("C:\\windows"));
+    try std.testing.expectError(errs.Error.UnsafePath, checkSafePath("C:/windows"));
+    // Mixed separators must not sneak a traversal past the splitter either.
+    try std.testing.expectError(errs.Error.UnsafePath, checkSafePath("game/..\\..\\etc"));
+    // Normal Windows-style relative paths still pass.
+    try checkSafePath("game\\data\\file.rpa");
 }
 
 test "checkInstallStep accepts extract_inner with safe paths" {

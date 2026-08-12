@@ -65,3 +65,7 @@ test {
     _ = @import("validator.zig");
     _ = @import("zon_loader.zig");
 }
+
+/// Path-safety checks, used by the hostile test suite to assert that recipe
+/// paths cannot escape the install directory.
+pub const validator = @import("validator.zig");
