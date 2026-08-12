@@ -293,7 +293,7 @@ fn renderAddSplitButton(frame: *Frame) void {
     var bar = dvui.menu(@src(), .horizontal, .{ .id_extra = 0xADD });
     defer bar.deinit();
 
-    if (components.iconButton(@src(), "Add", entypo.plus, .{ .style = .highlight })) {
+    if (components.iconButton(@src(), "Add", entypo.plus, .{ .style = .highlight, .tag = "lib-add" })) {
         state.screen = .import_urls;
     }
 
@@ -413,7 +413,7 @@ fn renderBookmarksProgress(frame: *Frame) void {
             };
             _ = components.iconButton(@src(), "Cancelling\u{2026}", entypo.cross, dim);
         } else {
-            if (components.iconButton(@src(), "Cancel", entypo.cross, .{ .style = .err })) {
+            if (components.iconButton(@src(), "Cancel", entypo.cross, .{ .style = .err, .tag = "lib-sync-cancel" })) {
                 actions.cancelBookmarks(frame);
             }
         }
@@ -784,10 +784,10 @@ fn sidebar(frame: *Frame) void {
         if (dvui.expander(@src(), lbl, .{}, .{ .expand = .horizontal })) {
             var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
             defer hbox.deinit();
-            if (style.button(@src(), "Any", .{}, .{})) state.filters.min_rating = null;
-            if (style.button(@src(), "3+", .{}, .{})) state.filters.min_rating = 3.0;
-            if (style.button(@src(), "4+", .{}, .{})) state.filters.min_rating = 4.0;
-            if (style.button(@src(), "4.5+", .{}, .{})) state.filters.min_rating = 4.5;
+            if (style.button(@src(), "Any", .{}, .{ .tag = "flt-rating-any" })) state.filters.min_rating = null;
+            if (style.button(@src(), "3+", .{}, .{ .tag = "flt-rating-3" })) state.filters.min_rating = 3.0;
+            if (style.button(@src(), "4+", .{}, .{ .tag = "flt-rating-4" })) state.filters.min_rating = 4.0;
+            if (style.button(@src(), "4.5+", .{}, .{ .tag = "flt-rating-45" })) state.filters.min_rating = 4.5;
         }
     }
 
@@ -802,11 +802,11 @@ fn sidebar(frame: *Frame) void {
         if (dvui.expander(@src(), lbl, .{}, .{ .expand = .horizontal })) {
             var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
             defer hbox.deinit();
-            if (style.button(@src(), "Any", .{}, .{})) state.filters.min_user_rating = null;
-            if (style.button(@src(), "2+", .{}, .{})) state.filters.min_user_rating = 2.0;
-            if (style.button(@src(), "3+", .{}, .{})) state.filters.min_user_rating = 3.0;
-            if (style.button(@src(), "4+", .{}, .{})) state.filters.min_user_rating = 4.0;
-            if (style.button(@src(), "5", .{}, .{})) state.filters.min_user_rating = 5.0;
+            if (style.button(@src(), "Any", .{}, .{ .tag = "flt-urating-any" })) state.filters.min_user_rating = null;
+            if (style.button(@src(), "2+", .{}, .{ .tag = "flt-urating-2" })) state.filters.min_user_rating = 2.0;
+            if (style.button(@src(), "3+", .{}, .{ .tag = "flt-urating-3" })) state.filters.min_user_rating = 3.0;
+            if (style.button(@src(), "4+", .{}, .{ .tag = "flt-urating-4" })) state.filters.min_user_rating = 4.0;
+            if (style.button(@src(), "5", .{}, .{ .tag = "flt-urating-5" })) state.filters.min_user_rating = 5.0;
         }
     }
 
@@ -1082,7 +1082,7 @@ fn renderTagCheckboxFilter(state: *State) void {
         tagListCount(sliceUntilNul(&state.filters.tag_exclude_buf)) > 0)
     {
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
-        if (style.button(@src(), "Clear tag filters", .{}, .{ .expand = .horizontal })) {
+        if (style.button(@src(), "Clear tag filters", .{}, .{ .expand = .horizontal, .tag = "flt-tags-clear" })) {
             @memset(&state.filters.tag_include_buf, 0);
             @memset(&state.filters.tag_exclude_buf, 0);
         }
@@ -2038,7 +2038,9 @@ fn renderCard(frame: *Frame, g: *const library.Game, layout: GridLayout) void {
         .margin = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     };
     if (g.latest_version) |v| {
-        dvui.label(@src(), "v{s}", .{v}, meta_opts);
+        // stripVPrefix: plenty of OPs publish "v0.20" already, and this
+        // used to render it as "vv0.20".
+        dvui.label(@src(), "v{s}", .{version_mod.stripVPrefix(v)}, meta_opts);
     }
 
     _ = dvui.spacer(@src(), .{ .expand = .horizontal });

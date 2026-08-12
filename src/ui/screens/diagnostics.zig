@@ -6,6 +6,7 @@ const tokens = @import("ui_tokens");
 const entypo = dvui.entypo;
 const build_options = @import("build_options");
 const installer_mod = @import("installer");
+const version_mod = @import("util_version");
 
 const types = @import("../types.zig");
 const components = @import("../components.zig");
@@ -149,7 +150,7 @@ pub fn diagnosticsScreen(frame: *Frame) !bool {
             dvui.labelNoFmt(@src(), header, .{}, .{ .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
             for (installs) |i| {
                 var ib: [320]u8 = undefined;
-                const line = std.fmt.bufPrint(&ib, "    v{s} at {s} (installed_at={d})", .{ i.version, i.install_path, i.installed_at }) catch continue;
+                const line = std.fmt.bufPrint(&ib, "    v{s} at {s} (installed_at={d})", .{ version_mod.stripVPrefix(i.version), i.install_path, i.installed_at }) catch continue;
                 dvui.labelNoFmt(@src(), line, .{}, .{});
             }
         }

@@ -154,6 +154,9 @@ pub fn iconButton(
     tvg: []const u8,
     opts: dvui.Options,
 ) bool {
+    // Widget census for the test sweep — see style.zig.
+    style.widgets_built += 1;
+    if (opts.tag != null) style.widgets_tagged += 1;
     const defaults: dvui.Options = .{
         .padding = .{ .x = 10, .y = 6, .w = 10, .h = 6 },
     };
@@ -200,6 +203,8 @@ pub fn iconOnly(
     tvg: []const u8,
     opts: dvui.Options,
 ) bool {
+    style.widgets_built += 1;
+    if (opts.tag != null) style.widgets_tagged += 1;
     // Pass through gravity / margin / padding / colors so callers
     // can vertical-align the button in a toolbar row, etc. We still
     // override `min_size_content` to ICON_SIZE for visual consistency

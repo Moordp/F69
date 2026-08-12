@@ -984,7 +984,7 @@ fn renderGameConfig(frame: *Frame, game: *library.Game) void {
         });
         if (game.pinned_version) |pv| {
             var pbuf: [80]u8 = undefined;
-            const lbl = std.fmt.bufPrint(&pbuf, "Pinned to v{s}", .{pv}) catch "Pinned";
+            const lbl = std.fmt.bufPrint(&pbuf, "Pinned to v{s}", .{version_mod.stripVPrefix(pv)}) catch "Pinned";
             dvui.labelNoFmt(@src(), lbl, .{}, .{ .gravity_y = 0.5 });
             _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
             if (components.iconButton(@src(), "Unpin", entypo.cross, .{ .gravity_y = 0.5 })) {
@@ -994,7 +994,7 @@ fn renderGameConfig(frame: *Frame, game: *library.Game) void {
             }
         } else if (game.latest_version) |lv| {
             var pbuf: [80]u8 = undefined;
-            const lbl = std.fmt.bufPrint(&pbuf, "Pin to v{s}", .{lv}) catch "Pin";
+            const lbl = std.fmt.bufPrint(&pbuf, "Pin to v{s}", .{version_mod.stripVPrefix(lv)}) catch "Pin";
             if (components.iconButton(@src(), lbl, entypo.bookmark, .{ .gravity_y = 0.5 })) {
                 saveOrToast(frame, "pin", frame.lib.setPinnedVersion(game.f95_thread_id, lv));
                 game.pinned_version = frame.lib.alloc.dupe(u8, lv) catch null;

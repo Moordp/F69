@@ -17,6 +17,7 @@ const dvui = @import("dvui");
 const library = @import("library");
 const recipe = @import("recipe");
 const file_picker = @import("util_file_picker");
+const version_mod = @import("util_version");
 
 const types = @import("../types.zig");
 const owned_types = @import("../owned.zig");
@@ -432,12 +433,12 @@ fn renderListRow(
                 if (m.recipe_idx) |ri| {
                     if (ri < cache.mods.len) {
                         const v = cache.mods[ri].recipe.version;
-                        break :blk std.fmt.bufPrint(&version_buf, "v{s} · {s}", .{ v, status.label() }) catch status.label();
+                        break :blk std.fmt.bufPrint(&version_buf, "v{s} · {s}", .{ version_mod.stripVPrefix(v), status.label() }) catch status.label();
                     }
                 }
                 break :blk status.label();
             },
-            .orphan_recipe => |r| std.fmt.bufPrint(&version_buf, "v{s} · needs archive", .{cache.mods[r.recipe_idx].recipe.version}) catch "needs archive",
+            .orphan_recipe => |r| std.fmt.bufPrint(&version_buf, "v{s} · needs archive", .{version_mod.stripVPrefix(cache.mods[r.recipe_idx].recipe.version)}) catch "needs archive",
         };
         dvui.labelNoFmt(@src(), sub, .{}, .{ .color_text = helpTextColor() });
     }
@@ -559,19 +560,19 @@ fn formatSubtitle(
             const sha_prefix = mf.id[0..@min(12, mf.id.len)];
             if (mf.size_bytes >= 1024 * 1024) {
                 return std.fmt.bufPrint(buf, "v{s} · {d:.1} MiB · sha:{s}...", .{
-                    version,
+                    version_mod.stripVPrefix(version),
                     @as(f64, @floatFromInt(mf.size_bytes)) / (1024.0 * 1024.0),
                     sha_prefix,
                 }) catch "";
             }
             return std.fmt.bufPrint(buf, "v{s} · {d:.1} KiB · sha:{s}...", .{
-                version,
+                version_mod.stripVPrefix(version),
                 @as(f64, @floatFromInt(mf.size_bytes)) / 1024.0,
                 sha_prefix,
             }) catch "";
         },
         .orphan_recipe => |r| {
-            return std.fmt.bufPrint(buf, "v{s} · no archive linked yet", .{cache.mods[r.recipe_idx].recipe.version}) catch "";
+            return std.fmt.bufPrint(buf, "v{s} · no archive linked yet", .{version_mod.stripVPrefix(cache.mods[r.recipe_idx].recipe.version)}) catch "";
         },
     }
 }

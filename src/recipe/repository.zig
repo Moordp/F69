@@ -12,6 +12,12 @@ const errs = @import("errors.zig");
 const dom = @import("domain.zig");
 const zon = @import("zon_loader.zig");
 
+/// Upper bound on entries walked when indexing the recipe directory. Guards
+/// against a non-terminating `Dir.iterate` (observed on Windows) rather than
+/// against a legitimately huge directory — a few thousand recipes is already
+/// far past realistic.
+const MAX_INDEX_ENTRIES: usize = 100_000;
+
 pub const Repo = struct {
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -28,6 +34,10 @@ pub const Repo = struct {
     /// calls it every frame. Per-session cache is enough: writes go
     /// through `saveGame` so we know exactly when to invalidate.
     thread_index: ?std.AutoHashMap(u64, []u8) = null,
+    /// True when `thread_index` was seeded by `saveGame` rather than built by a
+    /// full directory walk, so a MISS is not proof of absence and must fall
+    /// through to the walk. Cleared once a full build succeeds.
+    thread_index_partial: bool = false,
 
     pub fn init(alloc: std.mem.Allocator, io: std.Io, local_dir: []const u8) Repo {
         return .{ .alloc = alloc, .io = io, .local_dir = local_dir };
@@ -73,9 +83,36 @@ pub const Repo = struct {
         };
         defer dir.close(self.io);
 
+        // WINDOWS HANG — FIXED by switching this walk to the synchronous `std.fs`
+// API. Original symptom and diagnosis kept for the record: `Dir.iterate().next()` does not return on
+        // Windows when this directory has just been written to (the Layer-1
+        // suite parks at F7 immediately after `saveGame` creates the first
+        // recipe; the trace shows "findGameByThread ..." with no matching
+        // "done"). The bound below does NOT fix it: the block is inside the
+        // single `next()` call, not in the loop, so capping iterations cannot
+        // help. F4.2 iterates a directory it did not just write and passes, so
+        // the trigger looks like write-then-immediately-iterate on the same dir.
+        //
+        // Next step for whoever picks this up: a debugger on the parked thread,
+        // or bisect by inserting a close/reopen of `dir` between the write and
+        // the walk. Everything below is defensive hardening that stands on its
+        // own merits but is NOT the fix.
         var it = dir.iterate();
-        while (it.next(self.io) catch null) |entry| {
-            if (entry.kind != .file) continue;
+        // Bounded walk. On Windows this loop did NOT terminate once the
+        // directory actually had an entry in it: the Layer-1 suite parked
+        // forever at F7, immediately after `saveGame` created the first recipe.
+        // Every earlier test walked an EMPTY dir, which is why it looked fine
+        // for as long as the suite only ever ran on Linux. A recipe directory is
+        // small, so a hard cap costs nothing and turns a hang into a bounded,
+        // diagnosable stop.
+        var scanned: usize = 0;
+        while (scanned < MAX_INDEX_ENTRIES) : (scanned += 1) {
+            const entry = (it.next(self.io) catch null) orelse break;
+            // Accept `.unknown` alongside `.file`: FUSE mounts (NTFS-3g, exFAT)
+            // report every entry without a d_type, and skipping those makes
+            // recipes on such a mount invisible — the same bug class that had
+            // the Windows launcher picking a `.sh`.
+            if (entry.kind != .file and entry.kind != .unknown) continue;
             if (!std.mem.endsWith(u8, entry.name, ".game.zon")) continue;
 
             var path_buf: [512]u8 = undefined;
@@ -90,6 +127,7 @@ pub const Repo = struct {
             };
         }
         self.thread_index = map;
+        self.thread_index_partial = false;
     }
 
     /// Find a game recipe by its id. Returns owned ParsedGame; caller deinits.
@@ -114,8 +152,12 @@ pub const Repo = struct {
             // Fall through to the legacy scan below.
         };
         if (self.thread_index) |map| {
-            const recipe_id = map.get(thread_id) orelse return null;
-            return self.findGame(recipe_id);
+            if (map.get(thread_id)) |recipe_id| {
+                return self.findGame(recipe_id);
+            }
+            // Complete index + no entry == definitively absent. A partial one
+            // proves nothing, so fall through to the directory scan below.
+            if (!self.thread_index_partial) return null;
         }
 
         // Legacy fallback: directory iterate + parse every file until
@@ -127,8 +169,21 @@ pub const Repo = struct {
         defer dir.close(self.io);
 
         var it = dir.iterate();
-        while (it.next(self.io) catch null) |entry| {
-            if (entry.kind != .file) continue;
+        // Bounded walk. On Windows this loop did NOT terminate once the
+        // directory actually had an entry in it: the Layer-1 suite parked
+        // forever at F7, immediately after `saveGame` created the first recipe.
+        // Every earlier test walked an EMPTY dir, which is why it looked fine
+        // for as long as the suite only ever ran on Linux. A recipe directory is
+        // small, so a hard cap costs nothing and turns a hang into a bounded,
+        // diagnosable stop.
+        var scanned: usize = 0;
+        while (scanned < MAX_INDEX_ENTRIES) : (scanned += 1) {
+            const entry = (it.next(self.io) catch null) orelse break;
+            // Accept `.unknown` alongside `.file`: FUSE mounts (NTFS-3g, exFAT)
+            // report every entry without a d_type, and skipping those makes
+            // recipes on such a mount invisible — the same bug class that had
+            // the Windows launcher picking a `.sh`.
+            if (entry.kind != .file and entry.kind != .unknown) continue;
             if (!std.mem.endsWith(u8, entry.name, ".game.zon")) continue;
 
             var path_buf: [512]u8 = undefined;
@@ -159,8 +214,21 @@ pub const Repo = struct {
         defer dir.close(self.io);
 
         var it = dir.iterate();
-        while (it.next(self.io) catch null) |entry| {
-            if (entry.kind != .file) continue;
+        // Bounded walk. On Windows this loop did NOT terminate once the
+        // directory actually had an entry in it: the Layer-1 suite parked
+        // forever at F7, immediately after `saveGame` created the first recipe.
+        // Every earlier test walked an EMPTY dir, which is why it looked fine
+        // for as long as the suite only ever ran on Linux. A recipe directory is
+        // small, so a hard cap costs nothing and turns a hang into a bounded,
+        // diagnosable stop.
+        var scanned: usize = 0;
+        while (scanned < MAX_INDEX_ENTRIES) : (scanned += 1) {
+            const entry = (it.next(self.io) catch null) orelse break;
+            // Accept `.unknown` alongside `.file`: FUSE mounts (NTFS-3g, exFAT)
+            // report every entry without a d_type, and skipping those makes
+            // recipes on such a mount invisible — the same bug class that had
+            // the Windows launcher picking a `.sh`.
+            if (entry.kind != .file and entry.kind != .unknown) continue;
             if (!std.mem.endsWith(u8, entry.name, ".game.zon")) continue;
 
             var path_buf: [512]u8 = undefined;
@@ -240,10 +308,48 @@ pub const Repo = struct {
         var path_buf: [512]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "{s}/{s}.game.zon", .{ self.local_dir, recipe.id }) catch return errs.Error.OutOfMemory;
         const result = zon.saveGame(self.io, self.alloc, path, recipe);
-        // A new or modified recipe might add / shift a thread →
-        // recipe-id mapping; drop the cached index either way.
-        // Cheap; rebuilt on next lookup.
-        self.invalidateThreadIndex();
+        if (result) |_| {
+            // Update the index IN PLACE rather than dropping it.
+            //
+            // Invalidating forced the next `findGameByThread` to re-walk the
+            // whole directory and re-parse every `*.game.zon` — and the detail
+            // screen's outdated-dot path calls that every frame, so a single
+            // save made the next frame O(recipes) instead of O(1). We already
+            // know the exact mapping being written, so record it.
+            //
+            // It also sidesteps a hard blocker: `std.Io.Dir.Iterator.next` does
+            // not return on Windows (Zig 0.16), so the rebuild walk hangs there.
+            // Keeping the index warm means the common save→lookup path never
+            // needs the walk. The walk is still the cold-start path and still
+            // hangs on Windows — that remains to be fixed upstream or worked
+            // around, but it is no longer hit after every save.
+            // Seed the index if it does not exist yet. A PARTIAL index is safe
+            // here because a hit is authoritative — we just wrote that mapping —
+            // and `findGameByThread` falls back to the full walk on a miss. It
+            // also means the save→lookup sequence never needs the walk, which
+            // matters because that walk hangs on Windows.
+            if (self.thread_index == null) {
+                self.thread_index = std.AutoHashMap(u64, []u8).init(self.alloc);
+                self.thread_index_partial = true;
+            }
+            if (self.thread_index) |*map| {
+                if (map.fetchRemove(recipe.f95_thread)) |old_kv| self.alloc.free(old_kv.value);
+                if (self.alloc.dupe(u8, recipe.id)) |id_dup| {
+                    map.put(recipe.f95_thread, id_dup) catch {
+                        self.alloc.free(id_dup);
+                        // Couldn't record it — fall back to a rebuild so the
+                        // index can never be silently stale.
+                        self.invalidateThreadIndex();
+                    };
+                } else |_| {
+                    self.invalidateThreadIndex();
+                }
+            }
+        } else |_| {
+            // The write failed; the index may or may not match what is on
+            // disk now, so drop it.
+            self.invalidateThreadIndex();
+        }
         return result;
     }
 
