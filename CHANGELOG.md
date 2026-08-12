@@ -2,6 +2,29 @@
 
 All notable, user-facing changes. Dates are YYYY-MM-DD.
 
+## [0.12.0] - 2026-08-12
+
+### Windows
+- **Downloads now work out of the box** — the Windows package bundles
+  `aria2c.exe` (the download engine). Previously every clean Windows install
+  had downloads silently dead unless aria2 happened to be on PATH.
+- The launch pipeline, sandbox integration and settings flows are now covered
+  by an automated GUI test suite that runs natively on Windows — including
+  real process launches with and without Sandboxie. Several Windows-specific
+  bugs-in-waiting were fixed along the way (mis-picked launchers surface an
+  actionable message; a missing download engine fails cleanly with a hint).
+- Settings files and recipes are read via a more robust path on Windows,
+  sidestepping rare cases where a just-written file could stall the app.
+
+### Linux
+- **Fixed a crash on launch on Fedora** (and potentially other distros) when
+  started from a terminal or the applications menu — an SDL/Wayland
+  startup-notification interaction; launching now works from every route.
+
+### General
+- Recipe index scanning is bounded and reports partial results instead of
+  walking unbounded directory trees.
+
 ## [0.11.1] - 2026-07-29
 
 A Windows-focused fix release.
