@@ -4,33 +4,54 @@ All notable, user-facing changes. Dates are YYYY-MM-DD.
 
 ## [0.12.1] - 2026-08-12
 
-- Fixed the 0.12.0 release failing to build on every non-Windows platform
-  (portable, deb, rpm, AUR) — the Fedora launch-crash fix used a libc
-  binding that Zig 0.16 no longer exposes. No functional change beyond
-  making 0.12.0's fixes actually installable.
-
-## [0.12.0] - 2026-08-12
+Combined notes for 0.12.0 + 0.12.1. 0.12.0 failed to build on every
+non-Windows platform, so **0.12.1 is the release to install** — it contains
+everything below plus additional Windows freeze fixes.
 
 ### Windows
+- **Fixed games launching with the wrong file — the #1 reported Windows
+  bug.** The launcher auto-pick applied Linux rules on every OS, so a Ren'Py
+  game shipping both `Game.sh` and `Game.exe` got the `.sh` — which Windows
+  can't run: with Sandboxie enabled the launch died with `InvalidExe`, and
+  without it the spawn failed the same way. The picker is now OS-aware
+  (`.exe` > `.bat`/`.cmd` on Windows) and skips uninstallers, crash handlers
+  and bundled interpreters when choosing. Verified end-to-end on real
+  Windows, including through a real Sandboxie install.
+- **A Linux-only install now refuses to launch with a clear message**
+  ("Only a Linux launcher is in this install — re-download the Windows
+  build") instead of attempting a doomed spawn.
+- **Launch failures now explain themselves in the app**, not just the log —
+  e.g. "X is not a Windows executable (a Linux .sh / .AppImage?). Set the
+  launcher explicitly on the install if the auto-pick chose wrong." Every
+  install can pin its launcher explicitly as an escape hatch.
 - **Downloads now work out of the box** — the Windows package bundles
   `aria2c.exe` (the download engine). Previously every clean Windows install
-  had downloads silently dead unless aria2 happened to be on PATH.
-- The launch pipeline, sandbox integration and settings flows are now covered
-  by an automated GUI test suite that runs natively on Windows — including
-  real process launches with and without Sandboxie. Several Windows-specific
-  bugs-in-waiting were fixed along the way (mis-picked launchers surface an
-  actionable message; a missing download engine fails cleanly with a hint).
-- Settings files and recipes are read via a more robust path on Windows,
-  sidestepping rare cases where a just-written file could stall the app.
+  had downloads silently dead unless aria2 happened to be on PATH; and when
+  the engine is missing, queuing a download now fails promptly with a hint
+  instead of hanging.
+- **Fixed rare app freezes around just-saved files** *(0.12.1)* — reading a
+  recipe or setting immediately after writing it could hang the app forever
+  (a Zig 0.16 standard-library defect on Windows). These paths now use plain
+  C file I/O on Windows.
+- Sandboxie sees fully normalized command paths — mixed `/` and `\`
+  separators (`...\library/181313/final`) no longer reach `Start.exe`.
+- Sandboxed games get `USERPROFILE` redirected alongside `HOME`, so per-game
+  save isolation actually isolates on Windows.
+- All of the above is locked in by a new automated GUI test suite that runs
+  natively on Windows — including real process launches with and without
+  Sandboxie.
 
 ### Linux
 - **Fixed a crash on launch on Fedora** (and potentially other distros) when
   started from a terminal or the applications menu — an SDL/Wayland
   startup-notification interaction; launching now works from every route.
+  (This fix is what broke 0.12.0's build; 0.12.1 ships it correctly.)
 
 ### General
 - Recipe index scanning is bounded and reports partial results instead of
   walking unbounded directory trees.
+- 0.12.1 fixes 0.12.0 failing to compile on all non-Windows targets
+  (portable, deb, rpm, AUR).
 
 ## [0.11.1] - 2026-07-29
 
