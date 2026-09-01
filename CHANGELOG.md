@@ -2,6 +2,20 @@
 
 All notable, user-facing changes. Dates are YYYY-MM-DD.
 
+## [0.14.0] - 2026-09-01
+
+### Library
+- **Point f69 at a game you already have installed.** A new **⋯ → "Set
+  install folder…"** on the game's detail page lets you pick the folder the
+  game already lives in, so a game added without a download path (imported
+  from F95Checker, or a folder whose name didn't match on import) becomes
+  launchable — no re-downloading, no renaming folders to match.
+- **Fix or change a game's F95 thread from the ⋯ menu.** **"Set F95 thread
+  URL…"** takes a thread link or id and re-syncs from it. If it's a *different*
+  thread, the game — and everything attached to it (installs, mods, saves) — is
+  moved to the correct one. It refuses if that thread is already a separate
+  game in your library.
+
 ## [0.13.0] - 2026-09-01
 
 ### Windows
@@ -168,6 +182,7 @@ and making the app readable and reliable across distros.
   Nix), fuzz targets, and headless UI integration tests. CI actions moved off
   the deprecated Node 20 runtime.
 
+[0.14.0]: https://github.com/Moordp/F69/releases/tag/v0.14.0
 [0.13.0]: https://github.com/Moordp/F69/releases/tag/v0.13.0
 [0.12.1]: https://github.com/Moordp/F69/releases/tag/v0.12.1
 [0.11.1]: https://github.com/Moordp/F69/releases/tag/v0.11.1
