@@ -4,7 +4,9 @@ All notable, user-facing changes. Dates are YYYY-MM-DD.
 
 ## [0.14.1] - 2026-09-01
 
-### Set-your-own folders
+Combined notes for 0.13.0 – 0.14.1. **0.14.1 is the release to install.**
+
+### Set-your-own folders (new)
 Four things f69 normally places for you can now be pointed wherever you want —
 automatic by default, manual when you need it:
 - **Downloads folder** (Settings → Downloads) — put downloads on a bigger disk.
@@ -18,25 +20,17 @@ automatic by default, manual when you need it:
 
 The three Settings folders apply on restart.
 
-### Fixed
-- The Downloads settings page laid its sections out sideways / off-screen —
-  they now stack correctly.
-
-## [0.14.0] - 2026-09-01
-
-### Library
-- **Point f69 at a game you already have installed.** A new **⋯ → "Set
-  install folder…"** on the game's detail page lets you pick the folder the
-  game already lives in, so a game added without a download path (imported
-  from F95Checker, or a folder whose name didn't match on import) becomes
-  launchable — no re-downloading, no renaming folders to match.
-- **Fix or change a game's F95 thread from the ⋯ menu.** **"Set F95 thread
-  URL…"** takes a thread link or id and re-syncs from it. If it's a *different*
-  thread, the game — and everything attached to it (installs, mods, saves) — is
-  moved to the correct one. It refuses if that thread is already a separate
-  game in your library.
-
-## [0.13.0] - 2026-09-01
+### Games & installs
+- **Point f69 at a game you already have installed** (⋯ → *"Set install
+  folder…"*) — pick the folder the game already lives in, so a game added
+  without a download path (imported from F95Checker, or a folder whose name
+  didn't match on import) becomes launchable — no re-downloading, no renaming.
+- **Fix or change a game's F95 thread** (⋯ → *"Set F95 thread URL…"*) — takes a
+  thread link or id and re-syncs from it. A *different* thread moves the game —
+  and everything attached to it (installs, mods, saves) — to the correct one.
+  It refuses if that thread is already a separate game in your library.
+- **A game's F95Zone thread number now shows on its detail page and links
+  straight to the thread** — click it to open that game on F95Zone.
 
 ### Windows
 - **Sandboxed games launch again.** With sandboxing on (the default), Play did
@@ -45,15 +39,15 @@ The three Settings folders apply on restart.
   sandbox the first time you launch a game. If it can't, you get a clear
   message instead of the game quietly running **without** the sandbox.
 
-### Downloads
+### Downloads (fixes)
 - **The portable Linux build can download again** — its bundled download engine
   was missing a library it needed and failed to start. (The Windows and
   deb / rpm / Arch builds were never affected.)
 - **Fixed a crash when the download engine fails to start.**
 
-### Library
-- **A game's F95Zone thread number now shows on its detail page and links
-  straight to the thread** — click it to open that game on F95Zone.
+### Fixed
+- The Downloads settings page laid its sections out sideways / off-screen —
+  they now stack correctly.
 
 ## [0.12.1] - 2026-08-12
 
@@ -203,8 +197,6 @@ and making the app readable and reliable across distros.
   the deprecated Node 20 runtime.
 
 [0.14.1]: https://github.com/Moordp/F69/releases/tag/v0.14.1
-[0.14.0]: https://github.com/Moordp/F69/releases/tag/v0.14.0
-[0.13.0]: https://github.com/Moordp/F69/releases/tag/v0.13.0
 [0.12.1]: https://github.com/Moordp/F69/releases/tag/v0.12.1
 [0.11.1]: https://github.com/Moordp/F69/releases/tag/v0.11.1
 [0.11.0]: https://github.com/Moordp/F69/releases/tag/v0.11.0
