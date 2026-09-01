@@ -5,30 +5,21 @@ All notable, user-facing changes. Dates are YYYY-MM-DD.
 ## [0.13.0] - 2026-09-01
 
 ### Windows
-- **Sandboxed launch is fixed — games now start with sandboxing on (the
-  default).** f69 launched every game into a Sandboxie box named `f69` that it
-  never created, so a normal Sandboxie-Plus install popped *"Invalid box name
-  parameter: f69"* and the game never ran — while f69 reported the launch as
-  successful. f69 now creates (and verifies) its sandbox box on first launch.
-  If the box genuinely can't be created it says so with a clear message
-  instead of silently running the game **unsandboxed** — sandboxing is a
-  safety feature, so it's never dropped behind your back. Verified end-to-end
-  on a real Sandboxie-Plus install: the game launches inside the box.
+- **Sandboxed games launch again.** With sandboxing on (the default), Play did
+  nothing except pop up a Sandboxie *"Invalid box name parameter: f69"* error —
+  and f69 wrongly treated it as a successful launch. f69 now sets up its
+  sandbox the first time you launch a game. If it can't, you get a clear
+  message instead of the game quietly running **without** the sandbox.
 
 ### Downloads
-- **Portable Linux bundle: downloads work again.** The bundled `aria2c`
-  couldn't find its C++ runtime (`libstdc++.so.6`) — the packaging step
-  quarantines the glibc/gcc runtime into `lib/glibc/`, but `aria2c`'s own
-  library search path didn't reach there, so a download died with *"error
-  while loading shared libraries"*. `aria2c` is now fully self-contained via
-  its own runtime path. (Native Windows and distro packages were unaffected.)
-- **Fixed a crash when the download engine can't start.** A double-free on the
-  aria2 startup-timeout path could abort the whole app; it's fixed and locked
-  in with a regression test.
+- **The portable Linux build can download again** — its bundled download engine
+  was missing a library it needed and failed to start. (The Windows and
+  deb / rpm / Arch builds were never affected.)
+- **Fixed a crash when the download engine fails to start.**
 
 ### Library
-- **Each game's F95Zone thread ID now shows on its detail page** (in the meta
-  bar) and is clickable — it opens that game's F95Zone thread in your browser.
+- **A game's F95Zone thread number now shows on its detail page and links
+  straight to the thread** — click it to open that game on F95Zone.
 
 ## [0.12.1] - 2026-08-12
 
