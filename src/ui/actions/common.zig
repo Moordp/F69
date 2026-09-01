@@ -884,6 +884,76 @@ pub fn deleteGameAndReturn(frame: *Frame, thread_id: u64) void {
     state.reload_requested = true;
 }
 
+/// Point a game at an already-installed folder on disk (detail page ⋯ → "Set
+/// install folder…"). Opens a directory picker and registers the chosen folder
+/// as a `.manual` install, so a game imported without a path (F95Checker
+/// import, or a folder whose name didn't match) becomes launchable without any
+/// name-matching. The launcher inside the folder is auto-picked at play time,
+/// same as a downloaded install. Non-destructive: a folder already claimed by
+/// another game, or a version already installed here, is reported and left
+/// alone.
+pub fn setInstallFolder(frame: *Frame, game: *const library.Game) void {
+    const file_picker = @import("util_file_picker");
+    const state = frame.state;
+    const alloc = frame.lib.alloc;
+
+    const picked = (file_picker.openFolder(alloc, null) catch |e| {
+        var buf: [160]u8 = undefined;
+        state.notifyErr(std.fmt.bufPrint(&buf, "Folder picker failed: {s}", .{@errorName(e)}) catch "Folder picker failed");
+        return;
+    }) orelse return; // user cancelled
+    defer alloc.free(picked);
+
+    // Version label defaults to the game's known version; "installed" when we
+    // don't have one yet. The user can relabel it later on the install.
+    const ver_raw = if (game.latest_version) |v| std.mem.trim(u8, v, " \t\r\n") else "";
+    const version: []const u8 = if (ver_raw.len > 0) ver_raw else "installed";
+
+    var id: [36]u8 = undefined;
+    generateUuid(frame.io, &id);
+    const now = std.Io.Clock.Timestamp.now(frame.io, .real);
+    const now_s: i64 = @intCast(@divTrunc(now.raw.toNanoseconds(), 1_000_000_000));
+
+    frame.lib.registerManualInstall(game.f95_thread_id, version, picked, id, now_s) catch |e| {
+        switch (e) {
+            error.InstallPathInUse => state.notifyErr("That folder is already registered to a game."),
+            error.InstallVersionExists => {
+                var buf: [160]u8 = undefined;
+                state.notifyErr(std.fmt.bufPrint(&buf, "This game already has an install labelled \"{s}\".", .{version}) catch "That version is already installed.");
+            },
+            else => state.notifyErr("Couldn't register the folder — the library update failed."),
+        }
+        return;
+    };
+    state.reload_requested = true; // refresh library + install views
+    state.notifyOk("Install folder set — the game is now marked installed.");
+}
+
+/// 36-char hex+dash UUID for a manual install row, same shape as the
+/// installer/import UUIDs. Local so common.zig doesn't reach across modules.
+fn generateUuid(io: std.Io, out: *[36]u8) void {
+    const now = std.Io.Clock.Timestamp.now(io, .real);
+    const ns: u64 = @intCast(@max(0, now.raw.toNanoseconds()));
+    var h = std.hash.Wyhash.init(ns);
+    h.update(std.mem.asBytes(&ns));
+    const a = h.final();
+    const b = std.hash.Wyhash.hash(a, std.mem.asBytes(&ns));
+    var bytes: [16]u8 = undefined;
+    std.mem.writeInt(u64, bytes[0..8], a, .little);
+    std.mem.writeInt(u64, bytes[8..16], b, .little);
+    const hex = "0123456789abcdef";
+    var pos: usize = 0;
+    for (bytes, 0..) |byte, i| {
+        if (i == 4 or i == 6 or i == 8 or i == 10) {
+            out[pos] = '-';
+            pos += 1;
+        }
+        out[pos] = hex[byte >> 4];
+        out[pos + 1] = hex[byte & 0xF];
+        pos += 2;
+    }
+}
+
 // ============================================================
 //  installed-set + per-game install dot + retry-download glue
 // ============================================================

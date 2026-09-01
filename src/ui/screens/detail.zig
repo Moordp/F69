@@ -87,6 +87,10 @@ pub fn detailScreen(frame: *Frame) !bool {
                 actions.doOpenGameFolder(frame, game);
                 ob.close();
             }
+            if (dvui.menuItemLabel(@src(), "Set install folder\u{2026}", .{}, .{ .expand = .horizontal }) != null) {
+                actions.setInstallFolder(frame, game);
+                ob.close();
+            }
             if (dvui.menuItemLabel(@src(), "Open saves", .{}, .{ .expand = .horizontal }) != null) {
                 actions.doOpenSaves(frame, game);
                 ob.close();
@@ -103,6 +107,12 @@ pub fn detailScreen(frame: *Frame) !bool {
             // (Convert + Fix Compat + engine tools live in the Tools tab.)
             if (dvui.menuItemLabel(@src(), "Sync now", .{}, .{ .expand = .horizontal }) != null) {
                 actions.syncGame(frame, game);
+                ob.close();
+            }
+            if (dvui.menuItemLabel(@src(), "Set F95 thread URL\u{2026}", .{}, .{ .expand = .horizontal }) != null) {
+                @memset(&state.set_url_buf, 0);
+                _ = std.fmt.bufPrint(&state.set_url_buf, "https://f95zone.to/threads/{d}/", .{game.f95_thread_id}) catch {};
+                state.set_url_for = game.f95_thread_id;
                 ob.close();
             }
             _ = dvui.separator(@src(), .{ .expand = .horizontal });
@@ -133,6 +143,33 @@ pub fn detailScreen(frame: *Frame) !bool {
         if (components.iconButton(@src(), "Cancel", entypo.cross, .{ .tag = "detail-delete-cancel" })) state.confirm_delete = false;
         if (components.iconButton(@src(), "Delete", entypo.trash, .{ .style = .err })) {
             actions.deleteGameAndReturn(frame, game.f95_thread_id);
+            return true;
+        }
+    }
+
+    // Inline "Set F95 thread URL" bar — opened from the ⋯ menu. Paste a thread
+    // URL/id and re-sync; a different id re-keys the game (installs/mods/saves
+    // move with it) via actions.applySetThreadUrl.
+    if (state.set_url_for != null) {
+        var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .expand = .horizontal,
+            .padding = .{ .x = 12, .y = 6, .w = 12, .h = 6 },
+            .margin = .{ .x = 0, .y = 4, .w = 0, .h = 4 },
+            .background = true,
+            .border = style.border_thin,
+            .corner_radius = style.corner_radius,
+            .color_fill = style.cardFill(),
+            .color_border = style.borderColor(),
+        });
+        defer bar.deinit();
+        dvui.labelNoFmt(@src(), "F95 thread URL / id:", .{}, .{ .gravity_y = 0.5, .color_text = style.labelDim() });
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
+        const te = style.textEntry(@src(), .{ .text = .{ .buffer = &state.set_url_buf } }, .{ .expand = .horizontal, .min_size_content = .{ .w = 240, .h = 26 }, .gravity_y = 0.5 });
+        te.deinit();
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
+        if (components.iconButton(@src(), "Cancel", entypo.cross, .{ .tag = "detail-seturl-cancel" })) state.set_url_for = null;
+        if (components.iconButton(@src(), "Set & sync", entypo.check, .{ .style = .highlight })) {
+            actions.applySetThreadUrl(frame, game.f95_thread_id, nulSlice(&state.set_url_buf));
             return true;
         }
     }

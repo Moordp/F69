@@ -618,6 +618,49 @@ pub const Library = struct {
         self.conn.inner.exec("DELETE FROM games WHERE f95_thread_id = ?", .{@as(i64, @intCast(thread_id))}) catch return self.dbFail();
     }
 
+    /// True when a game row with this thread id exists.
+    pub fn gameExists(self: *Library, thread_id: u64) errs.Error!bool {
+        var row = (self.conn.inner.row("SELECT 1 FROM games WHERE f95_thread_id = ?", .{@as(i64, @intCast(thread_id))}) catch return self.dbFail()) orelse return false;
+        row.deinit();
+        return true;
+    }
+
+    /// Re-key a game to a different F95 thread id, carrying ALL of its per-game
+    /// rows across — installs, mods, play sessions, labels and per-game mod
+    /// overrides. Used when the user points an existing (often folder-imported
+    /// or mis-keyed) game at the correct F95 thread so a real sync can populate
+    /// it. Refuses with `ThreadIdInUse` if `new_tid` is already a game (we don't
+    /// merge two libraries' worth of history), `GameNotFound` if `old_tid` isn't
+    /// one, and no-ops when they're equal.
+    ///
+    /// FK enforcement is dropped for the move: `installs`/`mods` reference
+    /// `games(f95_thread_id)` and SQLite checks that immediately, while the
+    /// `foreign_keys` pragma is a no-op inside a transaction — so we toggle it
+    /// off around the whole re-point and restore it no matter how we leave. The
+    /// table list below is every table that carries `game_thread_id`; miss one
+    /// and its rows would orphan, so keep it in sync with the schema.
+    pub fn changeThreadId(self: *Library, old_tid: u64, new_tid: u64) errs.Error!void {
+        if (old_tid == new_tid) return;
+        if (!try self.gameExists(old_tid)) return errs.Error.GameNotFound;
+        if (try self.gameExists(new_tid)) return errs.Error.ThreadIdInUse;
+
+        self.conn.exec("PRAGMA foreign_keys = OFF") catch return self.dbFail();
+        defer self.conn.exec("PRAGMA foreign_keys = ON") catch {};
+
+        self.beginTx() catch return self.dbFail();
+        errdefer self.rollbackTx() catch {};
+
+        const o: i64 = @intCast(old_tid);
+        const n: i64 = @intCast(new_tid);
+        inline for (.{ "games", "installs", "mods", "play_sessions", "game_labels", "game_universal_mod_disabled" }) |tbl| {
+            const col = if (comptime std.mem.eql(u8, tbl, "games")) "f95_thread_id" else "game_thread_id";
+            self.conn.inner.exec("UPDATE " ++ tbl ++ " SET " ++ col ++ " = ? WHERE " ++ col ++ " = ?", .{ n, o }) catch return self.dbFail();
+        }
+
+        self.commitTx() catch return self.dbFail();
+        self.install_generation +%= 1;
+    }
+
     /// Apply scrape result to an in-memory `Game` whose strings are
     /// already owned by `self.alloc` (i.e. came out of `listGames`).
     /// Replaces name/developer/latest_version with fresh `self.alloc`-
@@ -881,6 +924,54 @@ pub const Library = struct {
             sha_slice,
         }) catch return self.dbFail();
         self.install_generation +%= 1;
+    }
+
+    /// True when ANY game already has an install registered at this path.
+    /// `installs.install_path` is UNIQUE, so registering a second one there
+    /// via `upsertInstall`'s INSERT OR REPLACE would silently delete the other
+    /// game's row — `registerManualInstall` checks this first to refuse instead.
+    pub fn installPathInUse(self: *Library, install_path: []const u8) errs.Error!bool {
+        var row = (self.conn.inner.row("SELECT 1 FROM installs WHERE install_path = ?", .{install_path}) catch return self.dbFail()) orelse return false;
+        row.deinit();
+        return true;
+    }
+
+    fn installVersionExists(self: *Library, game_thread_id: u64, version: []const u8) errs.Error!bool {
+        var row = (self.conn.inner.row(
+            "SELECT 1 FROM installs WHERE game_thread_id = ? AND version = ?",
+            .{ @as(i64, @intCast(game_thread_id)), version },
+        ) catch return self.dbFail()) orelse return false;
+        row.deinit();
+        return true;
+    }
+
+    /// Register an already-installed folder as a `.manual` install for
+    /// `game_thread_id` — the "I downloaded this game myself, point f69 at it"
+    /// path. Non-destructive by design: refuses with `InstallPathInUse` when the
+    /// folder already belongs to a game (never steals it via the UNIQUE(path)
+    /// REPLACE), and `InstallVersionExists` when this game already has an install
+    /// labelled `version` (that row's `id` may carry mod links we must not drop).
+    /// `executable` is left null — the launch path auto-picks the game binary
+    /// inside the folder, same as a downloaded install.
+    pub fn registerManualInstall(
+        self: *Library,
+        game_thread_id: u64,
+        version: []const u8,
+        install_path: []const u8,
+        id: [36]u8,
+        installed_at: i64,
+    ) errs.Error!void {
+        if (try self.installPathInUse(install_path)) return errs.Error.InstallPathInUse;
+        if (try self.installVersionExists(game_thread_id, version)) return errs.Error.InstallVersionExists;
+        try self.upsertInstall(&.{
+            .id = id,
+            .game_thread_id = game_thread_id,
+            .version = version,
+            .install_path = install_path,
+            .recipe_id = "",
+            .installed_at = installed_at,
+            .source = .manual,
+        });
     }
 
     /// Newest install first by VERSION (not `installed_at`). The
@@ -2621,6 +2712,73 @@ test "library: setLastPlayedVersionIfNewer — older does NOT regress" {
     const g = (try lib.getGame(1)).?;
     defer lib.freeGame(g);
     try std.testing.expectEqualStrings("0.2", g.last_played_version.?);
+}
+
+test "library: changeThreadId re-keys the game and carries its installs across" {
+    var lib = try Library.open(std.testing.allocator, ":memory:");
+    defer lib.close();
+    try lib.upsertGame(&.{ .f95_thread_id = 111, .name = "Old Key" });
+    try lib.upsertInstall(&.{
+        .id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".*,
+        .game_thread_id = 111,
+        .version = "1.0",
+        .install_path = "/games/foo",
+        .recipe_id = "",
+        .installed_at = 1,
+    });
+
+    try lib.changeThreadId(111, 222);
+
+    // Old key is gone, new key exists.
+    try std.testing.expect(!try lib.gameExists(111));
+    try std.testing.expect(try lib.gameExists(222));
+    // The install followed the game to the new key (FK-critical path).
+    const under_old = try lib.listInstalls(111);
+    defer lib.freeInstalls(under_old);
+    try std.testing.expectEqual(@as(usize, 0), under_old.len);
+    const under_new = try lib.listInstalls(222);
+    defer lib.freeInstalls(under_new);
+    try std.testing.expectEqual(@as(usize, 1), under_new.len);
+    try std.testing.expectEqualStrings("/games/foo", under_new[0].install_path);
+}
+
+test "library: changeThreadId refuses when the target thread already exists" {
+    var lib = try Library.open(std.testing.allocator, ":memory:");
+    defer lib.close();
+    try lib.upsertGame(&.{ .f95_thread_id = 1, .name = "A" });
+    try lib.upsertGame(&.{ .f95_thread_id = 2, .name = "B" });
+    try std.testing.expectError(errs.Error.ThreadIdInUse, lib.changeThreadId(1, 2));
+    // Both survive untouched.
+    try std.testing.expect(try lib.gameExists(1));
+    try std.testing.expect(try lib.gameExists(2));
+}
+
+test "library: changeThreadId on a missing source is GameNotFound; equal ids no-op" {
+    var lib = try Library.open(std.testing.allocator, ":memory:");
+    defer lib.close();
+    try std.testing.expectError(errs.Error.GameNotFound, lib.changeThreadId(9, 10));
+    try lib.upsertGame(&.{ .f95_thread_id = 5, .name = "G" });
+    try lib.changeThreadId(5, 5); // no-op, no error
+    try std.testing.expect(try lib.gameExists(5));
+}
+
+test "library: registerManualInstall adds a .manual install and guards collisions" {
+    var lib = try Library.open(std.testing.allocator, ":memory:");
+    defer lib.close();
+    try lib.upsertGame(&.{ .f95_thread_id = 7, .name = "G" });
+    try lib.upsertGame(&.{ .f95_thread_id = 8, .name = "H" });
+
+    try lib.registerManualInstall(7, "0.2.40", "/media/games/G", "11111111-1111-1111-1111-111111111111".*, 1);
+    const installs = try lib.listInstalls(7);
+    defer lib.freeInstalls(installs);
+    try std.testing.expectEqual(@as(usize, 1), installs.len);
+    try std.testing.expectEqual(dom.InstallSource.manual, installs[0].source);
+    try std.testing.expectEqualStrings("/media/games/G", installs[0].install_path);
+
+    // Same path claimed by another game → refused (would otherwise steal it).
+    try std.testing.expectError(errs.Error.InstallPathInUse, lib.registerManualInstall(8, "0.2.40", "/media/games/G", "22222222-2222-2222-2222-222222222222".*, 2));
+    // Same (game, version) again → refused (would clobber a row that may carry mod links).
+    try std.testing.expectError(errs.Error.InstallVersionExists, lib.registerManualInstall(7, "0.2.40", "/media/games/G2", "33333333-3333-3333-3333-333333333333".*, 3));
 }
 
 // Pull nested tests into this module's test binary (same idiom as

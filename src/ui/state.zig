@@ -778,6 +778,12 @@ pub const State = struct {
     /// True when the user clicked Delete and we're showing the confirm
     /// banner. Cleared on Cancel or after the row + cover are gone.
     confirm_delete: bool = false,
+    /// Inline "Set F95 thread URL" bar on the detail page — holds the
+    /// thread id whose URL is being (re)set; null hides the bar. The
+    /// companion buffer is prefilled with the current thread URL when the
+    /// bar opens. Cleared on cancel, apply, or when switching games.
+    set_url_for: ?u64 = null,
+    set_url_buf: [256]u8 = [_]u8{0} ** 256,
     /// True when the user clicked the `?` next to Convert; expands an
     /// inline help block under the action row.
     convert_help_open: bool = false,
@@ -1925,6 +1931,7 @@ pub const State = struct {
         self.detail_tab = .overview;
         self.detail_scroll = .{};
         self.confirm_delete = false;
+        self.set_url_for = null;
         self.convert_help_open = false;
         self.image_popup_open = false;
         // Drop info / success / warn toasts so stale per-game

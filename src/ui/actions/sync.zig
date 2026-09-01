@@ -214,6 +214,60 @@ pub fn syncGame(frame: *Frame, game: *library.Game) void {
     spawnSyncJob(frame, game, null);
 }
 
+/// Sync a game by thread id when the caller has no `*Game` in hand — e.g.
+/// right after a re-key, before the in-memory library cache has reloaded. A
+/// minimal stub is enough: spawnSyncJob only reads `f95_thread_id` and
+/// `last_indexer_parser_version` (null here forces a full sync, exactly what a
+/// freshly re-pointed game needs).
+pub fn syncThreadId(frame: *Frame, tid: u64) void {
+    frame.state.image_fetch_suspended = false;
+    var stub = library.Game{ .f95_thread_id = tid, .name = "" };
+    spawnSyncJob(frame, &stub, null);
+}
+
+/// Point an existing game at a different F95 thread URL/id and sync from it.
+/// Backs the detail page's "Set F95 thread URL…" menu item. Because the thread
+/// id is the game's primary key, a *different* id means re-keying the row (and
+/// all its installs/mods/saves) via `Library.changeThreadId`, then navigating
+/// to the new key and syncing. Same id just re-syncs; an unparseable input or a
+/// thread that's already another game is reported and changes nothing.
+pub fn applySetThreadUrl(frame: *Frame, old_tid: u64, input: []const u8) void {
+    const state = frame.state;
+    const new_tid = parseThreadInput(input) orelse {
+        state.notifyErr("Couldn't read an F95 thread id or URL from that.");
+        return;
+    };
+    if (new_tid == old_tid) {
+        state.set_url_for = null;
+        syncThreadId(frame, new_tid);
+        state.notifyInfo("Same thread — re-syncing.");
+        return;
+    }
+    frame.lib.changeThreadId(old_tid, new_tid) catch |e| {
+        switch (e) {
+            error.ThreadIdInUse => state.notifyErr("That thread is already another game in your library."),
+            else => state.notifyErr("Couldn't change the thread — the library update failed."),
+        }
+        return;
+    };
+    state.set_url_for = null;
+    state.selected_thread = new_tid;
+    state.detail_state_for_thread = null; // force per-page state reset for the new key
+    state.reload_requested = true; // reload the library cache from the DB
+    syncThreadId(frame, new_tid);
+    state.notifyOk("Thread updated — syncing metadata from the new URL.");
+}
+
+/// Trim + parse an F95 thread URL or bare numeric id. Mirrors
+/// `imports.parseF95ThreadInput`, re-implemented here to avoid an actions
+/// cross-file import.
+fn parseThreadInput(s: []const u8) ?u64 {
+    const trimmed = std.mem.trim(u8, s, " \t\n\r");
+    if (trimmed.len == 0) return null;
+    if (f95.extractThreadId(trimmed)) |id_str| return std.fmt.parseInt(u64, id_str, 10) catch null;
+    return std.fmt.parseInt(u64, trimmed, 10) catch null;
+}
+
 /// Internal worker spawner shared by the manual-button path (`syncGame`)
 /// and the batch advance path (`advanceSyncQueue`). `known_lc` is the
 /// pre-fetched `/fast` result when the batch indexer pre-flight already
