@@ -1180,9 +1180,20 @@ fn makePortable(b: *std.Build, mode: PortableMode) !void {
                 const path = parseLddLine(line) orelse continue;
                 try copyWithTransitives(b, path, lib_dir, &bundled);
             }
-            // RUNPATH $ORIGIN/lib so the bundled aria2c finds its
-            // .so deps next to the main binary's lib/ dir.
-            runQuiet(b, &.{ "patchelf", "--set-rpath", "$ORIGIN/lib", aria2_dst }) catch {};
+            // RUNPATH so the bundled aria2c finds its .so deps. It needs
+            // BOTH lib/ (aria2's own deps: libaria2, gnutls, …) AND
+            // lib/glibc/ — aria2 is C++, so its libstdc++.so.6 / libgcc_s
+            // get quarantined into lib/glibc/ by Step 3b below. Without
+            // lib/glibc on aria2c's own rpath it can only find them when
+            // run.sh happens to export LD_LIBRARY_PATH=…/lib/glibc and the
+            // child inherits it — which fails on a bare `./f69` launch and
+            // in run.sh's system-glibc mode (that mode drops lib/glibc).
+            // Putting lib/glibc on aria2c's rpath makes it self-contained.
+            // aria2c keeps its bundled (nix) interpreter, so loader + libc
+            // + libstdc++ are one consistent bundled set; it never touches
+            // the GPU stack, so the shadowing concern that motivates the
+            // quarantine doesn't apply to it.
+            runQuiet(b, &.{ "patchelf", "--set-rpath", "$ORIGIN/lib:$ORIGIN/lib/glibc", aria2_dst }) catch {};
             std.log.info("portable: bundled aria2c from {s}", .{aria2_src});
         } else {
             // Best-effort: don't fail the bundle if aria2c isn't

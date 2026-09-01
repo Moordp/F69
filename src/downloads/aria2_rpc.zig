@@ -144,9 +144,12 @@ pub const Daemon = struct {
 
         try d.spawn();
         d.waitReady() catch |e| {
+            // Only kill the child here — it has no errdefer. d.http_t and
+            // d.url ARE covered by the errdefers above, which fire on this
+            // error return. Freeing them here as well double-frees both
+            // (observed as `free(): double free detected` when aria2 spawns
+            // but its RPC never comes up → waitReady times out).
             if (d.child) |*c| c.kill(io);
-            alloc.destroy(d.http_t);
-            alloc.free(d.url);
             return e;
         };
         log.info("aria2 ready on 127.0.0.1:{d}", .{d.port});
@@ -999,6 +1002,30 @@ test "appendJsonString basic" {
     defer buf.deinit(std.testing.allocator);
     try appendJsonString(&buf, std.testing.allocator, "hello \"world\"\n");
     try std.testing.expectEqualStrings("\"hello \\\"world\\\"\\n\"", buf.items);
+}
+
+// Regression: Daemon.init's waitReady-timeout path used to free d.url and
+// destroy d.http_t manually AND via errdefer → double-free (`free(): double
+// free detected` when aria2 spawns but its RPC never comes up). Under the
+// testing allocator a double-free is caught, so this test would abort before
+// the fix. NOTE: intentionally ~5s — waitReady polls the (never-opening) RPC
+// port for its full timeout. Uses /bin/sh as a stand-in that spawns cleanly
+// (aria2's flags make it exit immediately) but never opens the RPC port.
+test "Daemon.init: waitReady timeout does not double-free (no manual + errdefer overlap)" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .limited(2) });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // Stand-in binary that spawns cleanly but never opens the RPC port.
+    const dummy = "/bin/sh";
+    std.Io.Dir.cwd().access(io, dummy, .{}) catch return error.SkipZigTest;
+
+    // download_dir need not exist — spawn's createDirPath is best-effort and
+    // /bin/sh ignores the --dir arg anyway.
+    const r = Daemon.init(std.testing.allocator, io, dummy, "/tmp/f69-aria2-dblfree-test", null, 0, 5.0, 0);
+    try std.testing.expectError(errs.Error.AriaStartTimeout, r);
 }
 
 // Note: genSecret takes an `Io` and isn't trivially testable from a

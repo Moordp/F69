@@ -231,67 +231,6 @@ fn renderRatingStars(rating: f32) void {
     }
 }
 
-fn renderIdentityPillRow(frame: *Frame, game: *const library.Game) void {
-    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
-        .expand = .horizontal,
-        .padding = .{ .x = 0, .y = 0, .w = 0, .h = 4 },
-    });
-    defer row.deinit();
-
-    if (game.engine != .unknown) {
-        const fill = components.engineBadgeColor(game.engine);
-        comp.chip(@src(), .{
-            .label = components.engineShortLabel(game.engine),
-            .fill = .{ .r = fill.r, .g = fill.g, .b = fill.b, .a = fill.a },
-            .text = .{ .r = 0xff, .g = 0xff, .b = 0xff },
-            .border = .{ .r = fill.r, .g = fill.g, .b = fill.b, .a = fill.a },
-        }, .{
-            .id_extra = game.f95_thread_id ^ 0xE1,
-            .gravity_y = 0.5,
-            .padding = .{ .x = 8, .y = 2, .w = 8, .h = 2 },
-        });
-    }
-
-    if (game.dev_status != .unknown) {
-        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 6, .h = 1 } });
-        const fill = components.devStatusColor(game.dev_status);
-        comp.chip(@src(), .{
-            .label = components.devStatusShortLabel(game.dev_status),
-            .fill = .{ .r = fill.r, .g = fill.g, .b = fill.b, .a = fill.a },
-            .text = .{ .r = 0xff, .g = 0xff, .b = 0xff },
-            .border = .{ .r = fill.r, .g = fill.g, .b = fill.b, .a = fill.a },
-        }, .{
-            .id_extra = game.f95_thread_id,
-            .gravity_y = 0.5,
-            .padding = .{ .x = 8, .y = 2, .w = 8, .h = 2 },
-        });
-    }
-
-    if (game.rating) |r| {
-        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 14, .h = 1 } });
-        renderRatingStars(r);
-        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 6, .h = 1 } });
-        var lbl_buf: [48]u8 = undefined;
-        const s = std.fmt.bufPrint(&lbl_buf, "{d:.1} ({d} votes)", .{ r, game.vote_count orelse 0 }) catch "";
-        dvui.labelNoFmt(@src(), s, .{}, .{
-            .gravity_y = 0.5,
-            .color_text = style.labelDim(),
-        });
-    }
-
-    _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-
-    var tid_buf: [32]u8 = undefined;
-    const tid_str = std.fmt.bufPrint(&tid_buf, "F95 #{d}", .{game.f95_thread_id}) catch "F95";
-    if (style.button(@src(), tid_str, .{}, .{
-        .gravity_y = 0.5,
-        .style = .control,
-        .color_text = style.labelDim(),
-    })) {
-        actions.openInBrowser(frame, game.f95_thread_id);
-    }
-}
-
 /// V3 banner hero (detail-variants.html, the CHOSEN design): the screenshot
 /// gallery IS the headline. A big full-bleed banner shows the current
 /// shot/cover with ‹ › nav arrows + dots overlaid; the cover inset + title +
@@ -1742,6 +1681,21 @@ fn renderCompactMeta(frame: *Frame, game: *const library.Game) void {
         else
             "never";
         metaKv(@src(), "PLAYED", ps);
+    }
+    metaSep(@src());
+    // F95Zone identifier — the thread id is this game's primary key. Shown
+    // as a clickable control that opens https://f95zone.to/threads/<id>/ in
+    // the browser (actions.openInBrowser). Mirrors the pill used elsewhere.
+    {
+        var tid_buf: [32]u8 = undefined;
+        const tid_str = std.fmt.bufPrint(&tid_buf, "F95 #{d}", .{game.f95_thread_id}) catch "F95";
+        if (style.button(@src(), tid_str, .{}, .{
+            .gravity_y = 0.5,
+            .style = .control,
+            .color_text = style.labelDim(),
+        })) {
+            actions.openInBrowser(frame, game.f95_thread_id);
+        }
     }
 
     _ = dvui.spacer(@src(), .{ .expand = .horizontal });

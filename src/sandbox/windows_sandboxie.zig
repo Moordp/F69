@@ -11,8 +11,16 @@ const std = @import("std");
 const builtin = @import("builtin");
 const errs = @import("errors.zig");
 const dom = @import("domain.zig");
+const util_proc = @import("util_proc");
 
 const log = std.log.scoped(.sandbox);
+
+/// The Sandboxie box we launch games into. A fresh Sandboxie-Plus install
+/// only ships `DefaultBox`; this box does NOT exist until we create it (see
+/// `ensureBox`). Single-sourced so the `/box:` arg, the create/query calls,
+/// and the error messages never drift.
+const box_name = "f69";
+const box_arg = "/box:" ++ box_name; // "/box:f69"
 
 pub const Sandboxie = struct {
     start_exe: []const u8, // resolved Start.exe path (owned by `alloc`)
@@ -79,6 +87,9 @@ pub const Sandboxie = struct {
     }
 
     /// Launch the game inside a Sandboxie box: `Start.exe /box:f69 <abs_exe> [args]`.
+    /// The `f69` box is created on demand first (`ensureBox`) — a fresh
+    /// Sandboxie install doesn't have it, and without it Start.exe pops an
+    /// "Invalid box name parameter: f69" dialog and the game never runs.
     pub fn launch(self: *Sandboxie, alloc: std.mem.Allocator, cfg: dom.SandboxConfig) errs.Error!dom.SpawnResult {
         self.last_error_len = 0;
 
@@ -112,17 +123,25 @@ pub const Sandboxie = struct {
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(alloc);
         argv.append(alloc, self.start_exe) catch return errs.Error.OutOfMemory;
-        argv.append(alloc, "/box:f69") catch return errs.Error.OutOfMemory;
+        argv.append(alloc, box_arg) catch return errs.Error.OutOfMemory;
         argv.append(alloc, abs_exe) catch return errs.Error.OutOfMemory;
         for (cfg.launch_args) |a| argv.append(alloc, a) catch return errs.Error.OutOfMemory;
 
         // Test seam: capture the composed Start.exe command line instead of
         // spawning. Late on purpose — path join, separator normalization and
-        // the exists() probe above all ran for real.
+        // the exists() probe above all ran for real. Returns BEFORE ensureBox
+        // so tests never touch the real Sandboxie config.
         if (dom.spawn_hook.active) {
             _ = dom.spawn_hook.record("sandboxie", argv.items, null, null);
             return .{ .pid = 0 };
         }
+
+        // Create our box if it doesn't exist yet. On failure this returns a
+        // descriptive LaunchFailed rather than spawning into a bad box — the
+        // game does NOT silently run unsandboxed (that would drop the very
+        // isolation the user asked for). Only runs on the real path; the seam
+        // above returned first.
+        try self.ensureBox(alloc);
 
         _ = std.process.spawn(self.io, .{
             .argv = argv.items,
@@ -156,6 +175,80 @@ pub const Sandboxie = struct {
         };
         // Game runs detached inside the box. Host-side pid tracking on Windows is M2 → report 0.
         return .{ .pid = 0 };
+    }
+
+    /// Make sure the `f69` Sandboxie box exists before we launch into it.
+    /// A fresh Sandboxie-Plus install only ships `DefaultBox`, so the first
+    /// sandboxed launch used to hit `Start.exe`'s "Invalid box name
+    /// parameter: f69" dialog — and because Start.exe is fire-and-forget we
+    /// reported success while the game never ran. Creating the box with
+    /// `SbieIni.exe set f69 Enabled y` + `Start.exe /reload` works as the
+    /// normal user when the Sandboxie service is running (verified on the
+    /// win11 VM: the service runs, the create + reload succeed rc=0, and a
+    /// subsequent `Start.exe /box:f69` launches cleanly). On any failure we
+    /// return a descriptive LaunchFailed so the caller surfaces it instead of
+    /// silently dropping the sandbox.
+    fn ensureBox(self: *Sandboxie, alloc: std.mem.Allocator) errs.Error!void {
+        // SbieIni.exe lives next to Start.exe.
+        const dir = std.fs.path.dirname(self.start_exe) orelse {
+            self.setLastError("cannot locate SbieIni.exe: Start.exe has no parent dir ({s})", .{self.start_exe});
+            return errs.Error.LaunchFailed;
+        };
+        var sbieini_buf: [1024]u8 = undefined;
+        const sbieini = std.fmt.bufPrint(&sbieini_buf, "{s}\\SbieIni.exe", .{dir}) catch {
+            self.setLastError("SbieIni.exe path too long under {s}", .{dir});
+            return errs.Error.LaunchFailed;
+        };
+        if (!exists(self.io, sbieini)) {
+            self.setLastError(
+                "SbieIni.exe not found next to Start.exe ({s}) — can't create the '{s}' sandbox box. Point Settings → Sandbox at a complete Sandboxie install, or turn sandboxing off for this game.",
+                .{ sbieini, box_name },
+            );
+            return errs.Error.LaunchFailed;
+        }
+
+        // Already there? Then nothing to do — skip the write + reload.
+        if (self.boxEnabled(alloc, sbieini)) return;
+
+        log.info("sandboxie: '{s}' box missing — creating it via {s}", .{ box_name, sbieini });
+        // Minimal viable box: `Enabled=y`. Sandboxie fills in the rest from
+        // its default template. Then reload so the driver sees the new box.
+        if (!self.runOk(alloc, &.{ sbieini, "set", box_name, "Enabled", "y" })) {
+            self.setLastError(
+                "couldn't create the '{s}' Sandboxie box (SbieIni set failed — is the Sandboxie service running?). Turn sandboxing off for this game to launch it directly.",
+                .{box_name},
+            );
+            return errs.Error.LaunchFailed;
+        }
+        if (!self.runOk(alloc, &.{ self.start_exe, "/reload" })) {
+            self.setLastError("created the '{s}' box but Start.exe /reload failed — Sandboxie didn't pick it up.", .{box_name});
+            return errs.Error.LaunchFailed;
+        }
+        // Verify it registered — a create that "succeeded" but didn't take
+        // (unwritable config, service hiccup) would otherwise land us right
+        // back at the invalid-box dialog.
+        if (!self.boxEnabled(alloc, sbieini)) {
+            self.setLastError("created the '{s}' Sandboxie box but it didn't register (Sandboxie config not writable?).", .{box_name});
+            return errs.Error.LaunchFailed;
+        }
+        log.info("sandboxie: '{s}' box created and verified", .{box_name});
+    }
+
+    /// True when `SbieIni query <box> Enabled` reports "y" (rc 0) — i.e. the
+    /// box already exists. A missing box exits nonzero / prints nothing, which
+    /// reads as false. Best-effort: a spawn error also reads as "not there".
+    fn boxEnabled(self: *Sandboxie, alloc: std.mem.Allocator, sbieini: []const u8) bool {
+        const r = util_proc.run(alloc, self.io, &.{ sbieini, "query", box_name, "Enabled" }, .{ .stderr = .ignore }) catch return false;
+        defer alloc.free(r.stdout);
+        if (r.exit_code != 0) return false;
+        return std.ascii.eqlIgnoreCase(std.mem.trim(u8, r.stdout, " \t\r\n"), "y");
+    }
+
+    /// Run `argv`, discard stdout, return true on a clean (rc 0) exit.
+    fn runOk(self: *Sandboxie, alloc: std.mem.Allocator, argv: []const []const u8) bool {
+        const r = util_proc.run(alloc, self.io, argv, .{ .stderr = .ignore }) catch return false;
+        alloc.free(r.stdout);
+        return r.exit_code == 0;
     }
 };
 
