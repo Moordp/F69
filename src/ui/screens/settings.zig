@@ -409,6 +409,59 @@ fn clearSandboxieOverride(frame: *Frame) void {
     frame.state.notifyInfo("Sandboxie override cleared — auto-detect resumes on next launch.");
 }
 
+// ----- generic `<data_root>/<name>` one-line path overrides -----
+// Backs the downloads-folder, covers-folder and aria2c-binary pickers. Each
+// writes a single absolute path that the matching startup code reads (see
+// main.zig downloads_dir / covers_dir / aria2_path). Deleting the file reverts
+// to the built-in default. All apply on restart.
+
+/// Folder-pick a directory and persist it as `<data_root>/<name>`.
+fn pickFolderOverride(frame: *Frame, name: []const u8, ok_msg: []const u8) void {
+    const alloc = frame.lib.alloc;
+    const picked = (file_picker.openFolder(alloc, null) catch |e| {
+        var buf: [160]u8 = undefined;
+        frame.state.notifyErr(std.fmt.bufPrint(&buf, "Folder picker failed: {s}", .{@errorName(e)}) catch "Folder picker failed");
+        return;
+    }) orelse return;
+    defer alloc.free(picked);
+    writePathOverride(frame, name, picked, ok_msg);
+}
+
+/// Browse to an aria2c binary and persist it as `<data_root>/aria2_path`. No
+/// extension filter — aria2c is `aria2c.exe` on Windows but extensionless
+/// elsewhere.
+fn pickAria2Binary(frame: *Frame) void {
+    const alloc = frame.lib.alloc;
+    const picked = (file_picker.open(alloc, &[_]file_picker.FilterItem{}, null) catch |e| {
+        var buf: [160]u8 = undefined;
+        frame.state.notifyErr(std.fmt.bufPrint(&buf, "File picker failed: {s}", .{@errorName(e)}) catch "File picker failed");
+        return;
+    }) orelse return;
+    defer alloc.free(picked);
+    writePathOverride(frame, "aria2_path", picked, "aria2c set — applies on restart.");
+}
+
+fn writePathOverride(frame: *Frame, name: []const u8, value: []const u8, ok_msg: []const u8) void {
+    const alloc = frame.lib.alloc;
+    const file = std.fmt.allocPrint(alloc, "{s}/{s}", .{ frame.info.data_root, name }) catch return;
+    defer alloc.free(file);
+    atomic_io.writeFileAtomic(frame.io, file, value) catch |e| {
+        var buf: [160]u8 = undefined;
+        frame.state.notifyErr(std.fmt.bufPrint(&buf, "Couldn't save the override: {s}", .{@errorName(e)}) catch "Couldn't save the override");
+        return;
+    };
+    frame.state.notifyOk(ok_msg);
+}
+
+/// Delete `<data_root>/<name>`, reverting to the built-in default.
+fn resetPathOverride(frame: *Frame, name: []const u8, ok_msg: []const u8) void {
+    const alloc = frame.lib.alloc;
+    const file = std.fmt.allocPrint(alloc, "{s}/{s}", .{ frame.info.data_root, name }) catch return;
+    defer alloc.free(file);
+    std.Io.Dir.cwd().deleteFile(frame.io, file) catch {}; // absent = already default
+    frame.state.notifyInfo(ok_msg);
+}
+
 /// Relocate the games library: folder-pick a new root, remap every install
 /// link from the current `library_root` prefix to the picked one, and persist
 /// the override at `<data_root>/library_dir` (read at next launch). Moves no
@@ -689,6 +742,21 @@ fn renderSettingsLibrary(frame: *Frame) void {
         .color_text = style.labelDim(),
     });
 
+    // Covers cache override — the large, disposable image cache can live on a
+    // different volume than the DB. (The DB + backups stay under the data
+    // folder; move the whole thing with the F69_DATA_DIR env var if needed.)
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
+    {
+        var cov_row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        defer cov_row.deinit();
+        if (dvui.button(@src(), "Change covers folder\u{2026}", .{}, .{ .gravity_y = 0.5 })) pickFolderOverride(frame, "covers_dir", "Covers folder set — applies on restart.");
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
+        if (dvui.button(@src(), "Reset to default", .{}, .{ .gravity_y = 0.5, .id_extra = 0xC0FE })) resetPathOverride(frame, "covers_dir", "Covers folder reset to the default (inside your data folder).");
+    }
+    dvui.labelNoFmt(@src(), "Moves where cover + screenshot images are cached. Existing images aren't moved; they re-download on demand. Takes effect on restart.", .{}, .{
+        .color_text = style.labelDim(),
+    });
+
     settingsSectionDivider(3);
 
     renderSettingsImport(frame);
@@ -943,7 +1011,9 @@ fn renderSettingsDownloads(frame: *Frame) void {
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
 
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
-    defer row.deinit();
+    // Closed explicitly at the end of this row (below) rather than via `defer`
+    // — a function-scoped defer would keep this horizontal box open and nest
+    // every later section (seed ratio/time, downloads folder, …) inside it.
 
     dvui.label(@src(), "Port", .{}, .{
         .min_size_content = .{ .w = 60, .h = 20 },
@@ -989,6 +1059,7 @@ fn renderSettingsDownloads(frame: *Frame) void {
         .gravity_y = 0.5,
         .color_text = style.labelDim(),
     });
+    row.deinit(); // close the horizontal input row here (see note above)
 
     if (state.aria2_port_msg_len > 0) {
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
@@ -1010,7 +1081,7 @@ fn renderSettingsDownloads(frame: *Frame) void {
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
 
     var sr_row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
-    defer sr_row.deinit();
+    // Closed explicitly below (not `defer`) — see the port-row note above.
 
     dvui.label(@src(), "Ratio", .{}, .{
         .min_size_content = .{ .w = 60, .h = 20 },
@@ -1054,6 +1125,7 @@ fn renderSettingsDownloads(frame: *Frame) void {
         .gravity_y = 0.5,
         .color_text = style.labelDim(),
     });
+    sr_row.deinit(); // close the horizontal input row here
 
     if (state.aria2_seed_ratio_msg_len > 0) {
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
@@ -1073,7 +1145,7 @@ fn renderSettingsDownloads(frame: *Frame) void {
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
 
     var st_row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
-    defer st_row.deinit();
+    // Closed explicitly below (not `defer`) — see the port-row note above.
 
     dvui.label(@src(), "Minutes", .{}, .{
         .min_size_content = .{ .w = 60, .h = 20 },
@@ -1103,6 +1175,43 @@ fn renderSettingsDownloads(frame: *Frame) void {
             };
             setAria2SeedRatioMsg(state, m);
         }
+    }
+    st_row.deinit(); // close the horizontal input row here
+
+    settingsSectionDivider(8);
+
+    // ----- Downloads folder -----
+    dvui.label(@src(), "Downloads folder", .{}, .{ .color_text = dcol(tokens.active.acc) });
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
+    components.settingsHelpText(
+        "Where downloads land (f69 makes a `direct/` and `torrents/` subfolder inside). Point this at a " ++
+            "bigger disk if your data folder is small. Applies on restart; in-flight downloads stay put.",
+    );
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
+    {
+        var dl_row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        defer dl_row.deinit();
+        if (dvui.button(@src(), "Change downloads folder\u{2026}", .{}, .{ .gravity_y = 0.5 })) pickFolderOverride(frame, "downloads_dir", "Downloads folder set — applies on restart.");
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
+        if (dvui.button(@src(), "Reset to default", .{}, .{ .gravity_y = 0.5, .id_extra = 0xD701 })) resetPathOverride(frame, "downloads_dir", "Downloads folder reset to the default (inside your data folder).");
+    }
+
+    settingsSectionDivider(9);
+
+    // ----- Download engine (aria2c) binary -----
+    dvui.label(@src(), "Download engine (aria2c)", .{}, .{ .color_text = dcol(tokens.active.acc) });
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
+    components.settingsHelpText(
+        "f69 bundles aria2c and otherwise finds it on your PATH. If a download says the engine is missing, " ++
+            "browse to an aria2c binary here to point f69 at it. Applies on restart.",
+    );
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
+    {
+        var a_row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        defer a_row.deinit();
+        if (dvui.button(@src(), "Browse to aria2c\u{2026}", .{}, .{ .gravity_y = 0.5 })) pickAria2Binary(frame);
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
+        if (dvui.button(@src(), "Clear override", .{}, .{ .gravity_y = 0.5, .id_extra = 0xA201 })) resetPathOverride(frame, "aria2_path", "aria2c override cleared — using the bundled/PATH binary.");
     }
 }
 

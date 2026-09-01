@@ -2095,13 +2095,13 @@ pub fn doBackupSaves(frame: *Frame, game: *const library.Game) void {
     const state = frame.state;
     const alloc = frame.lib.alloc;
 
-    var home_buf: [640]u8 = undefined;
-    const sandbox_home = std.fmt.bufPrint(&home_buf, "{s}/{d}/.f69-home", .{ frame.info.library_root, game.f95_thread_id }) catch {
-        state.setLaunchMsg("Saves path buffer overflow.");
+    const sandbox_home = savesDir(frame, game.f95_thread_id) catch {
+        state.setLaunchMsg("Out of memory building saves path.");
         return;
     };
+    defer alloc.free(sandbox_home);
     std.Io.Dir.cwd().access(frame.io, sandbox_home, .{}) catch {
-        state.setLaunchMsg("No sandbox HOME yet — launch the game once to create it.");
+        state.setLaunchMsg("Saves folder doesn't exist yet — launch the game once, or set the saves folder in the \u{22ef} menu.");
         return;
     };
 
@@ -2147,11 +2147,11 @@ pub fn doImportSaves(frame: *Frame, game: *const library.Game) void {
     } orelse return; // cancelled
     defer alloc.free(picked);
 
-    var home_buf: [640]u8 = undefined;
-    const sandbox_home = std.fmt.bufPrint(&home_buf, "{s}/{d}/.f69-home", .{ frame.info.library_root, game.f95_thread_id }) catch {
-        state.setLaunchMsg("Saves path buffer overflow.");
+    const sandbox_home = savesDir(frame, game.f95_thread_id) catch {
+        state.setLaunchMsg("Out of memory building saves path.");
         return;
     };
+    defer alloc.free(sandbox_home);
 
     // Import writes files into the sandbox HOME with truncate — an
     // in-place merge over whatever saves are already there. If that
@@ -2339,18 +2339,16 @@ pub fn doOpenSaves(frame: *Frame, game: *const library.Game) void {
     const state = frame.state;
     const alloc = frame.lib.alloc;
 
-    var sandbox_home_buf: [640]u8 = undefined;
-    const sandbox_home = std.fmt.bufPrint(&sandbox_home_buf, "{s}/{d}/.f69-home", .{ frame.info.library_root, game.f95_thread_id }) catch {
-        state.setConvertMsg("Saves path buffer overflow.");
+    const sandbox_home = savesDir(frame, game.f95_thread_id) catch {
+        state.setConvertMsg("Out of memory building saves path.");
         return;
     };
+    defer alloc.free(sandbox_home);
 
-    // Recipe-pinned save paths were retired — the `saves` block on
-    // GameRecipe is gone. Engine-derived defaults (Ren'Py:
-    // `$XDG_DATA_HOME/RenPy/...`; RPGM: `<install>/www/save/`) will
-    // land later. For now we fall back to the sandbox HOME itself
-    // so the user can navigate manually. `game` stays in scope for
-    // the future engine-derive path.
+    // The saves folder: the manual override (via savesDir) when set, else the
+    // per-game sandbox HOME. Engine-derived auto-defaults (Ren'Py:
+    // `$XDG_DATA_HOME/RenPy/...`; RPGM: `<install>/www/save/`) will land later
+    // and slot in ahead of the sandbox-HOME fallback inside savesDir.
     const target = sandbox_home;
     std.Io.Dir.cwd().createDirPath(frame.io, target) catch {}; // best-effort
 
@@ -2389,6 +2387,17 @@ pub fn doOpenInstallFolder(frame: *Frame, game: *const library.Game) void {
         state.pushToast(.err, msg);
         return;
     };
+}
+
+/// The folder f69 treats as a game's saves: the user's manual override when
+/// set (detail ⋯ → "Set saves folder…"), else the auto per-game sandbox HOME
+/// (`<library_root>/<tid>/.f69-home`). Allocator-owned (frame.lib.alloc); the
+/// caller frees. Backs Open/Backup/Import-saves so all three honour the
+/// override, which is what an unsandboxed game (saves in the real OS location)
+/// needs.
+fn savesDir(frame: *Frame, tid: u64) ![]u8 {
+    if (frame.lib.savePathOverride(tid) catch null) |ov| return ov;
+    return std.fmt.allocPrint(frame.lib.alloc, "{s}/{d}/.f69-home", .{ frame.info.library_root, tid });
 }
 
 /// Pure. Expand `$HOME` and `$XDG_DATA_HOME` in the recipe's saves

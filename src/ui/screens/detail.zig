@@ -103,6 +103,16 @@ pub fn detailScreen(frame: *Frame) !bool {
                 actions.doImportSaves(frame, game);
                 ob.close();
             }
+            if (dvui.menuItemLabel(@src(), "Set saves folder\u{2026}", .{}, .{ .expand = .horizontal }) != null) {
+                actions.setSavesFolder(frame, game);
+                ob.close();
+            }
+            if (frame.lib.hasSavePathOverride(game.f95_thread_id) catch false) {
+                if (dvui.menuItemLabel(@src(), "Use default saves folder", .{}, .{ .expand = .horizontal }) != null) {
+                    actions.clearSavesFolder(frame, game);
+                    ob.close();
+                }
+            }
             _ = dvui.separator(@src(), .{ .expand = .horizontal });
             // (Convert + Fix Compat + engine tools live in the Tools tab.)
             if (dvui.menuItemLabel(@src(), "Sync now", .{}, .{ .expand = .horizontal }) != null) {

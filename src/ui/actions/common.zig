@@ -929,6 +929,36 @@ pub fn setInstallFolder(frame: *Frame, game: *const library.Game) void {
     state.notifyOk("Install folder set — the game is now marked installed.");
 }
 
+/// Set a game's saves folder manually (detail ⋯ → "Set saves folder…"). Opens
+/// a directory picker; the Open/Backup/Import-saves actions then target it
+/// instead of the auto sandbox-HOME location — needed for unsandboxed games or
+/// engines whose saves f69 can't guess.
+pub fn setSavesFolder(frame: *Frame, game: *const library.Game) void {
+    const file_picker = @import("util_file_picker");
+    const state = frame.state;
+    const alloc = frame.lib.alloc;
+    const picked = (file_picker.openFolder(alloc, null) catch |e| {
+        var buf: [160]u8 = undefined;
+        state.notifyErr(std.fmt.bufPrint(&buf, "Folder picker failed: {s}", .{@errorName(e)}) catch "Folder picker failed");
+        return;
+    }) orelse return; // cancelled
+    defer alloc.free(picked);
+    frame.lib.setGameSavePath(game.f95_thread_id, picked) catch {
+        state.notifyErr("Couldn't set the saves folder — the library update failed.");
+        return;
+    };
+    state.notifyOk("Saves folder set — Open/Backup/Import saves now use it.");
+}
+
+/// Clear a game's manual saves-folder override, reverting to the auto location.
+pub fn clearSavesFolder(frame: *Frame, game: *const library.Game) void {
+    frame.lib.setGameSavePath(game.f95_thread_id, null) catch {
+        frame.state.notifyErr("Couldn't reset the saves folder.");
+        return;
+    };
+    frame.state.notifyInfo("Saves folder reset to the default location.");
+}
+
 /// 36-char hex+dash UUID for a manual install row, same shape as the
 /// installer/import UUIDs. Local so common.zig doesn't reach across modules.
 fn generateUuid(io: std.Io, out: *[36]u8) void {

@@ -661,6 +661,40 @@ pub const Library = struct {
         self.install_generation +%= 1;
     }
 
+    /// Set (or clear, when `path` is null) a game's manual saves-folder
+    /// override. When set, the Open/Backup/Import-saves actions target this
+    /// folder instead of the auto-derived per-game sandbox HOME.
+    pub fn setGameSavePath(self: *Library, thread_id: u64, path: ?[]const u8) errs.Error!void {
+        self.conn.inner.exec(
+            "UPDATE games SET save_path_override = ? WHERE f95_thread_id = ?",
+            .{ path, @as(i64, @intCast(thread_id)) },
+        ) catch return self.dbFail();
+    }
+
+    /// The game's manual saves-folder override, or null when unset. Caller
+    /// frees a non-null result.
+    pub fn savePathOverride(self: *Library, thread_id: u64) errs.Error!?[]u8 {
+        var row = (self.conn.inner.row(
+            "SELECT save_path_override FROM games WHERE f95_thread_id = ?",
+            .{@as(i64, @intCast(thread_id))},
+        ) catch return self.dbFail()) orelse return null;
+        defer row.deinit();
+        const val = row.nullableText(0) orelse return null;
+        if (val.len == 0) return null;
+        return self.alloc.dupe(u8, val) catch return errs.Error.OutOfMemory;
+    }
+
+    /// True when a game has a manual saves-folder override set. No allocation —
+    /// used by the detail menu to decide whether to show "Use default".
+    pub fn hasSavePathOverride(self: *Library, thread_id: u64) errs.Error!bool {
+        var row = (self.conn.inner.row(
+            "SELECT save_path_override FROM games WHERE f95_thread_id = ? AND save_path_override IS NOT NULL AND save_path_override <> ''",
+            .{@as(i64, @intCast(thread_id))},
+        ) catch return self.dbFail()) orelse return false;
+        row.deinit();
+        return true;
+    }
+
     /// Apply scrape result to an in-memory `Game` whose strings are
     /// already owned by `self.alloc` (i.e. came out of `listGames`).
     /// Replaces name/developer/latest_version with fresh `self.alloc`-
@@ -1768,6 +1802,17 @@ const migrations = [_]Migration{
         \\);
         ,
     },
+    .{
+        .id = 23,
+        .sql =
+        // Manual per-game saves-folder override. NULL = use the auto
+        // location (the per-game sandbox HOME). Set when a game writes its
+        // saves somewhere f69 can't guess (unsandboxed game, custom engine).
+        // Deliberately NOT in upsertGame's column list, so a metadata sync's
+        // ON CONFLICT DO UPDATE leaves it untouched.
+        \\ALTER TABLE games ADD COLUMN save_path_override TEXT;
+        ,
+    },
 };
 
 fn runMigrations(alloc: std.mem.Allocator, conn: *dbu.Conn, db_path: []const u8) !void {
@@ -2779,6 +2824,32 @@ test "library: registerManualInstall adds a .manual install and guards collision
     try std.testing.expectError(errs.Error.InstallPathInUse, lib.registerManualInstall(8, "0.2.40", "/media/games/G", "22222222-2222-2222-2222-222222222222".*, 2));
     // Same (game, version) again → refused (would clobber a row that may carry mod links).
     try std.testing.expectError(errs.Error.InstallVersionExists, lib.registerManualInstall(7, "0.2.40", "/media/games/G2", "33333333-3333-3333-3333-333333333333".*, 3));
+}
+
+test "library: save-path override round-trips and a metadata sync preserves it" {
+    var lib = try Library.open(std.testing.allocator, ":memory:");
+    defer lib.close();
+    try lib.upsertGame(&.{ .f95_thread_id = 42, .name = "G" });
+
+    try std.testing.expect(!try lib.hasSavePathOverride(42));
+    try std.testing.expect((try lib.savePathOverride(42)) == null);
+
+    try lib.setGameSavePath(42, "/home/u/saves/G");
+    try std.testing.expect(try lib.hasSavePathOverride(42));
+    const got = (try lib.savePathOverride(42)).?;
+    defer std.testing.allocator.free(got);
+    try std.testing.expectEqualStrings("/home/u/saves/G", got);
+
+    // A metadata sync goes through upsertGame's ON CONFLICT DO UPDATE, which
+    // must NOT touch save_path_override (it's not in the column list).
+    try lib.upsertGame(&.{ .f95_thread_id = 42, .name = "G (synced)", .rating = 4.5 });
+    const after = (try lib.savePathOverride(42)).?;
+    defer std.testing.allocator.free(after);
+    try std.testing.expectEqualStrings("/home/u/saves/G", after);
+
+    try lib.setGameSavePath(42, null);
+    try std.testing.expect(!try lib.hasSavePathOverride(42));
+    try std.testing.expect((try lib.savePathOverride(42)) == null);
 }
 
 // Pull nested tests into this module's test binary (same idiom as

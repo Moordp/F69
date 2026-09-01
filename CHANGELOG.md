@@ -2,6 +2,26 @@
 
 All notable, user-facing changes. Dates are YYYY-MM-DD.
 
+## [0.14.1] - 2026-09-01
+
+### Set-your-own folders
+Four things f69 normally places for you can now be pointed wherever you want —
+automatic by default, manual when you need it:
+- **Downloads folder** (Settings → Downloads) — put downloads on a bigger disk.
+- **Download engine** (Settings → Downloads) — browse to an `aria2c` binary when
+  the bundled one / your PATH can't be found, so downloads work anyway.
+- **Covers folder** (Settings → Library) — move the cover/screenshot image cache
+  to another volume.
+- **Saves folder** (a game's ⋯ menu → *"Set saves folder…"*) — tell f69 where a
+  game actually keeps its saves, so *Open / Backup / Import saves* target the
+  right place; *"Use default saves folder"* reverts it.
+
+The three Settings folders apply on restart.
+
+### Fixed
+- The Downloads settings page laid its sections out sideways / off-screen —
+  they now stack correctly.
+
 ## [0.14.0] - 2026-09-01
 
 ### Library
@@ -182,6 +202,7 @@ and making the app readable and reliable across distros.
   Nix), fuzz targets, and headless UI integration tests. CI actions moved off
   the deprecated Node 20 runtime.
 
+[0.14.1]: https://github.com/Moordp/F69/releases/tag/v0.14.1
 [0.14.0]: https://github.com/Moordp/F69/releases/tag/v0.14.0
 [0.13.0]: https://github.com/Moordp/F69/releases/tag/v0.13.0
 [0.12.1]: https://github.com/Moordp/F69/releases/tag/v0.12.1

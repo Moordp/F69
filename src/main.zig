@@ -208,8 +208,14 @@ pub fn main(init: std.process.Init) !void {
     const db_path = try std.fmt.allocPrint(gpa, "{s}/f69.db", .{data_root});
     defer gpa.free(db_path);
 
-    // Cover-image cache at `<data_root>/covers/`.
-    const covers_dir = try std.fmt.allocPrint(gpa, "{s}/covers", .{data_root});
+    // Cover-image cache at `<data_root>/covers/`. Overridable via
+    // `<data_root>/covers_dir` (one absolute line) so the image cache — the
+    // large, disposable dir — can live on another volume than the DB. Settings
+    // → Library writes it; applies on restart.
+    const covers_dir_setting = try std.fmt.allocPrint(gpa, "{s}/covers_dir", .{data_root});
+    defer gpa.free(covers_dir_setting);
+    const covers_dir = (util_setting.readSingleLine(init.io, gpa, covers_dir_setting) catch null) orelse
+        try std.fmt.allocPrint(gpa, "{s}/covers", .{data_root});
     defer gpa.free(covers_dir);
     try std.Io.Dir.cwd().createDirPath(init.io, covers_dir);
     sweepTmpCovers(init.io, covers_dir) catch {};
@@ -336,7 +342,7 @@ pub fn main(init: std.process.Init) !void {
     try std.Io.Dir.cwd().createDirPath(init.io, downloads_torrents_root);
     log.info("downloads direct={s} torrents={s}", .{ downloads_direct_root, downloads_torrents_root });
 
-    const aria2_path = try resolveAria2Path(gpa, init.io, init.minimal.environ);
+    const aria2_path = try resolveAria2Path(gpa, init.io, init.minimal.environ, data_root);
     defer gpa.free(aria2_path);
     var dl_mgr = downloads.Manager.init(
         gpa,
@@ -1011,7 +1017,24 @@ fn resolveTempDir(gpa: std.mem.Allocator, environ: std.process.Environ) ![]u8 {
     return gpa.dupe(u8, "/tmp");
 }
 
-fn resolveAria2Path(gpa: std.mem.Allocator, io: std.Io, environ: std.process.Environ) ![]u8 {
+fn resolveAria2Path(gpa: std.mem.Allocator, io: std.Io, environ: std.process.Environ, data_root: []const u8) ![]u8 {
+    // Manual override first: `<data_root>/aria2_path` (one absolute line),
+    // written by Settings → Downloads → "Browse to aria2c…". Honoured only
+    // when it points at a file that exists, so a stale override can't silently
+    // break downloads — it just falls through to the bundled/PATH lookup.
+    const override_setting = try std.fmt.allocPrint(gpa, "{s}/aria2_path", .{data_root});
+    defer gpa.free(override_setting);
+    if (util_setting.readSingleLine(io, gpa, override_setting) catch null) |ov| {
+        if (ov.len > 0 and blk: {
+            std.Io.Dir.cwd().access(io, ov, .{}) catch break :blk false;
+            break :blk true;
+        }) {
+            log.info("aria2c: using configured binary at {s}", .{ov});
+            return ov;
+        }
+        gpa.free(ov);
+    }
+
     // The bundled binary is `aria2c.exe` on Windows; the bare fallback
     // name still resolves via PATH+PATHEXT there. Without the `.exe` the
     // explicit-path probe never matched and Windows always fell back to a
@@ -1120,6 +1143,44 @@ test "parseBackupEpoch" {
     try std.testing.expectEqual(@as(?i64, null), parseBackupEpoch("other-123.db"));
     try std.testing.expectEqual(@as(?i64, null), parseBackupEpoch("f69-abc.db"));
     try std.testing.expectEqual(@as(?i64, null), parseBackupEpoch("f69-123.txt"));
+}
+
+// The aria2c path override (`<data_root>/aria2_path`) uses the same
+// `util_setting.readSingleLine` + "use it only if it exists on disk" pattern
+// as the downloads_dir and covers_dir overrides, so these two cover that
+// mechanism for all three. Linux-only: they write fixed /tmp paths.
+test "resolveAria2Path: a valid aria2_path override wins over the bundled/PATH probe" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .limited(2) });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const dir = "/tmp/f69-test-aria-override";
+    std.Io.Dir.cwd().createDirPath(io, dir) catch {};
+    const bin = dir ++ "/my-aria2c";
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = bin, .data = "MZ" }); // a real file on disk
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = dir ++ "/aria2_path", .data = bin });
+
+    const resolved = try resolveAria2Path(std.testing.allocator, io, .empty, dir);
+    defer std.testing.allocator.free(resolved);
+    try std.testing.expectEqualStrings(bin, resolved);
+}
+
+test "resolveAria2Path: a stale override (target missing) is ignored, falls back to the bare name" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{ .async_limit = .limited(2) });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const dir = "/tmp/f69-test-aria-stale";
+    std.Io.Dir.cwd().createDirPath(io, dir) catch {};
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = dir ++ "/aria2_path", .data = dir ++ "/does-not-exist" });
+
+    // No bundled aria2c next to the test binary, so the fallback is the bare
+    // "aria2c" PATH name — never the stale override.
+    const resolved = try resolveAria2Path(std.testing.allocator, io, .empty, dir);
+    defer std.testing.allocator.free(resolved);
+    try std.testing.expectEqualStrings("aria2c", resolved);
 }
 
 fn sweepTmpCovers(io: std.Io, covers_dir: []const u8) !void {
