@@ -850,7 +850,7 @@ pub const State = struct {
     /// Library list-view dvui.grid: resizable per-column widths (the grid
     /// mutates these on drag) + the grid's own scroll info (VirtualScroller).
     /// Columns: Name, Engine, Rating, Version, Updated.
-    lib_col_widths: [7]f32 = .{ 230, 92, 78, 150, 70, 70, 44 },
+    lib_col_widths: [7]f32 = .{ 230, 112, 78, 150, 92, 84, 44 },
     lib_grid_scroll: dvui.ScrollInfo = .{},
     /// Kanban view: one independent scroll per status column so each
     /// column scrolls on its own (and to its own height). Indexed by

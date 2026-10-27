@@ -2,6 +2,19 @@
 
 All notable, user-facing changes. Dates are YYYY-MM-DD.
 
+## [0.15.4] - 2026-10-27
+
+### Changed
+- **List view covers are shown whole.** Each cover is scaled to fit a fixed
+  96×54 slot with its own proportions — no more squeezed or stretched images.
+  Narrow (portrait) covers get empty space on the sides. Names stay lined up.
+
+### Fixed
+- **Cover floated in the middle of the Name column** (and could cover the game
+  name in a narrow window) since 0.15.3. It now sits at the left, before the name.
+- Engine, Updated and Played columns are wider, so "RPGM MV" and the headers
+  are no longer cut off.
+
 ## [0.15.3] - 2026-10-27
 
 ### Fixed

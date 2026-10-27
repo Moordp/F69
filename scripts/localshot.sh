@@ -40,6 +40,10 @@ DB="$DATA/f69.db"
 # 2. Seed one rich game: portrait cover, 3 screenshots, 3 installs.
 echo "[localshot] seeding…"
 cp "$TD/cover.png" "$DATA/covers/101"
+cp "$TD/shot1.png" "$DATA/covers/102"   # landscape cover (list-view fit check)
+# list/grid read the downscaled `<id>.t` thumbs, not the full cover
+cp "$TD/cover.png" "$DATA/covers/101.t"
+cp "$TD/shot1.png" "$DATA/covers/102.t"
 cp "$TD/shot1.png" "$DATA/covers/101.s1"
 cp "$TD/shot1.png" "$DATA/covers/101.s2"
 cp "$TD/shot1.png" "$DATA/covers/101.s3"
@@ -47,6 +51,8 @@ T=$(date +%s)
 run sqlite3 "$DB" "
 INSERT OR REPLACE INTO games(f95_thread_id,name,developer,rating,vote_count,completion_status,engine,latest_version,created_at,screenshots_json)
  VALUES (101,'Eternal Dusk','Moonlit Studios',4.6,1200,'in_progress','renpy','0.9.0',$T,'[\"s1\",\"s2\",\"s3\"]');
+INSERT OR REPLACE INTO games(f95_thread_id,name,developer,rating,vote_count,completion_status,engine,latest_version,created_at)
+ VALUES (102,'Wide Cover Game','Studio B',3.5,80,'in_progress','rpgmmv','1.2',$T);
 INSERT OR REPLACE INTO installs(id,game_thread_id,version,install_path,recipe_id,installed_at) VALUES
  ('inst-0900',101,'0.9.0','$DATA/g090','manual',$T),
  ('inst-0820',101,'0.8.2','$DATA/g082','manual',$T),

@@ -1364,6 +1364,18 @@ fn rowHit(src: std.builtin.SourceLocation, thread_id: u64) *dvui.BoxWidget {
     });
 }
 
+/// Cover slot of a list row (logical pixels).
+const LIST_THUMB_W: f32 = 96;
+const LIST_THUMB_H: f32 = 54;
+
+/// Largest size with `img`'s aspect ratio that fits in `w` x `h`. Falls back to
+/// the full slot when the image size is unknown (zero).
+fn fitInside(img: dvui.Size, w: f32, h: f32) dvui.Size {
+    if (img.w <= 0 or img.h <= 0) return .{ .w = w, .h = h };
+    const k = @min(w / img.w, h / img.h);
+    return .{ .w = @round(img.w * k), .h = @round(img.h * k) };
+}
+
 fn renderListTable(frame: *Frame, games: []const library.Game, filtered: []const u32) void {
     const state = frame.state;
     const now_s: i64 = std.Io.Clock.Timestamp.now(frame.io, .real).raw.toSeconds();
@@ -1438,32 +1450,35 @@ fn renderListTable(frame: *Frame, games: []const library.Game, filtered: []const
                 });
                 defer nrow.deinit();
 
-                // Design-B list rows lead with a small cover thumbnail.
+                // Design-B list rows lead with a cover thumbnail. Fixed slot so
+                // names line up; the cover is scaled to fit inside it (whole
+                // image, aspect ratio kept) instead of being stretched.
+                var slot = dvui.box(@src(), .{}, .{
+                    .id_extra = g.f95_thread_id,
+                    .gravity_y = 0.5,
+                    .min_size_content = .{ .w = LIST_THUMB_W, .h = LIST_THUMB_H },
+                    .max_size_content = .{ .w = LIST_THUMB_W, .h = LIST_THUMB_H },
+                    .margin = .{ .x = 0, .y = 2, .w = 9, .h = 2 },
+                    .background = true,
+                    .color_fill = .{ .color = style.cardFill() },
+                    .corners = .all(3),
+                    .border = style.border_thin,
+                    .color_border = .{ .color = style.borderColor() },
+                });
                 if (actions.coverBytes(frame, g.f95_thread_id)) |cb| {
-                    _ = dvui.image(@src(), .{ .source = .{ .imageFile = .{ .bytes = cb, .name = "list-cover" } }, .shrink = .ratio }, .{
+                    const src: dvui.ImageSource = .{ .imageFile = .{ .bytes = cb, .name = "list-cover" } };
+                    const fit = fitInside(dvui.imageSize(src) catch .{ .w = 0, .h = 0 }, LIST_THUMB_W, LIST_THUMB_H);
+                    _ = dvui.image(@src(), .{ .source = src }, .{
                         .id_extra = g.f95_thread_id,
                         .gravity_x = 0.5,
                         .gravity_y = 0.5,
-                        .min_size_content = .{ .w = 38, .h = 50 },
-                        .max_size_content = .{ .w = 38, .h = 50 },
-                        .margin = .{ .x = 0, .y = 2, .w = 9, .h = 2 },
-                        .corners = .all(3),
+                        .min_size_content = fit,
+                        .max_size_content = .{ .w = fit.w, .h = fit.h },
+                        .corners = .all(2),
                     });
-                } else {
-                    var ph = dvui.box(@src(), .{}, .{
-                        .id_extra = g.f95_thread_id,
-                        .gravity_y = 0.5,
-                        .min_size_content = .{ .w = 38, .h = 50 },
-                        .max_size_content = .{ .w = 38, .h = 50 },
-                        .margin = .{ .x = 0, .y = 2, .w = 9, .h = 2 },
-                        .background = true,
-                        .color_fill = .{ .color = style.cardFill() },
-                        .corners = .all(3),
-                        .border = style.border_thin,
-                        .color_border = .{ .color = style.borderColor() },
-                    });
-                    ph.deinit();
                 }
+                // Close the slot now so the dot / name / chips are row siblings.
+                slot.deinit();
 
                 const sc = components.completionStatusColor(g.completion_status);
                 comp.dot(@src(), .{ .r = sc.r, .g = sc.g, .b = sc.b, .a = sc.a }, .{
