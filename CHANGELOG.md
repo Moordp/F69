@@ -2,6 +2,15 @@
 
 All notable, user-facing changes. Dates are YYYY-MM-DD.
 
+## [0.15.1] - 2026-10-27
+
+### Fixes
+- **Pull bookmarks now gets all your bookmarked games.** 0.15.0 only found a
+  few hundred, because F95 splits the bookmarks page into a short Games preview
+  and a Posts list. f69 now reads the full games list (sorted by date added, so
+  paging doesn't shift) and takes each game's name, version and developer from
+  its title, so versions show right after the pull.
+
 ## [0.15.0] - 2026-10-27
 
 ### Fixes

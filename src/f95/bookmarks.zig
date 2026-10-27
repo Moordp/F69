@@ -34,13 +34,23 @@ const MAX_PAGES = 500;
 const Source = struct {
     /// Query string up to and including `page=`.
     query: []const u8,
-    /// Class name of the element wrapping each row's thread anchor.
-    row_marker: []const u8,
+    /// Classes of the element wrapping each row's thread link.
+    markers: []const []const u8,
+    /// Only walked when the earlier sources found nothing.
+    fallback: bool = false,
 };
 
+/// F95's `?tab=bookmarks` page is split into groups: Games (a few rows plus
+/// "Show all N bookmarked games", which is `bm=games`) and Posts (bookmarked
+/// posts in discussion threads — not games). `bm=games` is the full list;
+/// `sort=added` keeps the order stable while paging (the default order
+/// shifts as threads update). Game rows are `structItem` rows.
+const GAME_ROWS = [_][]const u8{"structItem-title"};
+
 const SOURCES = [_]Source{
-    .{ .query = "?tab=bookmarks&page=", .row_marker = "contentRow-title" },
-    .{ .query = "?tab=new&src=bookmarked&hide_seen=0&page=", .row_marker = "f95wg-row-title" },
+    .{ .query = "?tab=bookmarks&bm=games&sort=added&page=", .markers = &GAME_ROWS },
+    // The default page's Games group, in case `bm=games` is ever renamed.
+    .{ .query = "?tab=bookmarks&sort=added&page=", .markers = &GAME_ROWS, .fallback = true },
 };
 
 /// Optional progress sink for `fetchAll`. Caller passes atomic pointers
@@ -88,6 +98,7 @@ pub fn fetchAll(
 
     var pages_done: u32 = 0;
     for (SOURCES, 0..) |src, src_idx| {
+        if (src.fallback and out.items.len > 0) continue;
         const pages_before = pages_done;
         // First thread id of the previous page — XenForo serves the last
         // page again for out-of-range page numbers, so a repeat means done.
@@ -127,7 +138,7 @@ pub fn fetchAll(
             }
 
             const before_count = out.items.len;
-            const found = try collectRows(alloc, body, src.row_marker, &seen, &out);
+            const found = try collectPage(alloc, body, src.markers, &seen, &out);
             const added = out.items.len - before_count;
 
             log.info("{s} page {d}: {d} rows, +{d} (running total {d})", .{ src.query, page, found.rows, added, out.items.len });
@@ -226,7 +237,7 @@ const RowsFound = struct {
 };
 
 /// How far past a row marker to look for its `<a href="…">`.
-const ANCHOR_WINDOW = 1024;
+const ANCHOR_WINDOW = 4096;
 
 /// The slice of `html` that holds the page's real content: from the
 /// `p-body-pageContent` container up to the sidebar. Empty if the
@@ -281,12 +292,23 @@ fn collectRows(
         rest = rest[i + row_marker.len ..];
         const window = rest[0..@min(rest.len, ANCHOR_WINDOW)];
 
-        const a = std.mem.indexOf(u8, window, "<a ") orelse continue;
-        const href_key = "href=\"";
-        const k = std.mem.indexOfPos(u8, window, a, href_key) orelse continue;
-        const v_start = k + href_key.len;
-        const v_end = std.mem.indexOfScalarPos(u8, window, v_start, '"') orelse continue;
-        const href = window[v_start..v_end];
+        // The row's thread link: the first `<a>` whose href has `threads/`
+        // (rows start with prefix label links — VN, Ren'Py — that point at
+        // `watched/threads?prefix_id=…`, not at the thread). If the marked
+        // element has no such anchor, fall back to its `uix-href` attribute.
+        var href: []const u8 = "";
+        var title_html: []const u8 = "";
+        if (findThreadAnchor(window)) |anchor| {
+            href = anchor.href;
+            title_html = anchor.inner;
+        } else {
+            const tag_end = std.mem.indexOfScalar(u8, window, '>') orelse window.len;
+            const uix_key = "uix-href=\"";
+            const u = std.mem.indexOf(u8, window[0..tag_end], uix_key) orelse continue;
+            const v_start = u + uix_key.len;
+            const v_end = std.mem.indexOfScalarPos(u8, window, v_start, '"') orelse continue;
+            href = window[v_start..v_end];
+        }
 
         const t = std.mem.indexOf(u8, href, "threads/") orelse continue;
         const path = href[t + "threads/".len ..];
@@ -294,19 +316,57 @@ fn collectRows(
 
         res.rows += 1;
         if (res.first_id == null) res.first_id = tid;
-        try appendEntry(alloc, path, tid, rest[v_end + 1 ..], seen, out);
+        try appendEntry(alloc, path, tid, title_html, seen, out);
     }
     return res;
 }
 
+const ThreadAnchor = struct { href: []const u8, inner: []const u8 };
+
+/// First `<a href="…threads/…">inner</a>` in `window`.
+fn findThreadAnchor(window: []const u8) ?ThreadAnchor {
+    var pos: usize = 0;
+    while (std.mem.indexOfPos(u8, window, pos, "<a ")) |a| {
+        pos = a + 3;
+        const gt = std.mem.indexOfScalarPos(u8, window, a, '>') orelse return null;
+        const tag = window[a..gt];
+        const href_key = "href=\"";
+        const k = std.mem.indexOf(u8, tag, href_key) orelse continue;
+        const v_start = k + href_key.len;
+        const v_end = std.mem.indexOfScalarPos(u8, tag, v_start, '"') orelse continue;
+        const href = tag[v_start..v_end];
+        if (std.mem.indexOf(u8, href, "threads/") == null) continue;
+        const close = std.mem.indexOfPos(u8, window, gt, "</a>") orelse return null;
+        return .{ .href = href, .inner = window[gt + 1 .. close] };
+    }
+    return null;
+}
+
+/// Collect rows from one page for each row marker. Counts and `first_id`
+/// come from all markers combined (the first marker with rows wins `first_id`).
+fn collectPage(
+    alloc: std.mem.Allocator,
+    html: []const u8,
+    markers: []const []const u8,
+    seen: *std.StringHashMap(void),
+    out: *std.ArrayList(domain.BookmarkEntry),
+) errs.Error!RowsFound {
+    var total: RowsFound = .{};
+    for (markers) |marker| {
+        const r = try collectRows(alloc, html, marker, seen, out);
+        total.rows += r.rows;
+        if (total.first_id == null) total.first_id = r.first_id;
+    }
+    return total;
+}
+
 /// Add one entry unless `tid` was already seen. `path` is what follows
-/// `threads/` in the href; `after_href` starts right after the href's
-/// closing quote (used to read the anchor text).
+/// `threads/` in the href; `title_html` is the anchor's inner HTML.
 fn appendEntry(
     alloc: std.mem.Allocator,
     path: []const u8,
     tid: []const u8,
-    after_href: []const u8,
+    title_html: []const u8,
     seen: *std.StringHashMap(void),
     out: *std.ArrayList(domain.BookmarkEntry),
 ) errs.Error!void {
@@ -318,7 +378,7 @@ fn appendEntry(
     errdefer alloc.free(tid_owned);
 
     // Title: inner text up to `</a>` with tags stripped. Best-effort.
-    const title_owned = stripTags(alloc, extractAnchorText(after_href) orelse "") catch
+    const title_owned = stripTags(alloc, title_html) catch
         return errs.Error.OutOfMemory;
     errdefer alloc.free(title_owned);
 
@@ -367,17 +427,7 @@ pub fn parseTrailingId(path: []const u8) ?[]const u8 {
     return segment[i..];
 }
 
-/// `<a …>Title</a>` — the anchor's inner HTML, tags and all. `appendEntry`
-/// strips the tags; F95 puts label `<span>`s before and after the title,
-/// so picking one nested piece would return a label instead of the name.
-fn extractAnchorText(rest_after_href: []const u8) ?[]const u8 {
-    const gt = std.mem.indexOfScalar(u8, rest_after_href, '>') orelse return null;
-    const after = rest_after_href[gt + 1 ..];
-    const close = std.mem.indexOfPos(u8, after, 0, "</a>") orelse return null;
-    return after[0..close];
-}
-
-/// Drop `<…>` tags and collapse whitespace runs to one space. Caller owns
+/// Drop `<…>` tags (each acts as a word break) and collapse whitespace runs to one space. Caller owns
 /// the result.
 fn stripTags(alloc: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error![]u8 {
     var buf: std.ArrayList(u8) = .empty;
@@ -387,6 +437,8 @@ fn stripTags(alloc: std.mem.Allocator, raw: []const u8) std.mem.Allocator.Error!
     for (raw) |c| {
         if (c == '<') {
             in_tag = true;
+            // F95 puts label spans right against the title; a tag is a word break.
+            pending_space = buf.items.len > 0;
             continue;
         }
         if (c == '>' and in_tag) {
@@ -490,6 +542,83 @@ test "collectRows reads new f95wg rows and dedupes across sources" {
     try std.testing.expectEqual(@as(usize, 2), found.rows);
     try std.testing.expectEqual(@as(usize, 3), out.items.len);
     try std.testing.expectEqualStrings("333", out.items[2].thread_id);
+}
+
+// Trimmed from a real saved `?tab=bookmarks` page (2026-10-27): the Games
+// group (structItem rows; prefix label links come BEFORE the thread link) and
+// the Posts group (contentRow rows, discussion threads — not games).
+const bookmarks_page =
+    \\<div class="p-body-pageContent">
+    \\<h3 class="f95wg-groupTitle">Games <span class="f95wg-count">1,555</span></h3>
+    \\<div class="structItemContainer f95wg-bmGames">
+    \\<div class="f95wg-bmGame" data-author="MoonBox">
+    \\<div class="structItem structItem--thread is-prefix13 is-prefix7 js-threadListItem-94140">
+    \\<div class="structItem-cell structItem-cell--main">
+    \\<div class="structItem-title" uix-href="/threads/grandmas-house-part-8-v0-114-moonbox.94140/unread">
+    \\<a href="https://f95zone.to/watched/threads?prefix_id[0]=13" class="labelLink" rel="nofollow"><span class="label label--red" dir="auto">VN</span></a><span class="label-append">&nbsp;</span><a href="https://f95zone.to/watched/threads?prefix_id[0]=7" class="labelLink" rel="nofollow"><span class="pre-renpy" dir="auto">Ren'Py</span></a>
+    \\<a href="https://f95zone.to/threads/grandmas-house-part-8-v0-114-moonbox.94140/unread" class="" data-tp-primary="on" data-preview-url="/threads/grandmas-house-part-8-v0-114-moonbox.94140/preview">
+    \\Grandma's House [Part 8 v0.114] [Moonbox]
+    \\</a>
+    \\</div>
+    \\<a href="https://f95zone.to/threads/grandmas-house-part-8-v0-114-moonbox.94140/reviews/" class="f95rv-listScore-count">371 reviews</a>
+    \\</div></div></div>
+    \\<div class="f95wg-bmGame"><div class="structItem structItem--thread"><div class="structItem-cell structItem-cell--main">
+    \\<div class="structItem-title" uix-href="/threads/another-game-v1-0-dev.1234/unread">
+    \\<a href="https://f95zone.to/threads/another-game-v1-0-dev.1234/unread" data-tp-primary="on">Another Game [v1.0] [Dev]</a>
+    \\</div></div></div></div>
+    \\</div>
+    \\<h3 class="f95wg-groupTitle">Posts <span class="f95wg-count">40</span></h3>
+    \\<ol class="listPlain"><li class="block-row"><div class="contentRow-title">
+    \\<a href="https://f95zone.to/threads/dark-dimensions-a-spiritual-successor-game-discussion.205161/">Thread 'Dark Dimensions - Game Discussion'</a>
+    \\</div></li></ol>
+    \\</div>
+;
+
+test "collectPage reads game rows: skips prefix label links, keeps title + version text" {
+    const alloc = std.testing.allocator;
+    var seen = std.StringHashMap(void).init(alloc);
+    defer seen.deinit();
+    var out: std.ArrayList(domain.BookmarkEntry) = .empty;
+    defer freeListPartial(alloc, &out);
+
+    const found = try collectPage(alloc, bookmarks_page, &GAME_ROWS, &seen, &out);
+    // Only the Games group: the Posts group's discussion thread is not a game.
+    try std.testing.expectEqual(@as(usize, 2), found.rows);
+    try std.testing.expectEqualStrings("94140", found.first_id.?);
+    try std.testing.expectEqual(@as(usize, 2), out.items.len);
+    try std.testing.expectEqualStrings("94140", out.items[0].thread_id);
+    try std.testing.expectEqualStrings("Grandma's House [Part 8 v0.114] [Moonbox]", out.items[0].title);
+    try std.testing.expectEqualStrings("https://f95zone.to/threads/grandmas-house-part-8-v0-114-moonbox.94140/", out.items[0].url);
+    try std.testing.expectEqualStrings("1234", out.items[1].thread_id);
+    try std.testing.expectEqualStrings("Another Game [v1.0] [Dev]", out.items[1].title);
+}
+
+test "collectPage falls back to uix-href when the row has no thread anchor" {
+    const alloc = std.testing.allocator;
+    var seen = std.StringHashMap(void).init(alloc);
+    defer seen.deinit();
+    var out: std.ArrayList(domain.BookmarkEntry) = .empty;
+    defer freeListPartial(alloc, &out);
+
+    const html = "<div class=\"p-body-pageContent\"><div class=\"structItem-title\" uix-href=\"/threads/x-y.77/unread\"></div></div>";
+    const found = try collectPage(alloc, html, &GAME_ROWS, &seen, &out);
+    try std.testing.expectEqual(@as(usize, 1), found.rows);
+    try std.testing.expectEqualStrings("77", out.items[0].thread_id);
+}
+
+test "collectPage dedupes across calls and layouts" {
+    const alloc = std.testing.allocator;
+    var seen = std.StringHashMap(void).init(alloc);
+    defer seen.deinit();
+    var out: std.ArrayList(domain.BookmarkEntry) = .empty;
+    defer freeListPartial(alloc, &out);
+
+    const all = [_][]const u8{ "contentRow-title", "f95wg-row-title", "structItem-title" };
+    _ = try collectPage(alloc, classic_page, &all, &seen, &out);
+    _ = try collectPage(alloc, new_page, &all, &seen, &out);
+    _ = try collectPage(alloc, bookmarks_page, &GAME_ROWS, &seen, &out);
+    // classic: 111, 222; new: 111(dup), 333; games: 94140, 1234
+    try std.testing.expectEqual(@as(usize, 5), out.items.len);
 }
 
 test "collectRows: page without p-body-pageContent yields nothing" {
