@@ -24,7 +24,7 @@ pub const button_h: f32 = 16;
 pub const icon_size: dvui.Size = .{ .w = 16, .h = 16 };
 
 /// Standard corner radius for cards, chips, and buttons.
-pub const corner_radius: dvui.Rect = .all(4);
+pub const corner_radius: dvui.CornerRect = .all(4);
 
 /// Standard 1-px border for cards and chips.
 pub const border_thin: dvui.Rect = .all(1);

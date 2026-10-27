@@ -51,7 +51,7 @@ pub fn writeFileAtomic(io: Io, path: []const u8, bytes: []const u8) Error!void {
     // header note); ReplaceFileW-based atomicity stays future work.
     if (builtin.os.tag == .windows) {
         var pz_buf: [4096]u8 = undefined;
-        const pz = std.fmt.bufPrintZ(&pz_buf, "{s}", .{path}) catch return Error.WriteFailed;
+        const pz = std.fmt.bufPrintSentinel(&pz_buf, "{s}", .{path}, 0) catch return Error.WriteFailed;
         const f = std.c.fopen(pz.ptr, "wb") orelse blk: {
             // Parent dir likely missing — build it, then retry once.
             if (std.fs.path.dirname(path)) |dir| {

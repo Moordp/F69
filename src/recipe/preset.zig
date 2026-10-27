@@ -245,13 +245,8 @@ pub const ParsedPreset = struct {
 pub fn parseFromBytes(parent_alloc: std.mem.Allocator, bytes_z: [:0]const u8) errs.Error!ParsedPreset {
     var arena = std.heap.ArenaAllocator.init(parent_alloc);
     errdefer arena.deinit();
-    const preset = std.zon.parse.fromSliceAlloc(
-        Preset,
-        arena.allocator(),
-        bytes_z,
-        null,
-        .{ .ignore_unknown_fields = true, .free_on_error = false },
-    ) catch |e| return switch (e) {
+    var diag: std.zon.parse.Diagnostics = undefined;
+    const preset = std.zon.parse.fromSlice(Preset, .{ .gpa = arena.allocator(), .arena = arena.allocator(), .source = bytes_z, .diagnostics = &diag, .ignore_unknown_fields = true }) catch |e| return switch (e) {
         error.OutOfMemory => errs.Error.OutOfMemory,
         error.ParseZon => errs.Error.ZonParseError,
     };
@@ -388,13 +383,8 @@ pub fn loadMerged(
             continue;
         };
 
-        const parsed = std.zon.parse.fromSliceAlloc(
-            Preset,
-            aalloc,
-            bytes_z,
-            null,
-            .{ .ignore_unknown_fields = true, .free_on_error = false },
-        ) catch |e| {
+        var diag: std.zon.parse.Diagnostics = undefined;
+        const parsed = std.zon.parse.fromSlice(Preset, .{ .gpa = aalloc, .arena = aalloc, .source = bytes_z, .diagnostics = &diag, .ignore_unknown_fields = true }) catch |e| {
             std.log.scoped(.preset).warn("parse failed for {s}: {s}", .{ entry.name, @errorName(e) });
             continue;
         };

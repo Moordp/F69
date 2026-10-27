@@ -40,7 +40,7 @@ pub fn settingsScreen(frame: *Frame) !bool {
         defer top.deinit();
         if (components.iconButton(@src(), "Back", entypo.chevron_left, .{})) state.screen = .library;
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 12, .h = 1 } });
-        dvui.label(@src(), "Settings", .{}, .{ .gravity_y = 0.5, .color_text = dcol(tokens.active.acc) });
+        dvui.label(@src(), "Settings", .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = dcol(tokens.active.acc) } });
     }
     _ = dvui.separator(@src(), .{ .expand = .horizontal });
 
@@ -55,7 +55,7 @@ pub fn settingsScreen(frame: *Frame) !bool {
                 .min_size_content = .{ .w = 190, .h = 0 },
                 .expand = .vertical,
                 .background = true,
-                .color_fill = dcol(tokens.active.bg1),
+                .color_fill = .{ .color = dcol(tokens.active.bg1) },
                 .padding = .{ .x = 8, .y = 12, .w = 8, .h = 12 },
             });
             defer nav.deinit();
@@ -109,7 +109,7 @@ fn catGroup(key: u32, label: []const u8) void {
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 10 } });
     const mono = dvui.Font.theme(.mono);
     dvui.labelNoFmt(@src(), label, .{}, .{
-        .color_text = dcol(tokens.active.ink3),
+        .color_text = .{ .color = dcol(tokens.active.ink3) },
         .padding = .{ .x = 10, .y = 0, .w = 0, .h = 5 },
         .font = mono.withSize(mono.size * 0.82),
     });
@@ -126,17 +126,17 @@ fn catItem(state: *State, label: []const u8, cat: state_mod.SettingsTab) void {
         .tag = cat_tag,
         .expand = .horizontal,
         .background = on,
-        .color_fill = dcol(t.acc_wash),
+        .color_fill = .{ .color = dcol(t.acc_wash) },
         .border = if (on) .{ .x = 2, .y = 0, .w = 0, .h = 0 } else dvui.Rect.all(0),
-        .color_border = dcol(t.acc),
-        .corner_radius = dvui.Rect.all(tokens.r),
+        .color_border = .{ .color = dcol(t.acc) },
+        .corners = dvui.CornerRect.all(tokens.r),
         .padding = .{ .x = 10, .y = 7, .w = 10, .h = 7 },
         .margin = .{ .x = 0, .y = 1, .w = 0, .h = 1 },
     });
     defer row.deinit();
     dvui.labelNoFmt(@src(), label, .{}, .{
         .gravity_y = 0.5,
-        .color_text = dcol(if (on) t.acc else t.ink2),
+        .color_text = .{ .color = dcol(if (on) t.acc else t.ink2) },
     });
     if (dvui.clicked(row.data(), .{})) state.settings_tab = cat;
 }
@@ -150,7 +150,7 @@ fn toggleRow(key: u32, on: bool, title: []const u8, desc: []const u8) bool {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = key, .expand = .horizontal, .padding = .{ .x = 0, .y = 3, .w = 0, .h = 3 } });
         defer row.deinit();
-        dvui.labelNoFmt(@src(), title, .{}, .{ .gravity_y = 0.5, .color_text = dcol(tokens.active.ink) });
+        dvui.labelNoFmt(@src(), title, .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = dcol(tokens.active.ink) } });
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         // Stable per-toggle tag (keys are unique comptime literals at the call
         // sites) so headless Layer-2 tests can moveTo+click a specific toggle.
@@ -192,7 +192,7 @@ fn renderCatPresets(frame: *Frame) void {
 /// frame so changes show instantly.
 fn renderSettingsAppearance(frame: *Frame) void {
     var changed = false;
-    dvui.label(@src(), "Theme", .{}, .{ .color_text = dcol(tokens.active.acc) });
+    dvui.label(@src(), "Theme", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
     {
         const labels = [_][]const u8{ "Console", "Obsidian", "Midnight", "Paper" };
@@ -226,10 +226,10 @@ fn renderSettingsAppearance(frame: *Frame) void {
                 .id_extra = i,
                 .min_size_content = .{ .w = 28, .h = 28 },
                 .background = true,
-                .color_fill = tokens.toDvui(sw, dvui.Color),
-                .corner_radius = dvui.Rect.all(tokens.r),
+                .color_fill = .{ .color = tokens.toDvui(sw, dvui.Color) },
+                .corners = dvui.CornerRect.all(tokens.r),
                 .border = dvui.Rect.all(1),
-                .color_border = tokens.toDvui(tokens.active.line, dvui.Color),
+                .color_border = .{ .color = tokens.toDvui(tokens.active.line, dvui.Color) },
                 .margin = .{ .x = 0, .y = 0, .w = 6, .h = 0 },
             };
             if (dvui.button(@src(), "", .{}, opts)) {
@@ -284,7 +284,7 @@ fn renderCatGamesLaunch(frame: *Frame) void {
 /// detail-page dropdown can override this.
 fn renderAutoUpdateDefaultSection(frame: *Frame) void {
     const state = frame.state;
-    dvui.label(@src(), "On new versions", .{}, .{ .color_text = dcol(tokens.active.acc) });
+    dvui.label(@src(), "On new versions", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
     if (toggleRow(1, state.auto_update_default, "Auto-download updates on batch sync", "When sync finds a newer version, download + install it automatically. Only from Sync All / scheduled checks, never a single-game sync. Manual installs without a recipe are skipped — they need a fresh archive.")) {
         state.auto_update_default = !state.auto_update_default;
@@ -301,7 +301,7 @@ fn renderAutoUpdateDefaultSection(frame: *Frame) void {
 /// recorded counts_as_played values are not retroactively recalculated.
 fn renderMinSessionSecondsSection(frame: *Frame) void {
     const state = frame.state;
-    dvui.label(@src(), "Minimum play session length", .{}, .{ .color_text = dcol(tokens.active.acc) });
+    dvui.label(@src(), "Minimum play session length", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     components.settingsHelpText(
         "A launch only counts as 'played' if the game ran for at least this many seconds. " ++
@@ -327,14 +327,14 @@ fn renderMinSessionSecondsSection(frame: *Frame) void {
         } else |_| {}
     }
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 4 } });
-    dvui.label(@src(), "0 = every successful launch counts as played.", .{}, .{ .color_text = helpTextColor() });
+    dvui.label(@src(), "0 = every successful launch counts as played.", .{}, .{ .color_text = .{ .color = helpTextColor() } });
 }
 
 /// "Sandbox on launch by default" checkbox. Each game's per-game
 /// SandboxOverride wins over this — only `.use_default` consults it.
 fn renderSandboxDefaultSection(frame: *Frame) void {
     const state = frame.state;
-    dvui.label(@src(), "Sandbox", .{}, .{ .color_text = dcol(tokens.active.acc) });
+    dvui.label(@src(), "Sandbox", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
     if (toggleRow(3, state.sandbox_default, "Sandbox games by default", "bwrap on Linux, Sandboxie on Windows. Each game's detail page can override with always / never. Falls back to unsandboxed when unavailable.")) {
         state.sandbox_default = !state.sandbox_default;
@@ -513,7 +513,7 @@ fn relocateGamesFolder(frame: *Frame) void {
 /// because Convert pulls SDKs and can be slow.
 fn renderAutoConvertSection(frame: *Frame) void {
     const state = frame.state;
-    dvui.label(@src(), "After install", .{}, .{ .color_text = dcol(tokens.active.acc) });
+    dvui.label(@src(), "After install", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
     if (toggleRow(4, state.auto_convert, "Convert new installs automatically", "When a download extracts, run Convert (Ren'Py / RPGM Win→Linux). Needs a recipe with a `convert_linux` block — games without one need manual Convert.")) {
         state.auto_convert = !state.auto_convert;
@@ -542,7 +542,7 @@ fn renderCatUpdates(frame: *Frame) void {
     settingsSectionDivider(12);
     renderParallelismSection(frame);
     settingsSectionDivider(4);
-    dvui.label(@src(), "Network", .{}, .{ .color_text = dcol(tokens.active.acc) });
+    dvui.label(@src(), "Network", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     var rl_buf: [32]u8 = undefined;
     const rl = std.fmt.bufPrint(&rl_buf, "{d} ms", .{frame.info.rate_limit_ms}) catch "?";
@@ -561,7 +561,7 @@ fn renderCatUpdates(frame: *Frame) void {
 /// keeping metadata refreshes fast.
 fn renderParallelismSection(frame: *Frame) void {
     const state = frame.state;
-    dvui.label(@src(), "Parallelism", .{}, .{ .color_text = dcol(tokens.active.acc) });
+    dvui.label(@src(), "Parallelism", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     components.settingsHelpText(
         "How many refresh workers run at the same time. Sync workers fetch metadata " ++
@@ -641,7 +641,7 @@ fn renderParallelismSection(frame: *Frame) void {
 /// pointer events meant for the dropdown.
 fn renderRefreshBackendSection(frame: *Frame) void {
     const state = frame.state;
-    dvui.label(@src(), "Refresh backend", .{}, .{ .color_text = dcol(tokens.active.acc) });
+    dvui.label(@src(), "Refresh backend", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
 
     // Dropdown row — label + dropdown side-by-side, clearly above any
@@ -687,7 +687,7 @@ fn renderRefreshBackendSection(frame: *Frame) void {
 /// paginated latest-updates walker, or F95's official RSS feed.
 fn renderUpdateCheckSourceSection(frame: *Frame) void {
     const state = frame.state;
-    dvui.label(@src(), "Check-for-updates source", .{}, .{ .color_text = dcol(tokens.active.acc) });
+    dvui.label(@src(), "Check-for-updates source", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
@@ -723,7 +723,7 @@ fn renderSettingsAccounts(frame: *Frame) void {
 
 /// Library tab — portable paths, library statistics, mod section.
 fn renderSettingsLibrary(frame: *Frame) void {
-    dvui.label(@src(), "Paths", .{}, .{ .color_text = dcol(tokens.active.acc) });
+    dvui.label(@src(), "Paths", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     var row_id: u32 = 0;
     settingsRow(&row_id, "Database", frame.info.db_path);
@@ -739,7 +739,7 @@ fn renderSettingsLibrary(frame: *Frame) void {
         relocateGamesFolder(frame);
     }
     dvui.labelNoFmt(@src(), "Repoints all install links to a new folder. Does not move files — move the game folders yourself first (or leave them in place). Takes effect on restart.", .{}, .{
-        .color_text = style.labelDim(),
+        .color_text = .{ .color = style.labelDim() },
     });
 
     // Covers cache override — the large, disposable image cache can live on a
@@ -754,7 +754,7 @@ fn renderSettingsLibrary(frame: *Frame) void {
         if (dvui.button(@src(), "Reset to default", .{}, .{ .gravity_y = 0.5, .id_extra = 0xC0FE })) resetPathOverride(frame, "covers_dir", "Covers folder reset to the default (inside your data folder).");
     }
     dvui.labelNoFmt(@src(), "Moves where cover + screenshot images are cached. Existing images aren't moved; they re-download on demand. Takes effect on restart.", .{}, .{
-        .color_text = style.labelDim(),
+        .color_text = .{ .color = style.labelDim() },
     });
 
     settingsSectionDivider(3);
@@ -763,7 +763,7 @@ fn renderSettingsLibrary(frame: *Frame) void {
 
     settingsSectionDivider(4);
 
-    dvui.label(@src(), "Statistics", .{}, .{ .color_text = dcol(tokens.active.acc) });
+    dvui.label(@src(), "Statistics", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
 
     const stats = libraryStats(frame.games);
@@ -822,7 +822,7 @@ fn renderSettingsLibrary(frame: *Frame) void {
 /// FUSE NTFS). No background-job machinery needed.
 fn renderEngineReanalyseSection(frame: *Frame) void {
     const state = frame.state;
-    dvui.label(@src(), "Engine labels", .{}, .{ .color_text = dcol(tokens.active.acc) });
+    dvui.label(@src(), "Engine labels", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     components.settingsHelpText(
         "Walks each installed game, probes the on-disk files, and updates the engine label when the bracket-derived guess from F95's title turns out to be wrong. Skips games with no install.",
@@ -845,7 +845,7 @@ fn renderEngineReanalyseSection(frame: *Frame) void {
         const msg = state.engine_reanalyse_msg_buf[0..state.engine_reanalyse_msg_len];
         dvui.labelNoFmt(@src(), msg, .{}, .{
             .gravity_y = 0.5,
-            .color_text = style.labelDim(),
+            .color_text = .{ .color = style.labelDim() },
         });
     }
 }
@@ -882,7 +882,7 @@ fn renderImportModePicker(state: *State) void {
 
 fn renderSettingsImport(frame: *Frame) void {
     const state = frame.state;
-    dvui.label(@src(), "Import library", .{}, .{ .color_text = dcol(tokens.active.acc) });
+    dvui.label(@src(), "Import library", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     components.settingsHelpText(
         "Bring in games + installs from F95Checker or xLibrary. Existing entries in this library are skipped. " ++
@@ -952,7 +952,7 @@ fn renderImportBanner(frame: *Frame) void {
         .padding = .{ .x = 10, .y = 6, .w = 10, .h = 6 },
         .background = true,
         .border = style.border_thin,
-        .corner_radius = .{ .x = 4, .y = 4, .w = 4, .h = 4 },
+        .corners = .all(4),
     });
     defer bar.deinit();
 
@@ -973,7 +973,7 @@ fn renderImportBanner(frame: *Frame) void {
 
     var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
     defer line.deinit();
-    dvui.labelNoFmt(@src(), hdr, .{}, .{ .gravity_y = 0.5, .color_text = dcol(tokens.active.acc) });
+    dvui.labelNoFmt(@src(), hdr, .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = dcol(tokens.active.acc) } });
 
     _ = dvui.spacer(@src(), .{ .expand = .horizontal });
     if (style.button(@src(), "Cancel", .{}, .{ .style = .err, .gravity_y = 0.5 })) {
@@ -988,7 +988,7 @@ fn renderImportBanner(frame: *Frame) void {
         var cur_buf: [192]u8 = undefined;
         const cur_text = std.fmt.bufPrint(&cur_buf, "  current: {s}", .{cur}) catch cur;
         dvui.labelNoFmt(@src(), cur_text, .{}, .{
-            .color_text = helpTextColor(),
+            .color_text = .{ .color = helpTextColor() },
             .id_extra = std.hash.Wyhash.hash(0, cur),
         });
     }
@@ -1001,7 +1001,7 @@ fn renderImportBanner(frame: *Frame) void {
 fn renderSettingsDownloads(frame: *Frame) void {
     const state = frame.state;
 
-    dvui.label(@src(), "aria2 RPC port", .{}, .{ .color_text = dcol(tokens.active.acc) });
+    dvui.label(@src(), "aria2 RPC port", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     components.settingsHelpText(
         "TCP port for the local aria2 daemon's JSON-RPC. Leave blank or 0 to let aria2 pick a random " ++
@@ -1057,21 +1057,21 @@ fn renderSettingsDownloads(frame: *Frame) void {
         std.fmt.bufPrint(&live_buf, "now bound to {d}", .{live_port}) catch "(bound)";
     dvui.labelNoFmt(@src(), live_msg, .{}, .{
         .gravity_y = 0.5,
-        .color_text = style.labelDim(),
+        .color_text = .{ .color = style.labelDim() },
     });
     row.deinit(); // close the horizontal input row here (see note above)
 
     if (state.aria2_port_msg_len > 0) {
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
         dvui.labelNoFmt(@src(), state.aria2_port_msg_buf[0..state.aria2_port_msg_len], .{}, .{
-            .color_text = style.labelDim(),
+            .color_text = .{ .color = style.labelDim() },
         });
     }
 
     settingsSectionDivider(7);
 
     // ----- BitTorrent seed-ratio target -----
-    dvui.label(@src(), "Seed ratio", .{}, .{ .color_text = dcol(tokens.active.acc) });
+    dvui.label(@src(), "Seed ratio", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     components.settingsHelpText(
         "How much each completed torrent uploads before aria2 stops seeding. 2.0× is the RPDL community " ++
@@ -1123,20 +1123,20 @@ fn renderSettingsDownloads(frame: *Frame) void {
         std.fmt.bufPrint(&live_sr_buf, "now using {d:.1}×", .{live_sr}) catch "(set)";
     dvui.labelNoFmt(@src(), live_sr_msg, .{}, .{
         .gravity_y = 0.5,
-        .color_text = style.labelDim(),
+        .color_text = .{ .color = style.labelDim() },
     });
     sr_row.deinit(); // close the horizontal input row here
 
     if (state.aria2_seed_ratio_msg_len > 0) {
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
         dvui.labelNoFmt(@src(), state.aria2_seed_ratio_msg_buf[0..state.aria2_seed_ratio_msg_len], .{}, .{
-            .color_text = style.labelDim(),
+            .color_text = .{ .color = style.labelDim() },
         });
     }
 
     // ----- BitTorrent seed-time cap -----
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 12 } });
-    dvui.label(@src(), "Seed time", .{}, .{ .color_text = dcol(tokens.active.acc) });
+    dvui.label(@src(), "Seed time", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     components.settingsHelpText(
         "Optional cap on how long each completed torrent keeps seeding, in minutes. 0 = no time cap " ++
@@ -1181,7 +1181,7 @@ fn renderSettingsDownloads(frame: *Frame) void {
     settingsSectionDivider(8);
 
     // ----- Downloads folder -----
-    dvui.label(@src(), "Downloads folder", .{}, .{ .color_text = dcol(tokens.active.acc) });
+    dvui.label(@src(), "Downloads folder", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     components.settingsHelpText(
         "Where downloads land (f69 makes a `direct/` and `torrents/` subfolder inside). Point this at a " ++
@@ -1199,7 +1199,7 @@ fn renderSettingsDownloads(frame: *Frame) void {
     settingsSectionDivider(9);
 
     // ----- Download engine (aria2c) binary -----
-    dvui.label(@src(), "Download engine (aria2c)", .{}, .{ .color_text = dcol(tokens.active.acc) });
+    dvui.label(@src(), "Download engine (aria2c)", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     components.settingsHelpText(
         "f69 bundles aria2c and otherwise finds it on your PATH. If a download says the engine is missing, " ++
@@ -1233,7 +1233,7 @@ fn setAria2SeedRatioMsg(state: *State, msg: []const u8) void {
 /// don't auto-fetch.
 fn renderTagsRefreshSection(frame: *Frame) void {
     const state = frame.state;
-    dvui.label(@src(), "Tags", .{}, .{ .color_text = dcol(tokens.active.acc) });
+    dvui.label(@src(), "Tags", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     components.settingsHelpText(
         "Scrapes F95's tag index for the sidebar include/exclude checkboxes. Tags rarely change — refresh once in a while.",
@@ -1246,7 +1246,7 @@ fn renderTagsRefreshSection(frame: *Frame) void {
     const busy = state.pending_tags_refresh != null;
     const lbl: []const u8 = if (busy) "Refreshing…" else "Refresh tag list";
     const opts: dvui.Options = if (busy)
-        .{ .style = .control, .color_text = .{ .r = 0x80, .g = 0x80, .b = 0x80 }, .gravity_y = 0.5 }
+        .{ .style = .control, .color_text = .{ .color = .{ .r = 0x80, .g = 0x80, .b = 0x80 } }, .gravity_y = 0.5 }
     else
         .{ .style = .highlight, .gravity_y = 0.5 };
     if (components.iconButton(@src(), lbl, entypo.cycle, opts) and !busy) {
@@ -1269,7 +1269,7 @@ fn renderTagsRefreshSection(frame: *Frame) void {
     };
     dvui.labelNoFmt(@src(), info_text, .{}, .{
         .gravity_y = 0.5,
-        .color_text = style.labelDim(),
+        .color_text = .{ .color = style.labelDim() },
     });
 }
 
@@ -1278,7 +1278,7 @@ fn renderTagsRefreshSection(frame: *Frame) void {
 /// Delete button for user-authored entries. Built-ins are read-only
 /// — they ship with the binary and are restored every launch.
 fn renderSettingsModPresets(frame: *Frame) void {
-    dvui.label(@src(), "Mod-install presets", .{}, .{ .color_text = dcol(tokens.active.acc) });
+    dvui.label(@src(), "Mod-install presets", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     components.settingsHelpText(
         "Presets match an archive's file layout to an install recipe so f69 can pick the right " ++
@@ -1302,11 +1302,11 @@ fn renderSettingsModPresets(frame: *Frame) void {
     {
         var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
         defer bar.deinit();
-        dvui.label(@src(), "User dir:", .{}, .{ .color_text = helpTextColor() });
+        dvui.label(@src(), "User dir:", .{}, .{ .color_text = .{ .color = helpTextColor() } });
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 6, .h = 1 } });
         dvui.labelNoFmt(@src(), frame.info.mod_presets_dir, .{}, .{
             .font = .theme(.mono),
-            .color_text = style.labelDim(),
+            .color_text = .{ .color = style.labelDim() },
         });
     }
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
@@ -1332,14 +1332,14 @@ fn renderSettingsModPresets(frame: *Frame) void {
             {
                 var hdr = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
                 defer hdr.deinit();
-                dvui.labelNoFmt(@src(), p.name, .{}, .{ .color_text = dcol(tokens.active.acc) });
+                dvui.labelNoFmt(@src(), p.name, .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
                 _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
                 const tag: []const u8 = if (from_user) "[user]" else "[built-in]";
                 dvui.labelNoFmt(@src(), tag, .{}, .{
-                    .color_text = if (from_user)
+                    .color_text = .{ .color = if (from_user)
                         tokens.toDvui(tokens.active.acc, dvui.Color)
                     else
-                        helpTextColor(),
+                        helpTextColor() },
                 });
             }
 
@@ -1349,10 +1349,10 @@ fn renderSettingsModPresets(frame: *Frame) void {
             const sub_txt = std.fmt.bufPrint(&sub_buf, "id: {s}  \u{00B7}  engine: {s}  \u{00B7}  patterns: {d}  \u{00B7}  weight: {d:.1}", .{
                 p.id, engine_txt, p.match.requires.len, p.weight,
             }) catch p.id;
-            dvui.labelNoFmt(@src(), sub_txt, .{}, .{ .color_text = helpTextColor() });
+            dvui.labelNoFmt(@src(), sub_txt, .{}, .{ .color_text = .{ .color = helpTextColor() } });
 
             if (p.description.len > 0) {
-                dvui.labelNoFmt(@src(), p.description, .{}, .{ .color_text = helpTextColor() });
+                dvui.labelNoFmt(@src(), p.description, .{}, .{ .color_text = .{ .color = helpTextColor() } });
             }
         }
 
@@ -1379,7 +1379,7 @@ fn renderSettingsModPresets(frame: *Frame) void {
 /// (no in-app editor yet). The list documents what each strategy
 /// does so users can see WHY their game converts the way it does.
 fn renderSettingsConvertPresets(frame: *Frame) void {
-    dvui.label(@src(), "Convert-strategy presets", .{}, .{ .color_text = dcol(tokens.active.acc) });
+    dvui.label(@src(), "Convert-strategy presets", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     components.settingsHelpText(
         "Presets bind a game engine to a Win->Linux conversion strategy (Ren'Py SDK overlay, " ++
@@ -1404,11 +1404,11 @@ fn renderSettingsConvertPresets(frame: *Frame) void {
     {
         var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
         defer bar.deinit();
-        dvui.label(@src(), "User dir:", .{}, .{ .color_text = helpTextColor() });
+        dvui.label(@src(), "User dir:", .{}, .{ .color_text = .{ .color = helpTextColor() } });
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 6, .h = 1 } });
         dvui.labelNoFmt(@src(), frame.info.convert_presets_dir, .{}, .{
             .font = .theme(.mono),
-            .color_text = style.labelDim(),
+            .color_text = .{ .color = style.labelDim() },
         });
     }
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
@@ -1425,14 +1425,14 @@ fn renderSettingsConvertPresets(frame: *Frame) void {
         {
             var hdr = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
             defer hdr.deinit();
-            dvui.labelNoFmt(@src(), p.name, .{}, .{ .color_text = dcol(tokens.active.acc) });
+            dvui.labelNoFmt(@src(), p.name, .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
             _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
             const tag: []const u8 = if (from_user) "[user]" else "[built-in]";
             dvui.labelNoFmt(@src(), tag, .{}, .{
-                .color_text = if (from_user)
+                .color_text = .{ .color = if (from_user)
                     tokens.toDvui(tokens.active.acc, dvui.Color)
                 else
-                    helpTextColor(),
+                    helpTextColor() },
             });
         }
 
@@ -1448,17 +1448,17 @@ fn renderSettingsConvertPresets(frame: *Frame) void {
         const sub_txt = std.fmt.bufPrint(&sub_buf, "id: {s}  -  engine: {s}  -  strategy: {s}  -  weight: {d:.1}", .{
             p.id, engine_txt, spec_txt, p.weight,
         }) catch p.id;
-        dvui.labelNoFmt(@src(), sub_txt, .{}, .{ .color_text = helpTextColor() });
+        dvui.labelNoFmt(@src(), sub_txt, .{}, .{ .color_text = .{ .color = helpTextColor() } });
 
         if (p.description.len > 0) {
-            dvui.labelNoFmt(@src(), p.description, .{}, .{ .color_text = helpTextColor() });
+            dvui.labelNoFmt(@src(), p.description, .{}, .{ .color_text = .{ .color = helpTextColor() } });
         }
     }
 }
 
 /// About tab — diagnostics link + version blurb.
 fn renderSettingsAbout(frame: *Frame) void {
-    dvui.label(@src(), "Version", .{}, .{ .color_text = dcol(tokens.active.acc) });
+    dvui.label(@src(), "Version", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     var row_id: u32 = 0;
     var ver_buf: [48]u8 = undefined;
@@ -1492,7 +1492,7 @@ fn settingsSectionDivider(key: u64) void {
 /// persistence step debounces to disk via `persistUiScaleIfDirty`.
 fn renderUiScaleSection(frame: *Frame) void {
     const state = frame.state;
-    dvui.label(@src(), "UI scale", .{}, .{ .color_text = dcol(tokens.active.acc) });
+    dvui.label(@src(), "UI scale", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     components.settingsHelpText(
         "Bigger or smaller text, icons, paddings. Applies live; saved on release.",
@@ -1535,7 +1535,7 @@ fn renderUiScaleSection(frame: *Frame) void {
 /// to disk so a slider drag isn't a write storm.
 fn renderAutoCheckSection(frame: *Frame) void {
     const state = frame.state;
-    dvui.label(@src(), "Update checks", .{}, .{ .color_text = dcol(tokens.active.acc) });
+    dvui.label(@src(), "Update checks", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     components.settingsHelpText(
         "Walks F95's latest-updates pages since the last check; mismatched games get queued for a sync.",
@@ -1555,9 +1555,9 @@ fn renderAutoCheckSection(frame: *Frame) void {
         // Integer count input — clamped to 1..999. We keep the value
         // in a fixed-size text buffer so dvui's textEntry can edit it,
         // then re-parse on focus loss / each frame.
-        var count_buf: [4]u8 = [_]u8{0} ** 4;
+        var count_buf: [4]u8 = @splat(0);
         const printed = std.fmt.bufPrint(&count_buf, "{d}", .{state.auto_check.interval_count}) catch "";
-        var buf: [4]u8 = [_]u8{0} ** 4;
+        var buf: [4]u8 = @splat(0);
         @memcpy(buf[0..printed.len], printed);
         const te = style.textEntry(@src(), .{
             .text = .{ .buffer = &buf },
@@ -1593,17 +1593,17 @@ fn renderAutoCheckSection(frame: *Frame) void {
         var ts_buf: [32]u8 = undefined;
         const ts = components.formatUtcDateTime(&ts_buf, state.last_update_check_ts) catch "—";
         dvui.label(@src(), "Last check: {s}", .{ts}, .{
-            .color_text = style.labelDim(),
+            .color_text = .{ .color = style.labelDim() },
         });
     } else {
         dvui.label(@src(), "Last check: never", .{}, .{
-            .color_text = style.labelDim(),
+            .color_text = .{ .color = style.labelDim() },
         });
     }
 }
 
 fn renderDiagnosticsLink(frame: *Frame) void {
-    dvui.label(@src(), "Diagnostics", .{}, .{ .color_text = dcol(tokens.active.acc) });
+    dvui.label(@src(), "Diagnostics", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     dvui.label(@src(), "Engine probes, runtime info, and sandbox state.", .{}, .{});
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
@@ -1615,7 +1615,7 @@ fn renderDiagnosticsLink(frame: *Frame) void {
 fn renderBrowserSection(frame: *Frame) void {
     const state = frame.state;
 
-    dvui.label(@src(), "Browser", .{}, .{ .color_text = dcol(tokens.active.acc) });
+    dvui.label(@src(), "Browser", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     components.settingsHelpText("Used to open F95 thread links from the detail screen.");
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
@@ -1660,14 +1660,14 @@ fn renderBrowserSection(frame: *Frame) void {
     }
     if (!state.browser_msg.isEmpty()) {
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 4 } });
-        dvui.labelNoFmt(@src(), state.browserMsg(), .{}, .{ .color_text = dcol(tokens.active.acc) });
+        dvui.labelNoFmt(@src(), state.browserMsg(), .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
     }
 }
 
 fn renderF95Account(frame: *Frame) void {
     const state = frame.state;
 
-    dvui.label(@src(), "F95Zone account", .{}, .{ .color_text = dcol(tokens.active.acc) });
+    dvui.label(@src(), "F95Zone account", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
 
     // Status line.
@@ -1679,7 +1679,7 @@ fn renderF95Account(frame: *Frame) void {
         .err => "error",
     };
     const status_opts: dvui.Options = switch (state.login_status) {
-        .logged_in => .{ .color_text = dcol(tokens.active.acc) },
+        .logged_in => .{ .color_text = .{ .color = dcol(tokens.active.acc) } },
         .err => .{ .style = .err },
         else => .{},
     };
@@ -1730,7 +1730,7 @@ fn renderF95Account(frame: *Frame) void {
 fn renderRpdlAccount(frame: *Frame) void {
     const state = frame.state;
 
-    dvui.label(@src(), "RPDL account (dl.rpdl.net)", .{}, .{ .color_text = dcol(tokens.active.acc) });
+    dvui.label(@src(), "RPDL account (dl.rpdl.net)", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
 
     const status_text = switch (state.rpdl_status) {
@@ -1741,7 +1741,7 @@ fn renderRpdlAccount(frame: *Frame) void {
         .err => "error",
     };
     const status_opts: dvui.Options = switch (state.rpdl_status) {
-        .logged_in => .{ .color_text = dcol(tokens.active.acc) },
+        .logged_in => .{ .color_text = .{ .color = dcol(tokens.active.acc) } },
         .err => .{ .style = .err },
         else => .{},
     };
@@ -1817,7 +1817,7 @@ const LibraryStats = struct {
 /// "Distinct" is approximate; collisions undercount slightly.
 fn libraryStats(games: []const library.Game) LibraryStats {
     var s: LibraryStats = .{};
-    var tag_seen: [256]u64 = [_]u64{0} ** 256;
+    var tag_seen: [256]u64 = @splat(0);
     var tag_count: u32 = 0;
     for (games) |*g| {
         if (std.mem.eql(u8, g.name, "(unsynced)")) {

@@ -1973,7 +1973,7 @@ fn installNewerFirst(_: void, a: dom.Install, b: dom.Install) bool {
 /// to default variants.
 fn hydrateInstall(alloc: std.mem.Allocator, r: anytype) errs.Error!dom.Install {
     var inst: dom.Install = .{
-        .id = [_]u8{0} ** 36,
+        .id = @splat(0),
         .game_thread_id = 0,
         .version = "",
         .install_path = "",
@@ -2191,7 +2191,7 @@ test "library: upsertGame preserves existing installs (no cascade delete)" {
 
     try lib.upsertGame(&.{ .f95_thread_id = 7, .name = "G" });
     try lib.upsertInstall(&.{
-        .id = [_]u8{'a'} ** 36,
+        .id = @splat('a'),
         .game_thread_id = 7,
         .version = "1.0",
         .install_path = "/tmp/x",

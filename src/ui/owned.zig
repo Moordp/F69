@@ -385,7 +385,7 @@ pub const LaunchWatchPayload = struct {
     /// reason ("Exited with code 127 inside 1.2 s").
     early_fail: bool = false,
     exit_code: i32 = 0,
-    summary_buf: [192]u8 = [_]u8{0} ** 192,
+    summary_buf: [192]u8 = @splat(0),
     summary_len: usize = 0,
 };
 pub const LaunchWatchJob = Job(LaunchWatchPayload);
@@ -632,7 +632,7 @@ pub const ManualInstallPayload = struct {
     /// Filled by the worker after the hash pass. Always populated
     /// once the worker reaches `.done` — let the drainer copy it
     /// into the Install row.
-    archive_sha256_hex: [64]u8 = [_]u8{0} ** 64,
+    archive_sha256_hex: [64]u8 = @splat(0),
     archive_sha256_set: bool = false,
     err_name: ?[]const u8 = null,
     /// Extract-progress estimate (0..100). Same shape as PostInstall:

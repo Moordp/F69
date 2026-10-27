@@ -26,7 +26,7 @@ pub const ColumnId = enum {
     install_state,
 };
 
-pub const count = @typeInfo(ColumnId).@"enum".fields.len;
+pub const count = std.meta.fieldNames(ColumnId).len;
 
 pub const Meta = struct { label: []const u8, default_width: f32, default_visible: bool };
 
@@ -59,8 +59,8 @@ pub const Layout = struct {
     /// All columns in enum order, widths + visibility from `meta`.
     pub fn default() Layout {
         var cols: [count]ColumnState = undefined;
-        inline for (@typeInfo(ColumnId).@"enum".fields, 0..) |f, i| {
-            const id = @field(ColumnId, f.name);
+        inline for (comptime std.meta.fieldNames(ColumnId), 0..) |name, i| {
+            const id = @field(ColumnId, name);
             const m = meta(id);
             cols[i] = .{ .id = id, .width = m.default_width, .visible = m.default_visible };
         }
@@ -112,7 +112,7 @@ pub fn parseLayout(text: []const u8) Layout {
     const def = Layout.default();
     var cols: [count]ColumnState = undefined;
     var n: usize = 0;
-    var seen = [_]bool{false} ** count;
+    var seen: [count]bool = @splat(false);
     var sort: [2]?SortKey = .{ null, null };
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw| {

@@ -123,13 +123,8 @@ pub fn loadMerged(
             std.log.scoped(.convert_preset).warn("read failed for {s}: {s}", .{ entry.name, @errorName(e) });
             continue;
         };
-        const parsed = std.zon.parse.fromSliceAlloc(
-            Preset,
-            aalloc,
-            bytes_z,
-            null,
-            .{ .ignore_unknown_fields = true, .free_on_error = false },
-        ) catch |e| {
+        var diag: std.zon.parse.Diagnostics = undefined;
+        const parsed = std.zon.parse.fromSlice(Preset, .{ .gpa = aalloc, .arena = aalloc, .source = bytes_z, .diagnostics = &diag, .ignore_unknown_fields = true }) catch |e| {
             std.log.scoped(.convert_preset).warn("parse failed for {s}: {s}", .{ entry.name, @errorName(e) });
             continue;
         };

@@ -29,7 +29,7 @@ pub const Conn = struct {
 
     pub fn open(path: []const u8, alloc: std.mem.Allocator, flags: OpenFlags) Error!Conn {
         // zqlite wants a [*:0]const u8 path.
-        const cpath = alloc.dupeZ(u8, path) catch return Error.OutOfMemory;
+        const cpath = alloc.dupeSentinel(u8, path, 0) catch return Error.OutOfMemory;
         defer alloc.free(cpath);
 
         var bits: c_int = 0;
@@ -78,7 +78,7 @@ pub const Conn = struct {
         while (it.next()) |raw| {
             const stmt = std.mem.trim(u8, raw, " \t\r\n");
             if (stmt.len == 0) continue;
-            const z = alloc.dupeZ(u8, stmt) catch return Error.OutOfMemory;
+            const z = alloc.dupeSentinel(u8, stmt, 0) catch return Error.OutOfMemory;
             defer alloc.free(z);
             self.inner.execNoArgs(z) catch {
                 log.err("sqlite migration statement failed: {s} — stmt: {s}", .{ self.lastError(), stmt });
@@ -104,7 +104,7 @@ pub const Conn = struct {
     pub fn setPragmaInt(self: *Conn, alloc: std.mem.Allocator, name: []const u8, value: i64) Error!void {
         const sql = std.fmt.allocPrint(alloc, "PRAGMA {s} = {d}", .{ name, value }) catch return Error.OutOfMemory;
         defer alloc.free(sql);
-        const z = alloc.dupeZ(u8, sql) catch return Error.OutOfMemory;
+        const z = alloc.dupeSentinel(u8, sql, 0) catch return Error.OutOfMemory;
         defer alloc.free(z);
         self.inner.execNoArgs(z) catch {
             log.err("sqlite pragma set failed: {s} — {s}", .{ self.lastError(), sql });

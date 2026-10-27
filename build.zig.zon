@@ -9,32 +9,31 @@
 
 .{
     .name = .f69,
-    .version = "0.14.1",
+    .version = "0.15.0",
 
     // Project fingerprint. Zig validates the low 32 bits encode the
     // package name; if the build complains, paste the suggested value here.
     .fingerprint = 0x650277fd37a9eb2d,
 
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
 
     .dependencies = .{
         .dvui = .{
-            .url = "git+https://github.com/david-vanderson/dvui?ref=main#fa3ce4f65b27dafd7116f723410ffb1087da4323",
-            .hash = "dvui-0.5.0-dev-AQFJmTbW9QAo69Zd7-gS8j4ak9XWzMNggCrjyy9WU36L",
+            .url = "git+https://github.com/david-vanderson/dvui?ref=main#f85184497c5d231e398344d288d6626e9d6d792c",
+            .hash = "dvui-0.6.0-dev-AQFJmXqTBAGIFho3xAKct320CiNm-lvshf7_c1Q_Eur9",
         },
         .zqlite = .{
-            .url = "git+https://github.com/karlseguin/zqlite.zig?ref=master#5ac4cabe95a6d7faa7baf0da8057a8e6e8a227a1",
-            .hash = "zqlite-0.0.1-RWLaY64xnAAxsD2YNT8QqPMJUuaFv2GOzFRR4aGypJv3",
+            .url = "git+https://github.com/karlseguin/zqlite.zig?ref=master#865223b734a5113f731ab1eb1d7d81c8ac252913",
+            .hash = "zqlite-0.0.1-RWLaY4Y8nADz2l5aBE-JVyDyM3sZzHjq0agNykuVZKqQ",
         },
-        .websocket = .{
-            .url = "git+https://github.com/karlseguin/websocket.zig?ref=master#6d309f7a9790030f2fc070323b5defc64a15c13b",
-            .hash = "websocket-0.1.0-ZPISdV_aBACU9pGuvrTQ2z8uxz_Sp8JnJgQaiGKQIx1l",
-        },
+        .websocket = .{ .path = "third_party/websocket" },
     },
 
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
+        "tools",
+        "third_party/websocket",
     },
 }

@@ -33,10 +33,10 @@ fn segToggleOpts(on: bool, id: u64, tag: []const u8) dvui.Options {
         .tag = tag,
         .gravity_y = 0.5,
         .margin = dvui.Rect.all(0),
-        .corner_radius = dvui.Rect.all(0),
+        .corners = dvui.CornerRect.all(0),
         .background = on,
-        .color_fill = tokens.toDvui(t.acc_wash, dvui.Color),
-        .color_text = tokens.toDvui(if (on) t.acc else t.ink3, dvui.Color),
+        .color_fill = .{ .color = tokens.toDvui(t.acc_wash, dvui.Color) },
+        .color_text = .{ .color = tokens.toDvui(if (on) t.acc else t.ink3, dvui.Color) },
     };
 }
 
@@ -76,7 +76,7 @@ pub fn libraryScreen(frame: *Frame) !bool {
         // lives on the icon rail.)
         dvui.labelNoFmt(@src(), "Library", .{}, .{
             .gravity_y = 0.5,
-            .color_text = tokens.toDvui(tokens.active.ink, dvui.Color),
+            .color_text = .{ .color = tokens.toDvui(tokens.active.ink, dvui.Color) },
             .font = dvui.Font.theme(.title),
         });
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 10, .h = 1 } });
@@ -97,7 +97,7 @@ pub fn libraryScreen(frame: *Frame) !bool {
             const mono = dvui.Font.theme(.mono);
             dvui.labelNoFmt(@src(), cnt, .{}, .{
                 .gravity_y = 0.5,
-                .color_text = style.labelDim(),
+                .color_text = .{ .color = style.labelDim() },
                 .font = mono.withSize(mono.size * 0.85),
             });
         }
@@ -133,8 +133,8 @@ pub fn libraryScreen(frame: *Frame) !bool {
             var seg = dvui.box(@src(), .{ .dir = .horizontal }, .{
                 .gravity_y = 0.5,
                 .border = style.border_thin,
-                .color_border = style.borderColor(),
-                .corner_radius = style.corner_radius,
+                .color_border = .{ .color = style.borderColor() },
+                .corners = style.corner_radius,
             });
             defer seg.deinit();
             if (components.iconOnly(@src(), "grid", entypo.grid, segToggleOpts(state.view == .grid, 1, "view-grid"))) state.view = .grid;
@@ -150,17 +150,17 @@ pub fn libraryScreen(frame: *Frame) !bool {
             var sb = dvui.box(@src(), .{ .dir = .horizontal }, .{
                 .gravity_y = 0.5,
                 .background = true,
-                .color_fill = tokens.toDvui(tokens.active.bg0, dvui.Color),
+                .color_fill = .{ .color = tokens.toDvui(tokens.active.bg0, dvui.Color) },
                 .border = style.border_thin,
-                .color_border = style.borderColor(),
-                .corner_radius = style.corner_radius,
+                .color_border = .{ .color = style.borderColor() },
+                .corners = style.corner_radius,
                 .padding = .{ .x = 9, .y = 0, .w = 6, .h = 0 },
             });
             defer sb.deinit();
             dvui.icon(@src(), "search", entypo.magnifying_glass, .{}, .{
                 .gravity_y = 0.5,
                 .min_size_content = .{ .w = 14, .h = 14 },
-                .color_text = style.labelDim(),
+                .color_text = .{ .color = style.labelDim() },
             });
             _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 6, .h = 1 } });
             const te = style.textEntry(@src(), .{
@@ -236,7 +236,7 @@ fn renderSyncSplitButton(frame: *Frame) void {
     // ----- primary half: "Check for updates" (default = updates walker) -----
     const primary_label: []const u8 = if (checking) "Syncing\u{2026}" else "Sync";
     const primary_opts: dvui.Options = if (busy)
-        .{ .style = .control, .color_text = .{ .r = 0x80, .g = 0x80, .b = 0x80 } }
+        .{ .style = .control, .color_text = .{ .color = .{ .r = 0x80, .g = 0x80, .b = 0x80 } } }
     else
         .{};
     if (components.iconButton(@src(), primary_label, entypo.cycle, primary_opts) and !busy) {
@@ -250,7 +250,7 @@ fn renderSyncSplitButton(frame: *Frame) void {
         .gravity_y = 0.5,
         .background = true,
         .style = .control,
-        .corner_radius = style.corner_radius,
+        .corners = style.corner_radius,
     })) |anchor| {
         var fw = dvui.floatingMenu(@src(), .{ .from = anchor }, .{});
         defer fw.deinit();
@@ -303,7 +303,7 @@ fn renderAddSplitButton(frame: *Frame) void {
         .gravity_y = 0.5,
         .background = true,
         .style = .control,
-        .corner_radius = style.corner_radius,
+        .corners = style.corner_radius,
     })) |anchor| {
         var fw = dvui.floatingMenu(@src(), .{ .from = anchor }, .{});
         defer fw.deinit();
@@ -375,10 +375,10 @@ fn renderBookmarksProgress(frame: *Frame) void {
             var bar_outer = dvui.box(@src(), .{ .dir = .horizontal }, .{
                 .min_size_content = .{ .w = 240, .h = 14 },
                 .border = style.border_thin,
-                .corner_radius = .all(3),
-                .color_border = style.borderColor(),
+                .corners = .all(3),
+                .color_border = .{ .color = style.borderColor() },
                 .background = true,
-                .color_fill = .{ .r = 0x16, .g = 0x0B, .b = 0x10 },
+                .color_fill = .{ .color = .{ .r = 0x16, .g = 0x0B, .b = 0x10 } },
                 .gravity_y = 0.5,
             });
             defer bar_outer.deinit();
@@ -390,8 +390,8 @@ fn renderBookmarksProgress(frame: *Frame) void {
                         .h = 10,
                     },
                     .background = true,
-                    .color_fill = tokens.toDvui(tokens.active.acc, dvui.Color),
-                    .corner_radius = .all(2),
+                    .color_fill = .{ .color = tokens.toDvui(tokens.active.acc, dvui.Color) },
+                    .corners = .all(2),
                     .gravity_y = 0.5,
                 });
                 bar_inner.deinit();
@@ -409,7 +409,7 @@ fn renderBookmarksProgress(frame: *Frame) void {
         if (cancelling) {
             const dim: dvui.Options = .{
                 .style = .control,
-                .color_text = .{ .r = 0x80, .g = 0x80, .b = 0x80 },
+                .color_text = .{ .color = .{ .r = 0x80, .g = 0x80, .b = 0x80 } },
             };
             _ = components.iconButton(@src(), "Cancelling\u{2026}", entypo.cross, dim);
         } else {
@@ -607,7 +607,7 @@ fn sideGroup(label: []const u8) void {
     const body = dvui.Font.theme(.body);
     dvui.labelNoFmt(@src(), label, .{}, .{
         .id_extra = key,
-        .color_text = style.labelDim(),
+        .color_text = .{ .color = style.labelDim() },
         .font = body.withSize(body.size * 0.80),
     });
     _ = dvui.spacer(@src(), .{ .id_extra = key, .min_size_content = .{ .w = 1, .h = 4 } });
@@ -623,8 +623,8 @@ fn filterRow(id: u32, label: []const u8, count: u32, active: bool, dot_color: ?d
         .tag = tag,
         .expand = .horizontal,
         .background = active,
-        .color_fill = tokens.toDvui(t.acc_wash, dvui.Color),
-        .corner_radius = dvui.Rect.all(tokens.r),
+        .color_fill = .{ .color = tokens.toDvui(t.acc_wash, dvui.Color) },
+        .corners = dvui.CornerRect.all(tokens.r),
         .padding = .{ .x = 8, .y = 4, .w = 8, .h = 4 },
         .margin = .{ .x = 0, .y = 1, .w = 0, .h = 1 },
     });
@@ -632,8 +632,8 @@ fn filterRow(id: u32, label: []const u8, count: u32, active: bool, dot_color: ?d
     if (dot_color) |dc| {
         var d = dvui.box(@src(), .{}, .{
             .background = true,
-            .color_fill = dc,
-            .corner_radius = dvui.Rect.all(3),
+            .color_fill = .{ .color = dc },
+            .corners = dvui.CornerRect.all(3),
             .min_size_content = .{ .w = 7, .h = 7 },
             .gravity_y = 0.5,
             .margin = .{ .x = 0, .y = 0, .w = 8, .h = 0 },
@@ -642,13 +642,13 @@ fn filterRow(id: u32, label: []const u8, count: u32, active: bool, dot_color: ?d
     }
     dvui.labelNoFmt(@src(), label, .{}, .{
         .gravity_y = 0.5,
-        .color_text = tokens.toDvui(if (active) t.acc else t.ink2, dvui.Color),
+        .color_text = .{ .color = tokens.toDvui(if (active) t.acc else t.ink2, dvui.Color) },
     });
     _ = dvui.spacer(@src(), .{ .expand = .horizontal });
     if (count > 0) {
         var cnt_buf: [16]u8 = undefined;
         const cs = std.fmt.bufPrint(&cnt_buf, "{d}", .{count}) catch "";
-        dvui.labelNoFmt(@src(), cs, .{}, .{ .gravity_y = 0.5, .color_text = style.labelDim() });
+        dvui.labelNoFmt(@src(), cs, .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = style.labelDim() } });
     }
     return dvui.clicked(row.data(), .{});
 }
@@ -750,7 +750,7 @@ fn sidebar(frame: *Frame) void {
                 }
             }
         }
-        if (!any) dvui.labelNoFmt(@src(), "  (no games yet)", .{}, .{ .color_text = style.labelDim() });
+        if (!any) dvui.labelNoFmt(@src(), "  (no games yet)", .{}, .{ .color_text = .{ .color = style.labelDim() } });
     }
 
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
@@ -835,7 +835,7 @@ fn sidebar(frame: *Frame) void {
         const ds = &state.filters.dev_status;
         // "All" clears the dev-status filter (no game-state restriction).
         if (filterRow(0x200, "All", @intCast(frame.games.len), ds.count() == 0, null, "filter-status-all")) {
-            ds.* = @TypeOf(ds.*).initEmpty();
+            ds.* = @TypeOf(ds.*).empty;
         }
         const DsSpec = struct { s: library.DevStatus, l: []const u8 };
         const ds_specs = [_]DsSpec{
@@ -896,7 +896,7 @@ fn sidebar(frame: *Frame) void {
                     @src(),
                     "Master tag list not refreshed yet. Open Settings → Library → Tags → Refresh.",
                     .{},
-                    .{ .color_text = style.labelDim() },
+                    .{ .color_text = .{ .color = style.labelDim() } },
                 );
             } else {
                 renderTagCheckboxFilter(state);
@@ -1017,7 +1017,7 @@ fn renderTagCheckboxFilter(state: *State) void {
         @src(),
         "Click to cycle: off → include → exclude → off",
         .{},
-        .{ .color_text = style.labelDim() },
+        .{ .color_text = .{ .color = style.labelDim() } },
     );
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 4 } });
 
@@ -1056,7 +1056,7 @@ fn renderTagCheckboxFilter(state: *State) void {
             .expand = .horizontal,
             .gravity_x = 0,
             .style = .control,
-            .color_text = text_color,
+            .color_text = .{ .color = text_color },
         })) {
             if (in_include) {
                 removeTagFromBuf(&state.filters.tag_include_buf, tag);
@@ -1074,7 +1074,7 @@ fn renderTagCheckboxFilter(state: *State) void {
         var more_buf: [80]u8 = undefined;
         const more = std.fmt.bufPrint(&more_buf, "showing first {d} matches — narrow with the filter above", .{HARD_CAP}) catch "…";
         dvui.labelNoFmt(@src(), more, .{}, .{
-            .color_text = style.labelDim(),
+            .color_text = .{ .color = style.labelDim() },
         });
     }
 
@@ -1269,14 +1269,14 @@ fn renderKanbanColumn(
         }, .{
             .gravity_y = 0.5,
             .padding = .{ .x = 8, .y = 3, .w = 8, .h = 3 },
-            .corner_radius = .all(3),
+            .corners = .all(3),
         });
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         var cbuf: [16]u8 = undefined;
         const cstr = std.fmt.bufPrint(&cbuf, "{d}", .{count}) catch "?";
         dvui.labelNoFmt(@src(), cstr, .{}, .{
             .gravity_y = 0.5,
-            .color_text = style.labelDim(),
+            .color_text = .{ .color = style.labelDim() },
         });
     }
 
@@ -1294,7 +1294,7 @@ fn renderKanbanColumn(
     }, .{
         .expand = .both,
         .background = true,
-        .corner_radius = .all(6),
+        .corners = .all(6),
     });
     defer sc.deinit();
 
@@ -1344,10 +1344,6 @@ fn applyHeaderSort(state: anytype, sc: state_mod.SortColumn, d: dvui.GridWidget.
     state.sort_dir = if (d == .descending) .desc else .asc;
 }
 
-fn colResize(state: anytype, col: usize) dvui.GridWidget.HeaderResizeWidget.InitOptions {
-    return .{ .sizes = &state.lib_col_widths, .num = col, .min_size = 50, .max_size = 800 };
-}
-
 /// Open the detail screen for a game. Called from every list-table cell so
 /// the whole row is clickable, not just the Name cell.
 fn goDetail(state: anytype, g: *const library.Game) void {
@@ -1377,46 +1373,49 @@ fn renderListTable(frame: *Frame, games: []const library.Game, filtered: []const
     // passed. With `.given`, the body honors the virtual_size the
     // VirtualScroller computes from the full row count (full-length scrollbar).
     state.lib_grid_scroll.vertical = .given;
-    var grid = dvui.grid(@src(), .colWidths(&state.lib_col_widths), .{
+    var grid = dvui.grid(@src(), .{
         .scroll_opts = .{ .scroll_info = &state.lib_grid_scroll, .vertical_bar = .show },
+        .rows = filtered.len,
     }, .{ .expand = .both, .background = true });
     defer grid.deinit();
 
-    const scroller = dvui.GridWidget.VirtualScroller.init(grid, .{
-        .total_rows = filtered.len,
-        .scroll_info = &state.lib_grid_scroll,
-    });
-    const first = scroller.startRow();
-    const last = scroller.endRow();
+    // dvui owns column widths now (stored per grid id, user-resizable).
+    // Seed them once from f69's defaults.
+    if (dvui.dataGetSlice(null, grid.data().id, "__col_widths", []f32) == null) {
+        dvui.dataSetSlice(null, grid.data().id, "__col_widths", @as([]const f32, &state.lib_col_widths));
+    }
+
+    // dvui keeps sort state on the grid; mirror f69's sort state into it.
+    const sort_cols = [_]?state_mod.SortColumn{ .name, null, .rating, null, .last_updated, null, null };
+    grid.sort_dir = .unsorted;
+    for (sort_cols, 0..) |sc_opt, col| {
+        if (sc_opt) |sc| if (state.sort_column == sc) {
+            grid.sort_col = col;
+            grid.sort_dir = headerDir(state, sc);
+        };
+    }
 
     // headers: Name + Rating + Updated are sortable (map to the existing
     // SortColumn); Engine + Version are display-only. All resizable.
-    {
-        var d = headerDir(state, .name);
-        if (dvui.gridHeadingSortable(@src(), grid, 0, "Name", &d, colResize(state, 0), .{})) applyHeaderSort(state, .name, d);
+    const heads = [_][]const u8{ "Name", "Engine", "Rating", "Version", "Updated", "Played", "" };
+    for (heads, 0..) |text, col| {
+        const hcell = grid.colHeader(.{ .col = col }, .{});
+        defer hcell.deinit();
+        if (sort_cols[col]) |sc| {
+            if (hcell.headerSortable(text, .{})) |d| applyHeaderSort(state, sc, d);
+        } else {
+            dvui.labelNoFmt(@src(), text, .{}, .{ .id_extra = col, .gravity_y = 0.5 });
+        }
     }
-    dvui.gridHeading(@src(), grid, 1, "Engine", colResize(state, 1), .{});
-    {
-        var d = headerDir(state, .rating);
-        if (dvui.gridHeadingSortable(@src(), grid, 2, "Rating", &d, colResize(state, 2), .{})) applyHeaderSort(state, .rating, d);
-    }
-    dvui.gridHeading(@src(), grid, 3, "Version", colResize(state, 3), .{});
-    {
-        var d = headerDir(state, .last_updated);
-        if (dvui.gridHeadingSortable(@src(), grid, 4, "Updated", &d, colResize(state, 4), .{})) applyHeaderSort(state, .last_updated, d);
-    }
-    dvui.gridHeading(@src(), grid, 5, "Played", colResize(state, 5), .{});
-    dvui.gridHeading(@src(), grid, 6, "", colResize(state, 6), .{});
 
+    const first, const last = grid.rowsVisible();
     var row = first;
     while (row < last and row < filtered.len) : (row += 1) {
         const g = &games[filtered[row]];
-        var cell_num = dvui.GridWidget.Cell.colRow(0, row);
 
         // Name: progress dot + name + NEW chip (whole row clickable).
         {
-            defer cell_num.col_num += 1;
-            var cell = grid.bodyCell(@src(), cell_num, .{});
+            var cell = grid.cell(.{ .col = 0, .row = row }, .{});
             defer cell.deinit();
             {
                 // Per-game tag ("row-<thread_id>") for the GUI driver
@@ -1447,7 +1446,7 @@ fn renderListTable(frame: *Frame, games: []const library.Game, filtered: []const
                         .min_size_content = .{ .w = 38, .h = 50 },
                         .max_size_content = .{ .w = 38, .h = 50 },
                         .margin = .{ .x = 0, .y = 2, .w = 9, .h = 2 },
-                        .corner_radius = .all(3),
+                        .corners = .all(3),
                     });
                 } else {
                     var ph = dvui.box(@src(), .{}, .{
@@ -1457,10 +1456,10 @@ fn renderListTable(frame: *Frame, games: []const library.Game, filtered: []const
                         .max_size_content = .{ .w = 38, .h = 50 },
                         .margin = .{ .x = 0, .y = 2, .w = 9, .h = 2 },
                         .background = true,
-                        .color_fill = style.cardFill(),
-                        .corner_radius = .all(3),
+                        .color_fill = .{ .color = style.cardFill() },
+                        .corners = .all(3),
                         .border = style.border_thin,
-                        .color_border = style.borderColor(),
+                        .color_border = .{ .color = style.borderColor() },
                     });
                     ph.deinit();
                 }
@@ -1487,7 +1486,7 @@ fn renderListTable(frame: *Frame, games: []const library.Game, filtered: []const
                         .id_extra = g.f95_thread_id ^ 0xBB22,
                         .gravity_y = 0.5,
                         .padding = .{ .x = 3, .y = 0, .w = 3, .h = 0 },
-                        .corner_radius = .all(2),
+                        .corners = .all(2),
                     });
                 }
                 if (statusRecentlyChanged(g, now_s)) {
@@ -1502,7 +1501,7 @@ fn renderListTable(frame: *Frame, games: []const library.Game, filtered: []const
                         .id_extra = g.f95_thread_id ^ 0x57A7,
                         .gravity_y = 0.5,
                         .padding = .{ .x = 3, .y = 0, .w = 3, .h = 0 },
-                        .corner_radius = .all(2),
+                        .corners = .all(2),
                     });
                 }
                 if (hasUpdateAvailable(g, inst_v)) {
@@ -1517,7 +1516,7 @@ fn renderListTable(frame: *Frame, games: []const library.Game, filtered: []const
                         .id_extra = g.f95_thread_id ^ 0x09DA,
                         .gravity_y = 0.5,
                         .padding = .{ .x = 3, .y = 0, .w = 3, .h = 0 },
-                        .corner_radius = .all(2),
+                        .corners = .all(2),
                     });
                 }
                 if (dvui.clicked(nrow.data(), .{})) goDetail(state, g);
@@ -1525,8 +1524,7 @@ fn renderListTable(frame: *Frame, games: []const library.Game, filtered: []const
         }
         // Engine
         {
-            defer cell_num.col_num += 1;
-            var cell = grid.bodyCell(@src(), cell_num, .{});
+            var cell = grid.cell(.{ .col = 1, .row = row }, .{});
             defer cell.deinit();
             var hit = rowHit(@src(), g.f95_thread_id);
             defer hit.deinit();
@@ -1544,15 +1542,14 @@ fn renderListTable(frame: *Frame, games: []const library.Game, filtered: []const
                     // uniform gap from the column edges + taller "label" feel
                     .margin = .{ .x = 6, .y = 2, .w = 6, .h = 2 },
                     .padding = .{ .x = 6, .y = 3, .w = 6, .h = 3 },
-                    .corner_radius = .all(3),
+                    .corners = .all(3),
                 });
             }
             if (dvui.clicked(hit.data(), .{})) goDetail(state, g);
         }
         // Rating (5 stars, filled to the rounded score)
         {
-            defer cell_num.col_num += 1;
-            var cell = grid.bodyCell(@src(), cell_num, .{});
+            var cell = grid.cell(.{ .col = 2, .row = row }, .{});
             defer cell.deinit();
             var hit = rowHit(@src(), g.f95_thread_id);
             defer hit.deinit();
@@ -1572,7 +1569,7 @@ fn renderListTable(frame: *Frame, games: []const library.Game, filtered: []const
                         .id_extra = i,
                         .gravity_y = 0.5,
                         .min_size_content = .{ .w = 12, .h = 12 },
-                        .color_text = if (on) acc else dim,
+                        .color_text = .{ .color = if (on) acc else dim },
                     });
                 }
             }
@@ -1580,42 +1577,38 @@ fn renderListTable(frame: *Frame, games: []const library.Game, filtered: []const
         }
         // Version
         {
-            defer cell_num.col_num += 1;
-            var cell = grid.bodyCell(@src(), cell_num, .{});
+            var cell = grid.cell(.{ .col = 3, .row = row }, .{});
             defer cell.deinit();
             var hit = rowHit(@src(), g.f95_thread_id);
             defer hit.deinit();
-            dvui.labelNoFmt(@src(), g.latest_version orelse "", .{}, .{ .gravity_y = 0.5, .color_text = style.labelDim() });
+            dvui.labelNoFmt(@src(), g.latest_version orelse "", .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = style.labelDim() } });
             if (dvui.clicked(hit.data(), .{})) goDetail(state, g);
         }
         // Updated
         {
-            defer cell_num.col_num += 1;
-            var cell = grid.bodyCell(@src(), cell_num, .{});
+            var cell = grid.cell(.{ .col = 4, .row = row }, .{});
             defer cell.deinit();
             var hit = rowHit(@src(), g.f95_thread_id);
             defer hit.deinit();
             var ub: [16]u8 = undefined;
             const us = reltime.ago(now_s, g.last_updated_at orelse 0, &ub);
-            dvui.labelNoFmt(@src(), us, .{}, .{ .gravity_y = 0.5, .color_text = style.labelDim() });
+            dvui.labelNoFmt(@src(), us, .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = style.labelDim() } });
             if (dvui.clicked(hit.data(), .{})) goDetail(state, g);
         }
         // Played (relative time of the last launch)
         {
-            defer cell_num.col_num += 1;
-            var cell = grid.bodyCell(@src(), cell_num, .{});
+            var cell = grid.cell(.{ .col = 5, .row = row }, .{});
             defer cell.deinit();
             var hit = rowHit(@src(), g.f95_thread_id);
             defer hit.deinit();
             var pb: [16]u8 = undefined;
             const ps = if (g.last_played_at) |lp| reltime.ago(now_s, lp, &pb) else "—";
-            dvui.labelNoFmt(@src(), ps, .{}, .{ .gravity_y = 0.5, .color_text = style.labelDim() });
+            dvui.labelNoFmt(@src(), ps, .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = style.labelDim() } });
             if (dvui.clicked(hit.data(), .{})) goDetail(state, g);
         }
         // Action: ▶ play when installed, ⬇ download otherwise (Design-B row button).
         {
-            defer cell_num.col_num += 1;
-            var cell = grid.bodyCell(@src(), cell_num, .{});
+            var cell = grid.cell(.{ .col = 6, .row = row }, .{});
             defer cell.deinit();
             const installed = if (frame.install_versions) |m| m.get(g.f95_thread_id) != null else false;
             if (installed) {
@@ -1673,7 +1666,7 @@ fn renderListWindow(
                 .id_extra = g.f95_thread_id,
                 .gravity_y = 0.5,
                 .padding = .{ .x = 3, .y = 0, .w = 3, .h = 0 },
-                .corner_radius = .all(2),
+                .corners = .all(2),
             });
         }
 
@@ -1690,7 +1683,7 @@ fn renderListWindow(
                 .id_extra = g.f95_thread_id ^ 0xD5,
                 .gravity_y = 0.5,
                 .padding = .{ .x = 3, .y = 0, .w = 3, .h = 0 },
-                .corner_radius = .all(2),
+                .corners = .all(2),
             });
         }
 
@@ -1710,7 +1703,7 @@ fn renderListWindow(
                     .id_extra = g.f95_thread_id ^ 0xBB22,
                     .gravity_y = 0.5,
                     .padding = .{ .x = 3, .y = 0, .w = 3, .h = 0 },
-                    .corner_radius = .all(2),
+                    .corners = .all(2),
                 });
             }
             const now_s: i64 = std.Io.Clock.Timestamp.now(frame.io, .real).raw.toSeconds();
@@ -1726,7 +1719,7 @@ fn renderListWindow(
                     .id_extra = g.f95_thread_id ^ 0x57A7,
                     .gravity_y = 0.5,
                     .padding = .{ .x = 3, .y = 0, .w = 3, .h = 0 },
-                    .corner_radius = .all(2),
+                    .corners = .all(2),
                 });
             }
             if (hasUpdateAvailable(g, inst_v)) {
@@ -1741,7 +1734,7 @@ fn renderListWindow(
                     .id_extra = g.f95_thread_id ^ 0x09DA,
                     .gravity_y = 0.5,
                     .padding = .{ .x = 3, .y = 0, .w = 3, .h = 0 },
-                    .corner_radius = .all(2),
+                    .corners = .all(2),
                 });
             }
         }
@@ -1758,7 +1751,7 @@ fn renderListWindow(
             dvui.icon(@src(), "rating-star", entypo.star, .{}, .{
                 .gravity_y = 0.5,
                 .min_size_content = .{ .w = 14, .h = 14 },
-                .color_text = tokens.toDvui(tokens.active.acc, dvui.Color),
+                .color_text = .{ .color = tokens.toDvui(tokens.active.acc, dvui.Color) },
             });
             _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 4, .h = 1 } });
             var rate_buf: [16]u8 = undefined;
@@ -1792,10 +1785,10 @@ fn renderListWindow(
                 .gravity_y = 0.5,
                 .min_size_content = .{ .w = diameter, .h = diameter },
                 .max_size_content = .{ .w = diameter, .h = diameter },
-                .corner_radius = .all(diameter / 2),
+                .corners = .all(diameter / 2),
                 .background = true,
-                .color_fill = fill,
-                .color_border = fill,
+                .color_fill = .{ .color = fill },
+                .color_border = .{ .color = fill },
                 .border = style.border_thin,
             });
             dvui.tooltip(@src(), .{
@@ -1832,9 +1825,9 @@ fn renderListThumb(bytes_opt: ?[]const u8, thread_id: u64) void {
             .id_extra = thread_id,
             .min_size_content = .{ .w = w, .h = h },
             .gravity_y = 0.5,
-            .corner_radius = .all(3),
+            .corners = .all(3),
             .border = style.border_thin,
-            .color_border = style.borderColor(),
+            .color_border = .{ .color = style.borderColor() },
         });
         return;
     }
@@ -1843,10 +1836,10 @@ fn renderListThumb(bytes_opt: ?[]const u8, thread_id: u64) void {
         .min_size_content = .{ .w = w, .h = h },
         .gravity_y = 0.5,
         .background = true,
-        .corner_radius = .all(3),
+        .corners = .all(3),
         .border = style.border_thin,
-        .color_fill = .{ .r = 0x2A, .g = 0x16, .b = 0x20 },
-        .color_border = style.borderColor(),
+        .color_fill = .{ .color = .{ .r = 0x2A, .g = 0x16, .b = 0x20 } },
+        .color_border = .{ .color = style.borderColor() },
     });
     defer slot.deinit();
 }
@@ -1963,13 +1956,13 @@ fn renderCard(frame: *Frame, g: *const library.Game, layout: GridLayout) void {
         .tag = card_tag,
         .background = true,
         .border = style.border_thin,
-        .corner_radius = .all(6),
+        .corners = .all(6),
         .min_size_content = .{ .w = layout.card_w, .h = layout.card_h },
         .max_size_content = .{ .w = layout.card_w, .h = layout.card_h },
         .padding = .{ .x = 4, .y = 4, .w = 4, .h = 4 },
         .margin = .{ .x = 3, .y = 3, .w = 3, .h = 3 },
-        .color_fill = style.cardFill(),
-        .color_border = style.borderColor(),
+        .color_fill = .{ .color = style.cardFill() },
+        .color_border = .{ .color = style.borderColor() },
     });
     defer card.deinit();
 
@@ -2014,7 +2007,7 @@ fn renderCard(frame: *Frame, g: *const library.Game, layout: GridLayout) void {
         dvui.labelNoFmt(@src(), dev, .{}, .{
             .expand = .horizontal,
             .max_size_content = .{ .w = 0, .h = 14 },
-            .color_text = style.labelDim(),
+            .color_text = .{ .color = style.labelDim() },
             .font = dev_font,
             .padding = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
             .margin = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
@@ -2049,7 +2042,7 @@ fn renderCard(frame: *Frame, g: *const library.Game, layout: GridLayout) void {
         dvui.icon(@src(), "rating-star", entypo.star, .{}, .{
             .gravity_y = 0.5,
             .min_size_content = .{ .w = 12, .h = 12 },
-            .color_text = tokens.toDvui(tokens.active.acc, dvui.Color),
+            .color_text = .{ .color = tokens.toDvui(tokens.active.acc, dvui.Color) },
         });
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 3, .h = 1 } });
 
@@ -2143,9 +2136,9 @@ fn renderCardCover(bytes_opt: ?[]const u8, thread_id: u64, engine: library.Engin
                     .id_extra = thread_id,
                     .expand = .both,
                     .min_size_content = .{ .w = 1, .h = 1 },
-                    .corner_radius = style.corner_radius,
+                    .corners = style.corner_radius,
                     .border = style.border_thin,
-                    .color_border = style.borderColor(),
+                    .color_border = .{ .color = style.borderColor() },
                 });
             },
             .fit_backdrop => {
@@ -2157,10 +2150,10 @@ fn renderCardCover(bytes_opt: ?[]const u8, thread_id: u64, engine: library.Engin
                         .min_size_content = .{ .w = 1, .h = 1 },
                         .max_size_content = .{ .w = layout.card_w - 12, .h = cover_h },
                         .background = true,
-                        .corner_radius = style.corner_radius,
+                        .corners = style.corner_radius,
                         .border = style.border_thin,
-                        .color_border = style.borderColor(),
-                        .color_fill = style.letterbox_fill,
+                        .color_border = .{ .color = style.borderColor() },
+                        .color_fill = .{ .color = style.letterbox_fill },
                     });
                     bg.deinit();
                 }
@@ -2185,10 +2178,10 @@ fn renderCardCover(bytes_opt: ?[]const u8, thread_id: u64, engine: library.Engin
                         .min_size_content = .{ .w = 1, .h = 1 },
                         .max_size_content = .{ .w = layout.card_w - 12, .h = cover_h },
                         .background = true,
-                        .corner_radius = style.corner_radius,
+                        .corners = style.corner_radius,
                         .border = style.border_thin,
-                        .color_border = style.borderColor(),
-                        .color_fill = style.letterbox_fill,
+                        .color_border = .{ .color = style.borderColor() },
+                        .color_fill = .{ .color = style.letterbox_fill },
                     });
                     bg.deinit();
                 }
@@ -2210,10 +2203,10 @@ fn renderCardCover(bytes_opt: ?[]const u8, thread_id: u64, engine: library.Engin
             .id_extra = thread_id,
             .expand = .both,
             .background = true,
-            .corner_radius = style.corner_radius,
+            .corners = style.corner_radius,
             .border = style.border_thin,
-            .color_fill = .{ .r = 0x2A, .g = 0x16, .b = 0x20 },
-            .color_border = style.borderColor(),
+            .color_fill = .{ .color = .{ .r = 0x2A, .g = 0x16, .b = 0x20 } },
+            .color_border = .{ .color = style.borderColor() },
         });
         defer slot.deinit();
         dvui.label(@src(), "(no cover)", .{}, .{ .gravity_x = 0.5, .gravity_y = 0.5 });
@@ -2242,9 +2235,9 @@ fn renderInstallDot(thread_id: u64, state: actions.InstallDotState) void {
         .min_size_content = .{ .w = diameter, .h = diameter },
         .max_size_content = .{ .w = diameter, .h = diameter },
         .background = true,
-        .corner_radius = .all(diameter / 2),
-        .color_fill = fill,
-        .color_border = .{ .r = 0x16, .g = 0x0B, .b = 0x10 },
+        .corners = .all(diameter / 2),
+        .color_fill = .{ .color = fill },
+        .color_border = .{ .color = .{ .r = 0x16, .g = 0x0B, .b = 0x10 } },
         .border = style.border_thin,
         .margin = .{ .x = 0, .y = 2, .w = 2, .h = 0 },
     });
@@ -2267,7 +2260,7 @@ fn renderStatusBadge(thread_id: u64, status: library.DevStatus) void {
         .id_extra = thread_id,
         .gravity_x = 1.0,
         .gravity_y = 1.0,
-        .corner_radius = .all(2),
+        .corners = .all(2),
         .padding = .all(0),
         .margin = .{ .x = 0, .y = 0, .w = 4, .h = 4 },
     });
@@ -2285,7 +2278,7 @@ fn renderEngineBadge(thread_id: u64, engine: library.Engine) void {
         .id_extra = thread_id,
         .gravity_x = 0,
         .gravity_y = 1.0,
-        .corner_radius = .all(2),
+        .corners = .all(2),
         .padding = .all(0),
         .margin = .{ .x = 4, .y = 0, .w = 0, .h = 4 },
     });

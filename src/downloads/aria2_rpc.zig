@@ -211,7 +211,7 @@ pub const Daemon = struct {
                     var reaped = false;
                     var i: usize = 0;
                     while (i < 20) : (i += 1) {
-                        var status: u32 = 0;
+                        var status: i32 = 0;
                         const ret = std.os.linux.waitpid(pid, &status, std.os.linux.W.NOHANG);
                         if (ret == pid_usize) {
                             reaped = true;
@@ -222,7 +222,7 @@ pub const Daemon = struct {
                     if (!reaped) {
                         log.warn("aria2 didn't exit on shutdown RPC within 1s — sending SIGKILL", .{});
                         _ = std.os.linux.kill(pid, std.os.linux.SIG.KILL);
-                        var status: u32 = 0;
+                        var status: i32 = 0;
                         _ = std.os.linux.waitpid(pid, &status, 0);
                     }
                 }

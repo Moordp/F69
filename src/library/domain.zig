@@ -428,7 +428,7 @@ test "weightedRating bayesian basics" {
 
 test "Install path methods" {
     const i = Install{
-        .id = [_]u8{'a'} ** 36,
+        .id = @splat('a'),
         .game_thread_id = 12345,
         .version = "v1",
         .install_path = "/games/foo/v1",

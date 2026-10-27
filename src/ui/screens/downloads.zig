@@ -58,7 +58,7 @@ pub fn downloadsScreen(frame: *Frame) !bool {
         defer top.deinit();
         if (components.iconButton(@src(), "Back", entypo.chevron_left, .{})) state.screen = .library;
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 12, .h = 1 } });
-        dvui.label(@src(), "Downloads & Seeding", .{}, .{ .gravity_y = 0.5, .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
+        dvui.label(@src(), "Downloads & Seeding", .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = tokens.toDvui(tokens.active.acc, dvui.Color) } });
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
 
         // Compute live totals across all jobs — gives the user a
@@ -89,7 +89,7 @@ pub fn downloadsScreen(frame: *Frame) !bool {
         const pause_opts: dvui.Options = if (has_resumable)
             .{}
         else
-            .{ .style = .control, .color_text = .{ .r = 0x80, .g = 0x80, .b = 0x80 } };
+            .{ .style = .control, .color_text = .{ .color = .{ .r = 0x80, .g = 0x80, .b = 0x80 } } };
         if (style.button(@src(), "Pause all", .{}, pause_opts) and has_resumable) {
             frame.dl_mgr.pauseAll();
         }
@@ -97,7 +97,7 @@ pub fn downloadsScreen(frame: *Frame) !bool {
         const resume_opts: dvui.Options = if (has_paused)
             .{ .style = .highlight }
         else
-            .{ .style = .control, .color_text = .{ .r = 0x80, .g = 0x80, .b = 0x80 } };
+            .{ .style = .control, .color_text = .{ .color = .{ .r = 0x80, .g = 0x80, .b = 0x80 } } };
         if (style.button(@src(), "Resume all", .{}, resume_opts) and has_paused) {
             frame.dl_mgr.resumeAll();
         }
@@ -142,7 +142,7 @@ pub fn downloadsScreen(frame: *Frame) !bool {
         frame.info.library_root, seedRatioTarget(frame),
     }) catch "Files land in the library root.";
     dvui.labelNoFmt(@src(), dst_msg, .{}, .{
-        .color_text = style.labelDim(),
+        .color_text = .{ .color = style.labelDim() },
     });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 12 } });
 
@@ -238,9 +238,9 @@ pub fn renderActivityDrawer(frame: *Frame) void {
         .resize = .none,
     }, .{
         .background = true,
-        .color_fill = tokens.toDvui(t.bg1, dvui.Color),
+        .color_fill = .{ .color = tokens.toDvui(t.bg1, dvui.Color) },
         .border = .{ .x = 0, .y = 2, .w = 0, .h = 0 },
-        .color_border = tokens.toDvui(t.acc_dim, dvui.Color),
+        .color_border = .{ .color = tokens.toDvui(t.acc_dim, dvui.Color) },
     });
     defer fw.deinit();
     fw.dragAreaSet(.{}); // pinned — no drag/resize
@@ -251,13 +251,13 @@ pub fn renderActivityDrawer(frame: *Frame) void {
             .expand = .horizontal,
             .padding = .{ .x = 14, .y = 7, .w = 10, .h = 7 },
             .border = .{ .x = 0, .y = 0, .w = 0, .h = 1 },
-            .color_border = style.borderColor(),
+            .color_border = .{ .color = style.borderColor() },
         });
         defer hdr.deinit();
         const title = dvui.Font.theme(.title);
         dvui.labelNoFmt(@src(), "Activity", .{}, .{
             .gravity_y = 0.5,
-            .color_text = tokens.toDvui(t.ink, dvui.Color),
+            .color_text = .{ .color = tokens.toDvui(t.ink, dvui.Color) },
             .font = title.withSize(title.size * 0.92),
         });
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
@@ -325,14 +325,14 @@ fn downloadsSectionHeader(label_text: []const u8, count: u32, key: u8) void {
         .padding = .{ .x = 0, .y = 6, .w = 0, .h = 4 },
     });
     defer box.deinit();
-    comp.sectionHeader(@src(), label_text, .{ .id_extra = key, .gravity_y = 0.5, .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
+    comp.sectionHeader(@src(), label_text, .{ .id_extra = key, .gravity_y = 0.5, .color_text = .{ .color = tokens.toDvui(tokens.active.acc, dvui.Color) } });
     _ = dvui.spacer(@src(), .{ .id_extra = key, .min_size_content = .{ .w = 8, .h = 1 } });
     var n_buf: [16]u8 = undefined;
     const n_s = std.fmt.bufPrint(&n_buf, "({d})", .{count}) catch "(?)";
     dvui.labelNoFmt(@src(), n_s, .{}, .{
         .id_extra = key,
         .gravity_y = 0.5,
-        .color_text = style.labelDim(),
+        .color_text = .{ .color = style.labelDim() },
     });
 }
 
@@ -370,11 +370,11 @@ fn renderJobRow(job: downloads.Job, title: []const u8, extracting: bool, ratio_t
         .expand = .horizontal,
         .background = true,
         .border = style.border_thin,
-        .corner_radius = style.corner_radius,
+        .corners = style.corner_radius,
         .padding = .{ .x = 10, .y = 6, .w = 10, .h = 6 },
         .margin = .{ .x = 0, .y = 0, .w = 0, .h = 6 },
-        .color_fill = style.cardFill(),
-        .color_border = style.borderColor(),
+        .color_fill = .{ .color = style.cardFill() },
+        .color_border = .{ .color = style.borderColor() },
     });
     defer row.deinit();
 
@@ -394,7 +394,7 @@ fn renderJobRow(job: downloads.Job, title: []const u8, extracting: bool, ratio_t
             .id_extra = job.id,
             .gravity_y = 0.5,
             .padding = .{ .x = 7, .y = 2, .w = 7, .h = 2 },
-            .corner_radius = .all(3),
+            .corners = .all(3),
         });
         if (job.is_torrent) {
             _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 4, .h = 1 } });
@@ -409,7 +409,7 @@ fn renderJobRow(job: downloads.Job, title: []const u8, extracting: bool, ratio_t
                 .id_extra = job.id ^ 0xB7,
                 .gravity_y = 0.5,
                 .padding = .{ .x = 5, .y = 2, .w = 5, .h = 2 },
-                .corner_radius = .all(3),
+                .corners = .all(3),
             });
         }
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
@@ -418,7 +418,7 @@ fn renderJobRow(job: downloads.Job, title: []const u8, extracting: bool, ratio_t
         const truncated = if (title.len > 80) title[0..80] else title;
         dvui.label(@src(), "{s}{s}", .{ truncated, if (title.len > 80) "…" else "" }, .{
             .gravity_y = 0.5,
-            .color_text = tokens.toDvui(tokens.active.acc, dvui.Color),
+            .color_text = .{ .color = tokens.toDvui(tokens.active.acc, dvui.Color) },
         });
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
 
@@ -501,7 +501,7 @@ fn renderJobRow(job: downloads.Job, title: []const u8, extracting: bool, ratio_t
     if (!std.mem.eql(u8, title, job.source_url)) {
         const src_truncated = if (job.source_url.len > 96) job.source_url[0..96] else job.source_url;
         dvui.label(@src(), "{s}{s}", .{ src_truncated, if (job.source_url.len > 96) "…" else "" }, .{
-            .color_text = .{ .r = 0x90, .g = 0x70, .b = 0x80 },
+            .color_text = .{ .color = .{ .r = 0x90, .g = 0x70, .b = 0x80 } },
         });
     }
 
@@ -528,7 +528,7 @@ fn renderJobRow(job: downloads.Job, title: []const u8, extracting: bool, ratio_t
         if (line.len > 0) {
             dvui.labelNoFmt(@src(), line, .{}, .{
                 .gravity_y = 0.5,
-                .color_text = style.labelDim(),
+                .color_text = .{ .color = style.labelDim() },
             });
         }
     }
@@ -583,7 +583,7 @@ fn renderProgressBar(kind: BarKind, job: downloads.Job, ratio_target: f32) void 
         .id_extra = @intFromEnum(kind),
         .min_size_content = .{ .w = 30, .h = 14 },
         .gravity_y = 0.5,
-        .color_text = style.labelDim(),
+        .color_text = .{ .color = style.labelDim() },
     });
 
     const fill_color: dvui.Color = switch (kind) {
@@ -596,9 +596,9 @@ fn renderProgressBar(kind: BarKind, job: downloads.Job, ratio_target: f32) void 
         .min_size_content = .{ .w = 1, .h = 10 },
         .gravity_y = 0.5,
         .border = style.border_thin,
-        .corner_radius = .all(2),
-        .color_border = style.borderColor(),
-        .color_fill = .{ .r = 0x16, .g = 0x0B, .b = 0x10 },
+        .corners = .all(2),
+        .color_border = .{ .color = style.borderColor() },
+        .color_fill = .{ .color = .{ .r = 0x16, .g = 0x0B, .b = 0x10 } },
         .padding = .all(0),
     });
 }

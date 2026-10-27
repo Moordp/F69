@@ -25,14 +25,13 @@ rm -rf /tmp/f69-localshot; mkdir -p "$DATA/covers" "$(dirname "$OUT")"
 # Default: headless (off-screen). VIS=1 → cage opens a real window in your
 # niri session so you can watch it. grim runs INSIDE cage either way, so the
 # PNG is always just f69 (no surrounding desktop).
-WLR_ENV="WLR_BACKENDS=headless"
-[ -n "${VIS:-}" ] && WLR_ENV=""
+[ -z "${VIS:-}" ] && export WLR_BACKENDS=headless
 
 run() { nix shell nixpkgs#cage nixpkgs#grim nixpkgs#sqlite -c "$@"; }
 
 # 1. Create the DB schema: launch once headless, let migrations run, kill.
 echo "[localshot] creating schema…"
-F69_DATA_DIR="$DATA" $WLR_ENV run bash -c \
+F69_DATA_DIR="$DATA" run bash -c \
   "cage -- bash -c '$BIN/run.sh >$LOG 2>&1 & sleep 4; kill %1 2>/dev/null' " >/dev/null 2>&1 || true
 
 DB="$DATA/f69.db"
@@ -59,7 +58,7 @@ mkdir -p "$DATA/g090" "$DATA/g082" "$DATA/g070"
 #    F69_OPEN_SCREEN/THREAD let the app boot straight onto the target view.
 echo "[localshot] rendering $SCREEN…"
 F69_DATA_DIR="$DATA" F69_OPEN_SCREEN="$SCREEN" F69_OPEN_THREAD=101 \
-$WLR_ENV run bash -c \
+run bash -c \
   "cage -- bash -c '$BIN/run.sh >>$LOG 2>&1 & sleep 6; grim \"$OUT\"; kill %1 2>/dev/null' " >/dev/null 2>&1
 
 [ -s "$OUT" ] && echo "[localshot] wrote $OUT" || { echo "[localshot] no screenshot — f69 log:"; tail -25 "$LOG"; exit 1; }

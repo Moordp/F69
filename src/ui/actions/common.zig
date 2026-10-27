@@ -557,7 +557,7 @@ fn nextInt(it: *std.mem.TokenIterator(u8, .scalar), comptime T: type) ?T {
 /// field-by-field rather than rejected wholesale.
 fn nextEnum(it: *std.mem.TokenIterator(u8, .scalar), comptime E: type) ?E {
     const v = nextInt(it, u32) orelse return null;
-    if (v >= @typeInfo(E).@"enum".fields.len) return null;
+    if (v >= std.meta.fieldNames(E).len) return null;
     return @enumFromInt(v);
 }
 

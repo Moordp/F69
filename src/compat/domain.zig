@@ -290,13 +290,8 @@ test "Recipe parses minimal valid shape" {
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const r = try std.zon.parse.fromSliceAlloc(
-        Recipe,
-        arena.allocator(),
-        src,
-        null,
-        .{ .ignore_unknown_fields = true, .free_on_error = false },
-    );
+    var diag: std.zon.parse.Diagnostics = undefined;
+    const r = try std.zon.parse.fromSlice(Recipe, .{ .gpa = arena.allocator(), .arena = arena.allocator(), .source = src, .diagnostics = &diag, .ignore_unknown_fields = true });
     try std.testing.expectEqualStrings("test.example.basic", r.id);
     try std.testing.expectEqualStrings("marker", r.detect.file_exists);
     try std.testing.expectEqual(Severity.warn, r.severity);
@@ -320,13 +315,8 @@ test "Recipe parses nested detect tree" {
     ;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const r = try std.zon.parse.fromSliceAlloc(
-        Recipe,
-        arena.allocator(),
-        src,
-        null,
-        .{ .ignore_unknown_fields = true, .free_on_error = false },
-    );
+    var diag: std.zon.parse.Diagnostics = undefined;
+    const r = try std.zon.parse.fromSlice(Recipe, .{ .gpa = arena.allocator(), .arena = arena.allocator(), .source = src, .diagnostics = &diag, .ignore_unknown_fields = true });
     try std.testing.expectEqual(@as(usize, 2), r.detect.all.len);
     try std.testing.expectEqualStrings("a", r.detect.all[0].file_exists);
     try std.testing.expectEqual(@as(usize, 2), r.detect.all[1].any.len);

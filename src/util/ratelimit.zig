@@ -7,7 +7,7 @@ const std = @import("std");
 
 pub const PerHostLimiter = struct {
     const Slot = struct { hash: u64, next_ns: i128 = 0, used: bool = false };
-    slots: [32]Slot = [_]Slot{.{ .hash = 0 }} ** 32,
+    slots: [32]Slot = @splat(.{ .hash = 0 }),
 
     fn slotFor(self: *PerHostLimiter, host: []const u8) *Slot {
         const h = std.hash.Wyhash.hash(0, host);
