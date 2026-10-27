@@ -1415,7 +1415,8 @@ fn renderListTable(frame: *Frame, games: []const library.Game, filtered: []const
 
         // Name: progress dot + name + NEW chip (whole row clickable).
         {
-            var cell = grid.cell(.{ .col = 0, .row = row }, .{});
+            // `.expand` marks Name as the column that takes the spare width.
+            var cell = grid.cell(.{ .col = 0, .row = row }, .{ .expand = .horizontal });
             defer cell.deinit();
             {
                 // Per-game tag ("row-<thread_id>") for the GUI driver

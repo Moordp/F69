@@ -773,8 +773,9 @@ pub const Library = struct {
         if (upd.dev_status) |d| {
             // Record when the developer status actually flips (Ongoing →
             // Completed/Abandoned/…) so the UI can flag it. Stamped with the
-            // scrape time (the library stays clock-free).
-            if (d != game.dev_status) {
+            // scrape time (the library stays clock-free). The first scrape
+            // of a fresh import (unknown → known) is not a change.
+            if (d != game.dev_status and game.dev_status != .unknown) {
                 game.status_changed_at = upd.last_scraped_at orelse game.status_changed_at;
             }
             game.dev_status = d;
@@ -2219,6 +2220,22 @@ test "library: upsertGame preserves existing installs (no cascade delete)" {
     defer lib.freeInstalls(installs);
     try std.testing.expectEqual(@as(usize, 1), installs.len);
     try std.testing.expectEqualStrings("1.0", installs[0].version);
+}
+
+test "library: applyScrape stamps status_changed_at only on a real change" {
+    var lib = try Library.open(std.testing.allocator, ":memory:");
+    defer lib.close();
+
+    var g: dom.Game = .{ .f95_thread_id = 1, .name = try std.testing.allocator.dupe(u8, "G") };
+    defer std.testing.allocator.free(g.name);
+
+    // First scrape of a fresh import: unknown → in_progress is not a change.
+    try lib.applyScrape(&g, .{ .dev_status = .in_progress, .last_scraped_at = 100 });
+    try std.testing.expectEqual(@as(?i64, null), g.status_changed_at);
+
+    // A real flip is stamped.
+    try lib.applyScrape(&g, .{ .dev_status = .completed, .last_scraped_at = 200 });
+    try std.testing.expectEqual(@as(?i64, 200), g.status_changed_at);
 }
 
 test "library: tag color override round-trip" {

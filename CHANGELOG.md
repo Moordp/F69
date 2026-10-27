@@ -2,6 +2,17 @@
 
 All notable, user-facing changes. Dates are YYYY-MM-DD.
 
+## [0.15.3] - 2026-10-27
+
+### Fixed
+- **Every game showed a STATUS badge** after a bookmark import and sync. The
+  first sync of a new game (status unknown → known) counted as a status change.
+  Only real changes, such as Ongoing → Completed, get the badge now. Badges
+  already set stay for up to 14 days.
+- **List view layout**: the Name column now takes the spare width instead of
+  leaving an empty gap on the right, and the Version column is wider so
+  versions are cut off less.
+
 ## [0.15.2] - 2026-10-27
 
 ### New
