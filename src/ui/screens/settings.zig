@@ -694,7 +694,7 @@ fn renderUpdateCheckSourceSection(frame: *Frame) void {
         defer row.deinit();
         dvui.label(@src(), "Source:", .{}, .{ .gravity_y = 0.5 });
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
-        const src_labels = &[_][]const u8{ "f69 latest-updates scan (deeper)", "F95 RSS feed (lighter)" };
+        const src_labels = &[_][]const u8{ "f69 latest-updates scan (deeper)", "F95 RSS feed (lighter)", "F95 new-versions feed (login)" };
         var picked: usize = @intFromEnum(state.update_check_source);
         if (style.dropdown(@src(), src_labels, .{ .choice = &picked }, .{}, .{
             .min_size_content = .{ .w = 280, .h = 28 },
@@ -710,7 +710,12 @@ fn renderUpdateCheckSourceSection(frame: *Frame) void {
             "feed is a single request for the 90 newest updates (the feed's max) — " ++
             "lighter and fast for big libraries, and still catches revived abandoned " ++
             "games. Pick f69 scan if you check infrequently (it goes further back); " ++
-            "RSS if you check often. RSS applies in either refresh-backend mode.",
+            "RSS if you check often. The new-versions feed reads your F95 account's " ++
+            "watched-threads page: exact old → new versions, a few requests, newest " ++
+            "first back to your last check — but only for threads you watch, and it " ++
+            "needs you logged in. If it can't reach back to your last check, f69 " ++
+            "falls back to a full check. RSS and the feed apply in either " ++
+            "refresh-backend mode.",
     );
 }
 

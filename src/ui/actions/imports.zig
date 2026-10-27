@@ -66,7 +66,13 @@ const UPDATE_WALK_FIRST_RUN_LOOKBACK_S: i64 = 14 * 24 * 60 * 60;
 pub fn startUpdateCheck(frame: *Frame) void {
     const state = frame.state;
     const use_rss = state.update_check_source == .rss;
-    if (!use_rss and state.refresh_backend == .indexer) {
+    const use_feed = state.update_check_source == .watched_feed;
+    if (use_feed and !frame.f95_svc.client.hasCookie()) {
+        state.sync_status = .err;
+        state.setSyncMsg("new-versions feed needs an F95 login — log in first (Settings → Accounts)");
+        return;
+    }
+    if (!use_rss and !use_feed and state.refresh_backend == .indexer) {
         // Mirrors the Refresh All flow under the hood; both buttons
         // route to the same batched `/fast` pre-flight + parallel
         // `/full` pool in indexer mode. RSS overrides this — it's a
@@ -122,9 +128,13 @@ pub fn startUpdateCheck(frame: *Frame) void {
         .library_set = set,
         .since_ts = since,
         .mismatch_tids = .empty,
+        .since_is_stamp = state.last_update_check_ts > 0,
+        .feed_mode = use_feed,
     };
     // Worker fn is a comptime param, so branch the spawn (not the fn value).
-    _ = (if (use_rss)
+    _ = (if (use_feed)
+        job_mod.spawnJob(UpdateCheckPayload, watchedFeedUpdateCheckWorker, alloc, frame.win, payload, &state.pending_update_check)
+    else if (use_rss)
         job_mod.spawnJob(UpdateCheckPayload, rssUpdateCheckWorker, alloc, frame.win, payload, &state.pending_update_check)
     else
         job_mod.spawnJob(UpdateCheckPayload, updateCheckWorker, alloc, frame.win, payload, &state.pending_update_check)) catch {
@@ -132,7 +142,12 @@ pub fn startUpdateCheck(frame: *Frame) void {
         return;
     };
 
-    state.setSyncMsg(if (use_rss) "checking F95 RSS feed…" else "scanning F95 latest updates…");
+    state.setSyncMsg(if (use_feed)
+        "reading F95 new-versions feed…"
+    else if (use_rss)
+        "checking F95 RSS feed…"
+    else
+        "scanning F95 latest updates…");
     state.sync_status = .running;
 }
 
@@ -184,6 +199,88 @@ fn rssUpdateCheckWorker(job: *UpdateCheckJob) void {
         // or after the last-check cutoff — same rule as the walker.
         const changed = if (entry.updated) |ts| ts >= p.since_ts else true;
         if (changed) p.mismatch_tids.append(job.alloc, entry.thread_id) catch {};
+    }
+
+    job.markDone();
+}
+
+/// Pages of the new-versions feed are 30 rows; its whole window is ~6
+/// pages. Cap the walk so a bad stamp can't page forever.
+const FEED_MAX_PAGES: u32 = 20;
+
+/// New-versions feed variant (`/watched/threads?tab=new`, login needed).
+/// Walks pages newest → oldest and stops at the first row older than
+/// `since_ts`. Library games found go into `mismatch_tids` (so they flow
+/// through the same sync queue) AND `feed_updates` (exact old → new
+/// version, applied to the library on the UI thread). `feed_reached_since`
+/// records whether the walk actually reached `since_ts`; if the feed ran
+/// out first, the caller can't trust it to have shown everything.
+fn watchedFeedUpdateCheckWorker(job: *UpdateCheckJob) void {
+    const p = &job.payload;
+    var url_buf: [128]u8 = undefined;
+    p.feed_reached_since = false;
+    var prev_first: u64 = 0;
+
+    var page: u32 = 1;
+    while (page <= FEED_MAX_PAGES) : (page += 1) {
+        if (job.cancelRequested()) {
+            p.err_name = "Cancelled";
+            job.markFailed();
+            return;
+        }
+        const url = std.fmt.bufPrint(&url_buf, "https://f95zone.to/watched/threads?tab=new&page={d}", .{page}) catch {
+            p.err_name = "InternalUrlBuild";
+            job.markFailed();
+            return;
+        };
+        const body = p.f95_svc.client.get(url) catch |e| {
+            p.err_name = @errorName(e);
+            job.markFailed();
+            return;
+        };
+        defer job.alloc.free(body);
+
+        const entries = f95.newfeed.parsePage(job.alloc, body) catch |e| {
+            p.err_name = @errorName(e);
+            job.markFailed();
+            return;
+        };
+        defer f95.newfeed.freeEntries(job.alloc, entries);
+        if (entries.len == 0) break;
+        // XenForo repeats the last page for out-of-range numbers.
+        if (page > 1 and entries[0].thread_id == prev_first) break;
+        prev_first = entries[0].thread_id;
+
+        var reached = false;
+        for (entries) |e| {
+            p.scanned += 1;
+            if (e.ts > p.newest_seen_ts) p.newest_seen_ts = e.ts;
+            if (e.ts != 0 and e.ts < p.since_ts) {
+                reached = true;
+                continue;
+            }
+            if (!p.library_set.contains(e.thread_id)) continue;
+            p.mismatch_tids.append(job.alloc, e.thread_id) catch continue;
+            const old_v = job.alloc.dupe(u8, e.old_version) catch continue;
+            const new_v = job.alloc.dupe(u8, e.new_version) catch {
+                job.alloc.free(old_v);
+                continue;
+            };
+            p.feed_updates.append(job.alloc, .{
+                .thread_id = e.thread_id,
+                .old_version = old_v,
+                .new_version = new_v,
+                .new_count = e.new_count,
+            }) catch {
+                job.alloc.free(old_v);
+                job.alloc.free(new_v);
+            };
+        }
+        if (reached) {
+            p.feed_reached_since = true;
+            break;
+        }
+        if (page >= f95.newfeed.pageTotal(body)) break;
     }
 
     job.markDone();
@@ -346,6 +443,24 @@ fn onUpdateCheckDone(frame: *Frame, job: *UpdateCheckJob) void {
         uniques.append(frame.lib.alloc, tid) catch break;
     }
 
+    if (p.feed_mode) {
+        // The feed is a finite window. If the walk ran out of pages before
+        // reaching our last check, updates may have scrolled off the end —
+        // don't trust it; run the full check instead (and stamp "now" so the
+        // next incremental check starts from here).
+        if (p.since_is_stamp and !p.feed_reached_since) {
+            const now_s = std.Io.Clock.Timestamp.now(frame.io, .real).raw.toSeconds();
+            state.last_update_check_ts = now_s;
+            persistInt64IfDirty(frame.info.last_update_check_path, frame.io, now_s);
+            log.info("new-versions feed didn't reach the last check ({d} rows) — full check", .{p.scanned});
+            state.setSyncMsg("feed doesn't reach back to your last check — running a full check");
+            sync_act.startSyncAll(frame);
+            return;
+        }
+        const applied = applyFeedUpdates(frame, p.feed_updates.items);
+        log.info("new-versions feed: {d} library rows, {d} versions updated ({d} rows scanned)", .{ p.feed_updates.items.len, applied, p.scanned });
+    }
+
     // Always advance the stamp on success — even with zero hits, we
     // confirmed nothing happened in our library during the window.
     if (p.newest_seen_ts > 0) {
@@ -392,6 +507,36 @@ fn onUpdateCheckDone(frame: *Frame, job: *UpdateCheckJob) void {
 fn freeUpdateCheckPayload(job: *UpdateCheckJob) void {
     job.payload.library_set.deinit();
     job.payload.mismatch_tids.deinit(job.alloc);
+    for (job.payload.feed_updates.items) |u| {
+        job.alloc.free(u.old_version);
+        job.alloc.free(u.new_version);
+    }
+    job.payload.feed_updates.deinit(job.alloc);
+}
+
+/// Write the feed's new versions into the library: set `latest_version`
+/// where it differs, so "Update available" shows right away, before the
+/// queued syncs run. Newest feed row per game wins (rows are newest first,
+/// so the first hit for a thread id is the latest). Returns how many games
+/// changed.
+fn applyFeedUpdates(frame: *Frame, updates: []const owned_types.FeedUpdate) u32 {
+    var applied: u32 = 0;
+    var seen: std.AutoHashMap(u64, void) = .init(frame.lib.alloc);
+    defer seen.deinit();
+    for (updates) |u| {
+        if (u.new_version.len == 0) continue;
+        const r = seen.getOrPut(u.thread_id) catch continue;
+        if (r.found_existing) continue;
+        for (frame.games) |*g| {
+            if (g.f95_thread_id != u.thread_id) continue;
+            if (g.latest_version) |cur| if (std.mem.eql(u8, cur, u.new_version)) break;
+            frame.lib.setLatestVersion(u.thread_id, u.new_version) catch break;
+            applied += 1;
+            break;
+        }
+    }
+    if (applied > 0) frame.state.reload_requested = true;
+    return applied;
 }
 
 /// Write `ts` as decimal text to `path`. Best-effort; logs and

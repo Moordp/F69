@@ -275,6 +275,16 @@ pub const Library = struct {
         ) catch return self.dbFail();
     }
 
+    /// Set a game's `latest_version` (e.g. from the F95 new-versions feed)
+    /// without touching any other column. The next full sync overwrites it
+    /// with the canonical value.
+    pub fn setLatestVersion(self: *Library, thread_id: u64, version: []const u8) errs.Error!void {
+        self.conn.inner.exec(
+            "UPDATE games SET latest_version = ? WHERE f95_thread_id = ?",
+            .{ version, @as(i64, @intCast(thread_id)) },
+        ) catch return self.dbFail();
+    }
+
     // ----- user labels -----
 
     /// Create a label (idempotent on name). Returns the label's id whether

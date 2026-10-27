@@ -243,7 +243,7 @@ const ANCHOR_WINDOW = 4096;
 /// `p-body-pageContent` container up to the sidebar. Empty if the
 /// container is missing (login redirect, error page, changed markup) so
 /// menu / footer thread links can never be taken for bookmarks.
-fn pageContent(html: []const u8) []const u8 {
+pub fn pageContent(html: []const u8) []const u8 {
     const start = std.mem.indexOf(u8, html, "p-body-pageContent") orelse return html[0..0];
     const tail = html[start..];
     const end = std.mem.indexOf(u8, tail, "p-body-sidebar") orelse tail.len;
@@ -262,7 +262,7 @@ fn dataTemplate(html: []const u8) []const u8 {
 /// XenForo's pagination total, read only from the `pageNav` list so the
 /// rest of the page (which can mention any `page-N`) can't inflate it.
 /// 1 when there is no pagination.
-fn extractPageNavTotal(html: []const u8) usize {
+pub fn extractPageNavTotal(html: []const u8) usize {
     const content = pageContent(html);
     const start = std.mem.indexOf(u8, content, "pageNav-main") orelse return 1;
     const tail = content[start..];
@@ -321,10 +321,10 @@ fn collectRows(
     return res;
 }
 
-const ThreadAnchor = struct { href: []const u8, inner: []const u8 };
+pub const ThreadAnchor = struct { href: []const u8, inner: []const u8 };
 
 /// First `<a href="…threads/…">inner</a>` in `window`.
-fn findThreadAnchor(window: []const u8) ?ThreadAnchor {
+pub fn findThreadAnchor(window: []const u8) ?ThreadAnchor {
     var pos: usize = 0;
     while (std.mem.indexOfPos(u8, window, pos, "<a ")) |a| {
         pos = a + 3;

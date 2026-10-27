@@ -336,10 +336,14 @@ pub const RefreshBackend = enum {
 /// own latest-updates scan (`latest_data.php?cmd=list`, paginated back to
 /// the last check); `rss` uses F95's official `cmd=rss` feed (one request,
 /// ~30 newest). RSS is lighter but shallower; builtin covers a longer
-/// window. When `rss` is chosen it applies regardless of `refresh_backend`.
+/// window. `watched_feed` reads the logged-in user's F95 new-versions page
+/// (`/watched/threads?tab=new`): exact old → new versions for watched
+/// threads, newest first, back to the last check. RSS and watched_feed both
+/// apply regardless of `refresh_backend`.
 pub const UpdateCheckSource = enum {
     builtin,
     rss,
+    watched_feed,
 
     pub fn fromStr(s: []const u8) UpdateCheckSource {
         return std.meta.stringToEnum(UpdateCheckSource, s) orelse .builtin;
@@ -349,6 +353,7 @@ pub const UpdateCheckSource = enum {
         return switch (self) {
             .builtin => "f69 latest-updates scan",
             .rss => "F95 RSS feed",
+            .watched_feed => "F95 new-versions feed (login)",
         };
     }
 };

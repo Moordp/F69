@@ -266,8 +266,27 @@ pub const UpdateCheckPayload = struct {
     /// post-walk status message.
     scanned: u32 = 0,
     err_name: ?[]const u8 = null,
+    /// watched_feed source only: library games the feed reported with their
+    /// new version. Strings are owned by `job.alloc`.
+    feed_updates: std.ArrayList(FeedUpdate) = .empty,
+    /// True when `last_update_check_ts` was a real stamp (not the first-run
+    /// lookback). With `feed_reached_since == false` that means the feed's
+    /// window ended before reaching the last check, so it can't be trusted
+    /// to have shown everything.
+    since_is_stamp: bool = false,
+    /// watched_feed: the walk found a row at or before `since_ts`.
+    feed_reached_since: bool = true,
+    feed_mode: bool = false,
 };
 pub const UpdateCheckJob = Job(UpdateCheckPayload);
+
+/// One library game the F95 new-versions feed reported.
+pub const FeedUpdate = struct {
+    thread_id: u64,
+    old_version: []const u8,
+    new_version: []const u8,
+    new_count: u32,
+};
 
 /// Payload for the indexer batch `/fast` pre-flight worker. Walks
 /// every library thread_id in chunks of `f95_indexer.MAX_IDS_PER_FAST`

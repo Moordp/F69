@@ -2,6 +2,17 @@
 
 All notable, user-facing changes. Dates are YYYY-MM-DD.
 
+## [0.15.2] - 2026-10-27
+
+### New
+- **New-versions feed for "Check for updates"** (Settings → Check-for-updates
+  source → *F95 new-versions feed (login)*). Reads your F95 watched-threads
+  "new versions" page, newest first, back to your last check — a few requests
+  instead of checking every game. Games in your library get their new version
+  right away, then sync as usual. It only covers threads you watch, needs you
+  logged in, and falls back to a full check if the feed doesn't reach back to
+  your last check.
+
 ## [0.15.1] - 2026-10-27
 
 ### Fixes

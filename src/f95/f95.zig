@@ -36,6 +36,8 @@ pub const tags = @import("tags.zig");
 /// short-lived signed URL. Caller frees the returned slice.
 pub const donor_ddl = @import("donor_ddl.zig");
 pub const rss = @import("rss.zig");
+/// `/watched/threads?tab=new` feed parser (old → new version per row).
+pub const newfeed = @import("newfeed.zig");
 
 // Pull nested tests into this module's test binary. Without these
 // references the compiler only analyzes the re-exported symbols above,
@@ -48,6 +50,7 @@ test {
     _ = @import("domain.zig");
     _ = @import("donor_ddl.zig");
     _ = @import("errors.zig");
+    _ = @import("newfeed.zig");
     _ = @import("rss.zig");
     _ = @import("service.zig");
     _ = @import("tags.zig");
