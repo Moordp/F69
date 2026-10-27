@@ -29,10 +29,10 @@ pub const ChipSpec = struct {
 pub fn chip(src: std.builtin.SourceLocation, spec: ChipSpec, opts: dvui.Options) void {
     const defaults: dvui.Options = .{
         .background = true,
-        .color_fill = c(spec.fill),
-        .color_border = c(spec.border),
+        .color_fill = .{ .color = c(spec.fill) },
+        .color_border = .{ .color = c(spec.border) },
         .border = dvui.Rect.all(1),
-        .corner_radius = dvui.Rect.all(tokens.r),
+        .corners = dvui.CornerRect.all(tokens.r),
         .padding = .{ .x = 7, .y = 1, .w = 7, .h = 1 },
         .min_size_content = .{ .w = 0, .h = 19 },
     };
@@ -40,7 +40,7 @@ pub fn chip(src: std.builtin.SourceLocation, spec: ChipSpec, opts: dvui.Options)
     defer box.deinit();
     const body = dvui.Font.theme(.body);
     dvui.labelNoFmt(@src(), spec.label, .{}, .{
-        .color_text = c(spec.text),
+        .color_text = .{ .color = c(spec.text) },
         .gravity_y = 0.5,
         .gravity_x = 0.5,
         .font = body.withSize(body.size * spec.scale),
@@ -71,8 +71,8 @@ pub fn tagChip(src: std.builtin.SourceLocation, label: []const u8, opts: dvui.Op
 pub fn dot(src: std.builtin.SourceLocation, color: tokens.Color, opts: dvui.Options) void {
     const defaults: dvui.Options = .{
         .background = true,
-        .color_fill = c(color),
-        .corner_radius = dvui.Rect.all(2),
+        .color_fill = .{ .color = c(color) },
+        .corners = dvui.CornerRect.all(2),
         .min_size_content = .{ .w = 7, .h = 7 },
     };
     var box = dvui.box(src, .{}, defaults.override(opts));
@@ -86,15 +86,15 @@ pub const Variant = enum { neutral, primary, danger, ghost };
 pub fn button(src: std.builtin.SourceLocation, label: []const u8, variant: Variant, opts: dvui.Options) bool {
     const t = tokens.active;
     const skin: dvui.Options = switch (variant) {
-        .primary => .{ .color_fill = c(t.acc), .color_text = c(t.ink_on_acc), .color_border = c(t.acc) },
-        .danger => .{ .color_fill = c(t.bg2), .color_text = c(t.danger), .color_border = c(t.line) },
-        .ghost => .{ .color_text = c(t.ink2) },
-        .neutral => .{ .color_fill = c(t.bg2), .color_text = c(t.ink), .color_border = c(t.line) },
+        .primary => .{ .color_fill = .{ .color = c(t.acc) }, .color_text = .{ .color = c(t.ink_on_acc) }, .color_border = .{ .color = c(t.acc) } },
+        .danger => .{ .color_fill = .{ .color = c(t.bg2) }, .color_text = .{ .color = c(t.danger) }, .color_border = .{ .color = c(t.line) } },
+        .ghost => .{ .color_text = .{ .color = c(t.ink2) } },
+        .neutral => .{ .color_fill = .{ .color = c(t.bg2) }, .color_text = .{ .color = c(t.ink) }, .color_border = .{ .color = c(t.line) } },
     };
     const layout: dvui.Options = .{
         .background = variant != .ghost,
         .border = dvui.Rect.all(1),
-        .corner_radius = dvui.Rect.all(tokens.r),
+        .corners = dvui.CornerRect.all(tokens.r),
         .padding = .{ .x = 12, .y = 0, .w = 12, .h = 0 },
         .min_size_content = .{ .w = 0, .h = 29 },
     };
@@ -109,10 +109,10 @@ pub fn toggle(src: std.builtin.SourceLocation, on: bool, opts: dvui.Options) boo
     const t = tokens.active;
     var track = dvui.box(src, .{ .dir = .horizontal }, (dvui.Options{
         .background = true,
-        .color_fill = c(if (on) t.acc_wash else t.bg3),
-        .color_border = c(if (on) t.acc_dim else t.line),
+        .color_fill = .{ .color = c(if (on) t.acc_wash else t.bg3) },
+        .color_border = .{ .color = c(if (on) t.acc_dim else t.line) },
         .border = dvui.Rect.all(1),
-        .corner_radius = dvui.Rect.all(11),
+        .corners = dvui.CornerRect.all(11),
         .min_size_content = .{ .w = 40, .h = 22 },
         .padding = .{ .x = 3, .y = 3, .w = 3, .h = 3 },
     }).override(opts));
@@ -121,8 +121,8 @@ pub fn toggle(src: std.builtin.SourceLocation, on: bool, opts: dvui.Options) boo
     if (on) _ = dvui.spacer(@src(), .{ .expand = .horizontal });
     var knob = dvui.box(@src(), .{}, .{
         .background = true,
-        .color_fill = c(if (on) t.acc else t.ink3),
-        .corner_radius = dvui.Rect.all(8),
+        .color_fill = .{ .color = c(if (on) t.acc else t.ink3) },
+        .corners = dvui.CornerRect.all(8),
         .min_size_content = .{ .w = 16, .h = 16 },
         .gravity_y = 0.5,
     });
@@ -137,10 +137,10 @@ pub fn segmented(src: std.builtin.SourceLocation, labels: []const []const u8, ac
     const t = tokens.active;
     var row = dvui.box(src, .{ .dir = .horizontal }, (dvui.Options{
         .background = true,
-        .color_fill = c(t.bg1),
-        .color_border = c(t.line),
+        .color_fill = .{ .color = c(t.bg1) },
+        .color_border = .{ .color = c(t.line) },
         .border = dvui.Rect.all(1),
-        .corner_radius = dvui.Rect.all(tokens.r),
+        .corners = dvui.CornerRect.all(tokens.r),
     }).override(opts));
     defer row.deinit();
     var hit: ?usize = null;
@@ -149,11 +149,11 @@ pub fn segmented(src: std.builtin.SourceLocation, labels: []const []const u8, ac
         if (dvui.button(@src(), lab, .{}, .{
             .id_extra = i,
             .background = is_on,
-            .color_fill = c(t.acc),
-            .color_text = c(if (is_on) t.ink_on_acc else t.ink2),
-            .color_border = c(t.line),
+            .color_fill = .{ .color = c(t.acc) },
+            .color_text = .{ .color = c(if (is_on) t.ink_on_acc else t.ink2) },
+            .color_border = .{ .color = c(t.line) },
             .border = .{ .x = if (i == 0) 0 else 1, .y = 0, .w = 0, .h = 0 },
-            .corner_radius = dvui.Rect.all(0),
+            .corners = dvui.CornerRect.all(0),
             .padding = .{ .x = 13, .y = 0, .w = 13, .h = 0 },
             .min_size_content = .{ .w = 0, .h = 27 },
         })) hit = i;
@@ -169,16 +169,16 @@ pub fn progressBar(src: std.builtin.SourceLocation, frac: f32, width: f32, opts:
     const f = std.math.clamp(frac, 0, 1);
     const defaults: dvui.Options = .{
         .background = true,
-        .color_fill = c(t.bg3),
-        .corner_radius = dvui.Rect.all(2),
+        .color_fill = .{ .color = c(t.bg3) },
+        .corners = dvui.CornerRect.all(2),
         .min_size_content = .{ .w = width, .h = 7 },
     };
     var outer = dvui.box(src, .{ .dir = .horizontal }, defaults.override(opts));
     defer outer.deinit();
     var inner = dvui.box(@src(), .{}, .{
         .background = true,
-        .color_fill = c(t.acc),
-        .corner_radius = dvui.Rect.all(2),
+        .color_fill = .{ .color = c(t.acc) },
+        .corners = dvui.CornerRect.all(2),
         .min_size_content = .{ .w = width * f, .h = 7 },
     });
     inner.deinit();
@@ -186,7 +186,7 @@ pub fn progressBar(src: std.builtin.SourceLocation, frac: f32, width: f32, opts:
 
 /// Mono, dimmed, uppercase-style section label (e.g. "PLAN SUMMARY").
 pub fn sectionHeader(src: std.builtin.SourceLocation, label: []const u8, opts: dvui.Options) void {
-    dvui.labelNoFmt(src, label, .{}, (dvui.Options{ .color_text = c(tokens.active.ink3) }).override(opts));
+    dvui.labelNoFmt(src, label, .{}, (dvui.Options{ .color_text = .{ .color = c(tokens.active.ink3) } }).override(opts));
 }
 
 // ----- containers / inputs -----
@@ -196,10 +196,10 @@ pub fn panel(src: std.builtin.SourceLocation, opts: dvui.Options) *dvui.BoxWidge
     const t = tokens.active;
     const defaults: dvui.Options = .{
         .background = true,
-        .color_fill = c(t.bg1),
-        .color_border = c(t.line),
+        .color_fill = .{ .color = c(t.bg1) },
+        .color_border = .{ .color = c(t.line) },
         .border = dvui.Rect.all(1),
-        .corner_radius = dvui.Rect.all(tokens.r_lg),
+        .corners = dvui.CornerRect.all(tokens.r_lg),
     };
     return dvui.box(src, .{ .dir = .vertical }, defaults.override(opts));
 }
@@ -209,16 +209,16 @@ pub fn searchBox(src: std.builtin.SourceLocation, buffer: []u8, opts: dvui.Optio
     const t = tokens.active;
     const defaults: dvui.Options = .{
         .background = true,
-        .color_fill = c(t.bg0),
-        .color_border = c(t.line),
+        .color_fill = .{ .color = c(t.bg0) },
+        .color_border = .{ .color = c(t.line) },
         .border = dvui.Rect.all(1),
-        .corner_radius = dvui.Rect.all(tokens.r),
+        .corners = dvui.CornerRect.all(tokens.r),
         .padding = .{ .x = 8, .y = 0, .w = 8, .h = 0 },
         .min_size_content = .{ .w = 0, .h = 29 },
     };
     var box = dvui.box(src, .{ .dir = .horizontal }, defaults.override(opts));
     defer box.deinit();
-    var te = dvui.textEntry(@src(), .{ .text = .{ .buffer = buffer } }, .{ .expand = .horizontal, .color_text = c(t.ink) });
+    var te = dvui.textEntry(@src(), .{ .text = .{ .buffer = buffer } }, .{ .expand = .horizontal, .color_text = .{ .color = c(t.ink) } });
     te.deinit();
 }
 

@@ -1383,7 +1383,7 @@ const WIN_SKIP_DIRS = [_][]const u8{
 fn winRejected(name: []const u8) bool {
     for (WIN_EXE_REJECT) |r| switch (r) {
         .prefix => |p| if (std.ascii.startsWithIgnoreCase(name, p)) return true,
-        .sub => |s| if (std.ascii.indexOfIgnoreCase(name, s) != null) return true,
+        .sub => |s| if (std.ascii.findIgnoreCase(name, s) != null) return true,
     };
     return false;
 }
@@ -2189,7 +2189,7 @@ pub fn doImportSaves(frame: *Frame, game: *const library.Game) void {
 /// Pure-ish: produce a stable "YYYYMMDD-HHMMSS"-shaped string. Uses
 /// the host clock; falls back to "unknown" if the clock read fails.
 fn backupTimestamp(io: std.Io) [24]u8 {
-    var out: [24]u8 = [_]u8{0} ** 24;
+    var out: [24]u8 = @splat(0);
     const ts = std.Io.Clock.Timestamp.now(io, .real);
     const secs = @divTrunc(ts.raw.toNanoseconds(), 1_000_000_000);
     _ = std.fmt.bufPrint(&out, "{d}", .{secs}) catch return out;

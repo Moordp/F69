@@ -40,13 +40,8 @@ pub fn loadGame(io: std.Io, parent_alloc: std.mem.Allocator, path: []const u8) e
     errdefer arena.deinit();
 
     const bytes_z = readFileSentinel(io, arena.allocator(), path) catch |e| return mapReadErr(e);
-    const recipe = std.zon.parse.fromSliceAlloc(
-        dom.GameRecipe,
-        arena.allocator(),
-        bytes_z,
-        null,
-        .{ .ignore_unknown_fields = true, .free_on_error = false },
-    ) catch |e| return switch (e) {
+    var diag: std.zon.parse.Diagnostics = undefined;
+    const recipe = std.zon.parse.fromSlice(dom.GameRecipe, .{ .gpa = arena.allocator(), .arena = arena.allocator(), .source = bytes_z, .diagnostics = &diag, .ignore_unknown_fields = true }) catch |e| return switch (e) {
         error.OutOfMemory => errs.Error.OutOfMemory,
         error.ParseZon => errs.Error.ZonParseError,
     };
@@ -58,13 +53,8 @@ pub fn loadMod(io: std.Io, parent_alloc: std.mem.Allocator, path: []const u8) er
     errdefer arena.deinit();
 
     const bytes_z = readFileSentinel(io, arena.allocator(), path) catch |e| return mapReadErr(e);
-    const recipe = std.zon.parse.fromSliceAlloc(
-        dom.ModRecipe,
-        arena.allocator(),
-        bytes_z,
-        null,
-        .{ .ignore_unknown_fields = true, .free_on_error = false },
-    ) catch |e| return switch (e) {
+    var diag: std.zon.parse.Diagnostics = undefined;
+    const recipe = std.zon.parse.fromSlice(dom.ModRecipe, .{ .gpa = arena.allocator(), .arena = arena.allocator(), .source = bytes_z, .diagnostics = &diag, .ignore_unknown_fields = true }) catch |e| return switch (e) {
         error.OutOfMemory => errs.Error.OutOfMemory,
         error.ParseZon => errs.Error.ZonParseError,
     };
@@ -77,13 +67,8 @@ pub fn loadMod(io: std.Io, parent_alloc: std.mem.Allocator, path: []const u8) er
 pub fn parseGameFromBytes(parent_alloc: std.mem.Allocator, bytes_z: [:0]const u8) errs.Error!ParsedGame {
     var arena = std.heap.ArenaAllocator.init(parent_alloc);
     errdefer arena.deinit();
-    const recipe = std.zon.parse.fromSliceAlloc(
-        dom.GameRecipe,
-        arena.allocator(),
-        bytes_z,
-        null,
-        .{ .ignore_unknown_fields = true, .free_on_error = false },
-    ) catch |e| return switch (e) {
+    var diag: std.zon.parse.Diagnostics = undefined;
+    const recipe = std.zon.parse.fromSlice(dom.GameRecipe, .{ .gpa = arena.allocator(), .arena = arena.allocator(), .source = bytes_z, .diagnostics = &diag, .ignore_unknown_fields = true }) catch |e| return switch (e) {
         error.OutOfMemory => errs.Error.OutOfMemory,
         error.ParseZon => errs.Error.ZonParseError,
     };
@@ -93,13 +78,8 @@ pub fn parseGameFromBytes(parent_alloc: std.mem.Allocator, bytes_z: [:0]const u8
 pub fn parseModFromBytes(parent_alloc: std.mem.Allocator, bytes_z: [:0]const u8) errs.Error!ParsedMod {
     var arena = std.heap.ArenaAllocator.init(parent_alloc);
     errdefer arena.deinit();
-    const recipe = std.zon.parse.fromSliceAlloc(
-        dom.ModRecipe,
-        arena.allocator(),
-        bytes_z,
-        null,
-        .{ .ignore_unknown_fields = true, .free_on_error = false },
-    ) catch |e| return switch (e) {
+    var diag: std.zon.parse.Diagnostics = undefined;
+    const recipe = std.zon.parse.fromSlice(dom.ModRecipe, .{ .gpa = arena.allocator(), .arena = arena.allocator(), .source = bytes_z, .diagnostics = &diag, .ignore_unknown_fields = true }) catch |e| return switch (e) {
         error.OutOfMemory => errs.Error.OutOfMemory,
         error.ParseZon => errs.Error.ZonParseError,
     };
@@ -140,7 +120,7 @@ fn readFileSentinel(io: std.Io, alloc: std.mem.Allocator, path: []const u8) ![:0
     // Comptime-scoped: non-Windows builds never reference std.c here, and
     // x86_64-windows-gnu always links mingw libc.
     if (builtin.os.tag == .windows) {
-        const pz = try alloc.dupeZ(u8, path);
+        const pz = try alloc.dupeSentinel(u8, path, 0);
         const f = std.c.fopen(pz.ptr, "rb") orelse return error.FileNotFound;
         defer _ = std.c.fclose(f);
         var out: std.ArrayList(u8) = .empty;
@@ -305,7 +285,7 @@ test "saveGame round-trip" {
     try std.zon.stringify.serialize(original, .{}, &aw.writer);
 
     // fromSliceAlloc needs a sentinel-terminated slice. dupeZ.
-    const slice_z = try std.testing.allocator.dupeZ(u8, aw.writer.buffered());
+    const slice_z = try std.testing.allocator.dupeSentinel(u8, aw.writer.buffered(), 0);
     defer std.testing.allocator.free(slice_z);
 
     var parsed = try parseGameFromBytes(std.testing.allocator, slice_z);

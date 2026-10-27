@@ -239,7 +239,7 @@ test "Tracker: single added_file round-trip" {
         .mod_id = "summertime-saga.cheat-menu",
         .path = "game/scripts/cheats.rpyc",
         .kind = .added_file,
-        .sha256 = [_]u8{0xAB} ** 32,
+        .sha256 = @splat(0xAB),
     });
     try t.flush();
 

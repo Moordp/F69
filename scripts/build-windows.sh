@@ -11,10 +11,14 @@ echo "== building mingw C-lib prefix =="
 nix build -f "$ROOT/nix/windows-deps.nix" -o "$W/deps"
 # pkg-config name aliases (linkSystemLibrary name -> real .pc filename)
 mkdir -p "$W/pc"; cp -f "$W"/deps/lib/pkgconfig/*.pc "$W/pc/" 2>/dev/null || true
-alias_pc(){ [ -f "$W/pc/$2" ] && cp -f "$W/pc/$2" "$W/pc/$1"; }
+alias_pc(){ if [ -f "$W/pc/$2" ]; then cp -f "$W/pc/$2" "$W/pc/$1"; fi; }
 alias_pc archive.pc libarchive.pc; alias_pc z.pc zlib.pc; alias_pc bz2.pc bzip2.pc
 alias_pc lzma.pc liblzma.pc; alias_pc zstd.pc libzstd.pc; alias_pc lz4.pc liblz4.pc
 alias_pc xml2.pc libxml-2.0.pc; alias_pc avif.pc libavif.pc
+# Newer nixpkgs' mingw zlib ships libz.a but no zlib.pc; write one so `linkSystemLibrary("z")` resolves.
+if [ ! -f "$W/pc/z.pc" ]; then
+  printf 'prefix=%s\nName: zlib\nDescription: zlib\nVersion: 1\nLibs: -L${prefix}/lib -lz\nCflags: -I${prefix}/include\n' "$W/deps" > "$W/pc/z.pc"
+fi
 # import-lib aliases: zig searches lib<name>.a but mingw ships lib<name>.dll.a
 mkdir -p "$W/extra/lib"; cd "$W/extra/lib"
 for n in archive bz2 lzma zstd lz4 nettle hogweed; do

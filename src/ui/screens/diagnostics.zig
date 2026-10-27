@@ -31,7 +31,7 @@ pub fn diagnosticsScreen(frame: *Frame) !bool {
         defer top.deinit();
         if (components.iconOnly(@src(), "back", entypo.chevron_left, .{})) state.screen = .library;
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 12, .h = 1 } });
-        dvui.label(@src(), "Diagnostics", .{}, .{ .gravity_y = 0.5, .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
+        dvui.label(@src(), "Diagnostics", .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = tokens.toDvui(tokens.active.acc, dvui.Color) } });
     }
     _ = dvui.separator(@src(), .{ .expand = .horizontal });
 
@@ -147,7 +147,7 @@ pub fn diagnosticsScreen(frame: *Frame) !bool {
 
             var header_buf: [128]u8 = undefined;
             const header = std.fmt.bufPrint(&header_buf, "  {d}  {s}", .{ g.f95_thread_id, g.name }) catch continue;
-            dvui.labelNoFmt(@src(), header, .{}, .{ .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
+            dvui.labelNoFmt(@src(), header, .{}, .{ .color_text = .{ .color = tokens.toDvui(tokens.active.acc, dvui.Color) } });
             for (installs) |i| {
                 var ib: [320]u8 = undefined;
                 const line = std.fmt.bufPrint(&ib, "    v{s} at {s} (installed_at={d})", .{ version_mod.stripVPrefix(i.version), i.install_path, i.installed_at }) catch continue;
@@ -186,7 +186,7 @@ pub fn diagnosticsScreen(frame: *Frame) !bool {
 }
 
 fn diagSection(src: anytype, name: []const u8) void {
-    dvui.label(src, "{s}", .{name}, .{ .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
+    dvui.label(src, "{s}", .{name}, .{ .color_text = .{ .color = tokens.toDvui(tokens.active.acc, dvui.Color) } });
 }
 
 fn diagRow(src: anytype, key: []const u8, value: []const u8) void {

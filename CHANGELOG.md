@@ -2,6 +2,23 @@
 
 All notable, user-facing changes. Dates are YYYY-MM-DD.
 
+## [0.15.0] - 2026-10-27
+
+### Fixes
+- **Pull bookmarks works again.** F95 moved bookmarks to its new watched-threads
+  page, so the pull found only a handful of unrelated links and stopped. f69 now
+  reads your bookmarks from the new pages (both the classic and the new layout)
+  and walks every page.
+
+### Under the hood
+- Built with **Zig 0.17** (was 0.16), with updated GUI (dvui), SQLite and
+  websocket libraries. The library list uses the new grid widget.
+- The Windows build works on Zig 0.17: the bundled `websocket` copy carries a
+  small fix for the removed Windows socket read call (see
+  `third_party/websocket/F69_PATCHES.md`).
+- Packaging (`zig build portable|aur|deb|rpm`) now runs from `tools/dist.zig`,
+  because Zig 0.17 no longer allows custom build steps.
+
 ## [0.14.1] - 2026-09-01
 
 Combined notes for 0.13.0 – 0.14.1. **0.14.1 is the release to install.**

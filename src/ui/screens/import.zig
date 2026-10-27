@@ -44,7 +44,7 @@ pub fn importUrlsScreen(frame: *Frame) !bool {
         defer top.deinit();
         if (components.iconButton(@src(), "Back", entypo.chevron_left, .{})) state.screen = .library;
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 12, .h = 1 } });
-        dvui.label(@src(), "Import by F95 URL / ID", .{}, .{ .gravity_y = 0.5, .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
+        dvui.label(@src(), "Import by F95 URL / ID", .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = tokens.toDvui(tokens.active.acc, dvui.Color) } });
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         if (style.button(@src(), "Import", .{}, .{ .style = .highlight })) {
             const result = doImport(frame, state.importBufSlice());
@@ -87,7 +87,7 @@ pub fn importUrlsScreen(frame: *Frame) !bool {
 
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
     if (!state.import_msg.isEmpty()) {
-        dvui.labelNoFmt(@src(), state.importMsg(), .{}, .{ .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
+        dvui.labelNoFmt(@src(), state.importMsg(), .{}, .{ .color_text = .{ .color = tokens.toDvui(tokens.active.acc, dvui.Color) } });
     } else {
         dvui.label(@src(), "Imported games show up as \"(unsynced)\". Click Sync on each to populate.", .{}, .{});
     }
@@ -140,7 +140,7 @@ pub fn importF95CheckerReviewScreen(frame: *Frame) !bool {
             actions.doCancelF95CheckerReview(frame);
         }
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 12, .h = 1 } });
-        dvui.labelNoFmt(@src(), "Import from F95Checker — review", .{}, .{ .gravity_y = 0.5, .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
+        dvui.labelNoFmt(@src(), "Import from F95Checker — review", .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = tokens.toDvui(tokens.active.acc, dvui.Color) } });
     }
     _ = dvui.separator(@src(), .{ .expand = .horizontal });
 
@@ -261,7 +261,7 @@ fn renderF95ReviewList(state: *State, games: []importers.ImportedGame) void {
             dvui.labelNoFmt(@src(), "(not installed — metadata only)", .{}, .{
                 .gravity_y = 0.5,
                 .font = dvui.Font.theme(.body).withSize(F95_REVIEW_FONT_SIZE),
-                .color_text = .{ .r = 0x80, .g = 0x80, .b = 0x80 },
+                .color_text = .{ .color = .{ .r = 0x80, .g = 0x80, .b = 0x80 } },
                 .expand = .horizontal,
             });
         }
@@ -290,7 +290,7 @@ fn renderFolderScanScreen(frame: *Frame, copy: FolderScanCopy) !bool {
         defer top.deinit();
         if (components.iconButton(@src(), "Back", entypo.chevron_left, .{})) state.screen = .library;
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 12, .h = 1 } });
-        dvui.labelNoFmt(@src(), copy.title, .{}, .{ .gravity_y = 0.5, .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
+        dvui.labelNoFmt(@src(), copy.title, .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = tokens.toDvui(tokens.active.acc, dvui.Color) } });
     }
     _ = dvui.separator(@src(), .{ .expand = .horizontal });
 
@@ -529,9 +529,9 @@ fn renderBulkApplyRow(state: *State, rows: []state_mod.FolderImportRowState) voi
         .padding = .{ .x = 4, .y = 2, .w = 4, .h = 2 },
         .background = true,
         .border = style.border_thin,
-        .corner_radius = style.corner_radius,
-        .color_fill = style.cardFill(),
-        .color_border = style.borderColor(),
+        .corners = style.corner_radius,
+        .color_fill = .{ .color = style.cardFill() },
+        .color_border = .{ .color = style.borderColor() },
     });
     defer bar.deinit();
 
@@ -621,9 +621,9 @@ fn renderPreviewRow(
         .margin = .{ .x = 0, .y = 0, .w = 0, .h = ROW_GAP_V },
         .background = true,
         .border = style.border_thin,
-        .corner_radius = style.corner_radius,
-        .color_fill = style.cardFill(),
-        .color_border = row_border_color,
+        .corners = style.corner_radius,
+        .color_fill = .{ .color = style.cardFill() },
+        .color_border = .{ .color = row_border_color },
     });
     defer row.deinit();
 
@@ -669,7 +669,7 @@ fn renderPreviewRow(
 
         // Engine chip
         clippedLabel(row_id_base + 5, engineLabel(game.engine), COL_ENGINE_W, .{
-            .color_text = engineColor(game.engine),
+            .color_text = .{ .color = engineColor(game.engine) },
             .font = cell_font,
         });
         spacerW(COL_GAP, row_id_base + 6);
@@ -691,7 +691,7 @@ fn renderPreviewRow(
                 const issue_text = truncStr(&label_buf, short, charsForWidth(RIGHT_BLOCK_W - 8));
                 dvui.labelNoFmt(@src(), issue_text, .{}, .{
                     .id_extra = row_id_base + 8,
-                    .color_text = tokens.toDvui(tokens.active.warn, dvui.Color),
+                    .color_text = .{ .color = tokens.toDvui(tokens.active.warn, dvui.Color) },
                     .font = cell_font,
                     .gravity_y = 0.5,
                 });
@@ -783,7 +783,7 @@ fn renderPreviewRow(
                     .id_extra = row_id_base + 27,
                     .expand = .horizontal,
                     .gravity_y = 0.5,
-                    .color_text = .{ .r = 0x4F, .g = 0xC3, .b = 0x6F },
+                    .color_text = .{ .color = .{ .r = 0x4F, .g = 0xC3, .b = 0x6F } },
                     .font = cell_font,
                 });
                 if (style.button(@src(), "Unlink", .{}, .{
@@ -897,7 +897,7 @@ fn fieldLabel(extra: u32, text: []const u8, w: f32, color: dvui.Color, f: dvui.F
         .min_size_content = .{ .w = w, .h = SUBROW_H },
         .max_size_content = .{ .w = w, .h = 9999 },
         .gravity_y = 0.5,
-        .color_text = color,
+        .color_text = .{ .color = color },
         .font = f,
     });
 }
@@ -922,7 +922,7 @@ fn renderChipInline(extra: u32, row_state: *const state_mod.FolderImportRowState
         .min_size_content = .{ .w = EDITOR_CHIP_W, .h = SUBROW_H },
         .max_size_content = .{ .w = EDITOR_CHIP_W, .h = 9999 },
         .gravity_y = 0.5,
-        .color_text = chip_color,
+        .color_text = .{ .color = chip_color },
         .font = cell_font,
     });
 }
@@ -971,9 +971,9 @@ fn renderLinkSuggestions(
         .padding = .{ .x = 4, .y = 4, .w = 4, .h = 4 },
         .background = true,
         .border = style.border_thin,
-        .corner_radius = style.corner_radius,
-        .color_fill = .{ .r = 0x10, .g = 0x0A, .b = 0x14 },
-        .color_border = style.borderColor(),
+        .corners = style.corner_radius,
+        .color_fill = .{ .color = .{ .r = 0x10, .g = 0x0A, .b = 0x14 } },
+        .color_border = .{ .color = style.borderColor() },
     });
     defer listbox.deinit();
 
@@ -1023,7 +1023,7 @@ fn renderLinkSuggestions(
         if (series_n > 0) {
             dvui.labelNoFmt(@src(), "Related series:", .{}, .{
                 .id_extra = @intCast(idx * 100 + 80),
-                .color_text = .{ .r = 0xA0, .g = 0x80, .b = 0x90 },
+                .color_text = .{ .color = .{ .r = 0xA0, .g = 0x80, .b = 0x90 } },
                 .font = font(.body).withSize(ROW_FONT_SIZE - 1),
             });
             for (series[0..series_n], 0..) |sug, i| {
@@ -1296,7 +1296,7 @@ fn renderResolvePopup(frame: *Frame) void {
     });
     defer body.deinit();
 
-    dvui.labelNoFmt(@src(), game.name, .{}, .{ .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
+    dvui.labelNoFmt(@src(), game.name, .{}, .{ .color_text = .{ .color = tokens.toDvui(tokens.active.acc, dvui.Color) } });
     if (game.version) |v| {
         var vbuf: [80]u8 = undefined;
         const vmsg = std.fmt.bufPrint(&vbuf, "version: {s}", .{v}) catch v;
@@ -1317,7 +1317,7 @@ fn renderResolvePopup(frame: *Frame) void {
         @src(),
         "(F95 search-by-name coming in a follow-up — for now, look up the thread manually and paste the URL.)",
         .{},
-        .{ .color_text = .{ .r = 0xA0, .g = 0x80, .b = 0x90 } },
+        .{ .color_text = .{ .color = .{ .r = 0xA0, .g = 0x80, .b = 0x90 } } },
     );
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 12 } });
 

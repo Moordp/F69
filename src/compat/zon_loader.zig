@@ -40,18 +40,13 @@ pub fn parseFromBytes(parent_alloc: std.mem.Allocator, bytes_z: [:0]const u8) er
     errdefer arena.deinit();
     // Dupe into the arena so source_bytes survives independently of
     // the caller's buffer.
-    const owned = arena.allocator().dupeZ(u8, bytes_z) catch return errs.Error.OutOfMemory;
+    const owned = arena.allocator().dupeSentinel(u8, bytes_z, 0) catch return errs.Error.OutOfMemory;
     return parseFromBytesArena(&arena, owned);
 }
 
 fn parseFromBytesArena(arena: *std.heap.ArenaAllocator, bytes_z: [:0]const u8) errs.Error!Parsed {
-    const recipe = std.zon.parse.fromSliceAlloc(
-        dom.Recipe,
-        arena.allocator(),
-        bytes_z,
-        null,
-        .{ .ignore_unknown_fields = true, .free_on_error = false },
-    ) catch |e| return switch (e) {
+    var diag: std.zon.parse.Diagnostics = undefined;
+    const recipe = std.zon.parse.fromSlice(dom.Recipe, .{ .gpa = arena.allocator(), .arena = arena.allocator(), .source = bytes_z, .diagnostics = &diag, .ignore_unknown_fields = true }) catch |e| return switch (e) {
         error.OutOfMemory => errs.Error.OutOfMemory,
         error.ParseZon => errs.Error.ZonParseError,
     };

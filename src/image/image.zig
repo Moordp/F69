@@ -13,9 +13,7 @@
 const std = @import("std");
 const log = std.log.scoped(.image);
 
-const c = @cImport({
-    @cInclude("avif/avif.h");
-});
+const c = @import("c");
 
 pub const Error = error{
     DecodeFailed,
@@ -229,7 +227,7 @@ pub fn decodeAvif(alloc: std.mem.Allocator, bytes: []const u8) Error!Decoded {
 }
 
 test "isAvif sniff" {
-    const ftyp = "....ftypavif" ++ "\x00" ** 4;
+    const ftyp = "....ftypavif" ++ "\x00\x00\x00\x00";
     try std.testing.expect(isAvif(ftyp));
     try std.testing.expect(!isAvif("\x89PNG\r\n\x1a\n" ++ "\x00\x00\x00\x00"));
     try std.testing.expect(!isAvif("short"));
@@ -237,10 +235,10 @@ test "isAvif sniff" {
 
 test "isStbFormat sniff" {
     try std.testing.expect(isStbFormat("\x89PNG\r\n\x1a\n" ++ "\x00\x00\x00\x00"));
-    try std.testing.expect(isStbFormat("\xFF\xD8\xFF" ++ "\x00" ** 9));
-    try std.testing.expect(isStbFormat("GIF89a" ++ "\x00" ** 6));
-    try std.testing.expect(isStbFormat("BM" ++ "\x00" ** 10));
-    try std.testing.expect(!isStbFormat("....ftypavif" ++ "\x00" ** 4));
+    try std.testing.expect(isStbFormat("\xFF\xD8\xFF" ++ "\x00\x00\x00\x00\x00\x00\x00\x00\x00"));
+    try std.testing.expect(isStbFormat("GIF89a" ++ "\x00\x00\x00\x00\x00\x00"));
+    try std.testing.expect(isStbFormat("BM" ++ "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"));
+    try std.testing.expect(!isStbFormat("....ftypavif" ++ "\x00\x00\x00\x00"));
     try std.testing.expect(!isStbFormat("short"));
 }
 
@@ -263,7 +261,7 @@ test "downscaleHalfRgba 2x2 -> 1x1" {
 
 test "fitToMaxDim halves until under cap" {
     // 4x4 solid image, cap = 2 → should halve once to 2x2.
-    const src = [_]u8{0xAA} ** (4 * 4 * 4);
+    const src: [4 * 4 * 4]u8 = @splat(0xAA);
     const fit = try fitToMaxDim(std.testing.allocator, &src, 4, 4);
     defer std.testing.allocator.free(fit.rgba);
     // MAX_DIM is 2048 by default — small input passes through. Just

@@ -155,10 +155,10 @@ pub fn hexOf(c: Color, buf: *[9]u8) []const u8 {
 /// (≥ ~512 bytes); returns the written slice.
 pub fn formatTheme(theme: Theme, out: []u8) []const u8 {
     var len: usize = 0;
-    inline for (@typeInfo(Theme).@"struct".fields) |f| {
+    inline for (comptime std.meta.fieldNames(Theme)) |name| {
         var hb: [9]u8 = undefined;
-        const hx = hexOf(@field(theme, f.name), &hb);
-        const line = std.fmt.bufPrint(out[len..], "{s} {s}\n", .{ f.name, hx }) catch unreachable;
+        const hx = hexOf(@field(theme, name), &hb);
+        const line = std.fmt.bufPrint(out[len..], "{s} {s}\n", .{ name, hx }) catch unreachable;
         len += line.len;
     }
     return out[0..len];
@@ -174,8 +174,8 @@ pub fn parseTheme(base: Theme, text: []const u8) Theme {
         const name = it.next() orelse continue;
         const val = it.next() orelse continue;
         const color = parseHex(val) orelse continue;
-        inline for (@typeInfo(Theme).@"struct".fields) |f| {
-            if (std.mem.eql(u8, name, f.name)) @field(result, f.name) = color;
+        inline for (comptime std.meta.fieldNames(Theme)) |field_name| {
+            if (std.mem.eql(u8, name, field_name)) @field(result, field_name) = color;
         }
     }
     return result;

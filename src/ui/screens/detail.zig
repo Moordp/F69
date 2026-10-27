@@ -141,9 +141,9 @@ pub fn detailScreen(frame: *Frame) !bool {
             .margin = .{ .x = 0, .y = 4, .w = 0, .h = 4 },
             .background = true,
             .border = style.border_thin,
-            .corner_radius = style.corner_radius,
-            .color_fill = style.cardFill(),
-            .color_border = style.borderColor(),
+            .corners = style.corner_radius,
+            .color_fill = .{ .color = style.cardFill() },
+            .color_border = .{ .color = style.borderColor() },
         });
         defer bar.deinit();
         var conf_buf: [128]u8 = undefined;
@@ -167,12 +167,12 @@ pub fn detailScreen(frame: *Frame) !bool {
             .margin = .{ .x = 0, .y = 4, .w = 0, .h = 4 },
             .background = true,
             .border = style.border_thin,
-            .corner_radius = style.corner_radius,
-            .color_fill = style.cardFill(),
-            .color_border = style.borderColor(),
+            .corners = style.corner_radius,
+            .color_fill = .{ .color = style.cardFill() },
+            .color_border = .{ .color = style.borderColor() },
         });
         defer bar.deinit();
-        dvui.labelNoFmt(@src(), "F95 thread URL / id:", .{}, .{ .gravity_y = 0.5, .color_text = style.labelDim() });
+        dvui.labelNoFmt(@src(), "F95 thread URL / id:", .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = style.labelDim() } });
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
         const te = style.textEntry(@src(), .{ .text = .{ .buffer = &state.set_url_buf } }, .{ .expand = .horizontal, .min_size_content = .{ .w = 240, .h = 26 }, .gravity_y = 0.5 });
         te.deinit();
@@ -273,7 +273,7 @@ fn renderRatingStars(rating: f32) void {
             .id_extra = n,
             .min_size_content = .{ .w = 14, .h = 14 },
             .gravity_y = 0.5,
-            .color_text = if (filled) accent else null,
+            .color_text = if (filled) .{ .color = accent } else null,
         });
     }
 }
@@ -307,7 +307,7 @@ fn renderBannerHero(frame: *Frame, game: *const library.Game) void {
         .max_size_content = .height(HERO_H),
         .background = true,
         // near-black so the letterbox bars read as black, not graphite.
-        .color_fill = .{ .r = 0x04, .g = 0x06, .b = 0x09 },
+        .color_fill = .{ .color = .{ .r = 0x04, .g = 0x06, .b = 0x09 } },
     });
     defer hero.deinit();
 
@@ -354,12 +354,12 @@ fn renderBannerHero(frame: *Frame, game: *const library.Game) void {
             var ti = dvui.box(@src(), .{ .dir = .vertical }, .{
                 .gravity_y = 1.0,
                 .background = true,
-                .color_fill = .{ .r = 0x06, .g = 0x09, .b = 0x0d, .a = 0x55 },
+                .color_fill = .{ .color = .{ .r = 0x06, .g = 0x09, .b = 0x0d, .a = 0x55 } },
                 .padding = .{ .x = 12, .y = 9, .w = 16, .h = 11 },
-                .corner_radius = dvui.Rect.all(8),
+                .corners = dvui.CornerRect.all(8),
             });
             defer ti.deinit();
-            dvui.labelNoFmt(@src(), game.name, .{}, .{ .color_text = tokens.toDvui(t.ink, dvui.Color), .font = dvui.Font.theme(.title) });
+            dvui.labelNoFmt(@src(), game.name, .{}, .{ .color_text = .{ .color = tokens.toDvui(t.ink, dvui.Color) }, .font = dvui.Font.theme(.title) });
             _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
             renderHeroChips(game);
         }
@@ -448,7 +448,7 @@ fn renderHeroPlay(frame: *Frame, game: *const library.Game) void {
             .gravity_y = 0.5,
             .background = true,
             .style = .highlight,
-            .corner_radius = style.corner_radius,
+            .corners = style.corner_radius,
             .tag = "hero-play-caret",
         })) |anchor| {
             var fw = dvui.floatingMenu(@src(), .{ .from = anchor }, .{});
@@ -480,8 +480,8 @@ fn heroNavArrow(src: std.builtin.SourceLocation, tag: []const u8, tvg: []const u
         .margin = .{ .x = 8, .y = 0, .w = 8, .h = 0 },
         .padding = .{ .x = 11, .y = 18, .w = 11, .h = 18 },
         .background = true,
-        .color_fill = .{ .r = 0x0a, .g = 0x0e, .b = 0x12, .a = 0xB0 },
-        .corner_radius = dvui.Rect.all(8),
+        .color_fill = .{ .color = .{ .r = 0x0a, .g = 0x0e, .b = 0x12, .a = 0xB0 } },
+        .corners = dvui.CornerRect.all(8),
     });
 }
 
@@ -501,14 +501,14 @@ fn heroCounter(idx: usize, total: usize, bytes_opt: ?[]const u8) void {
         .gravity_y = 0.0,
         .margin = .{ .x = 0, .y = 12, .w = 14, .h = 0 },
         .background = true,
-        .color_fill = .{ .r = 0x0a, .g = 0x0f, .b = 0x14, .a = 0xD9 },
+        .color_fill = .{ .color = .{ .r = 0x0a, .g = 0x0f, .b = 0x14, .a = 0xD9 } },
         .border = dvui.Rect.all(1),
-        .color_border = .{ .r = 0x2b, .g = 0x37, .b = 0x42 },
-        .corner_radius = dvui.Rect.all(10),
+        .color_border = .{ .color = .{ .r = 0x2b, .g = 0x37, .b = 0x42 } },
+        .corners = dvui.CornerRect.all(10),
         .padding = .{ .x = 10, .y = 3, .w = 10, .h = 3 },
     });
     defer pill.deinit();
-    dvui.labelNoFmt(@src(), txt, .{}, .{ .color_text = tokens.toDvui(tokens.active.ink2, dvui.Color), .font = dvui.Font.theme(.mono) });
+    dvui.labelNoFmt(@src(), txt, .{}, .{ .color_text = .{ .color = tokens.toDvui(tokens.active.ink2, dvui.Color) }, .font = dvui.Font.theme(.mono) });
 }
 
 /// Small cover thumbnail inset for the V3 hero bottom row.
@@ -525,8 +525,8 @@ fn heroCoverInset(bytes_opt: ?[]const u8, thread_id: u64) void {
             .min_size_content = .{ .w = 92, .h = 124 },
             .max_size_content = .{ .w = 92, .h = 124 },
             .border = dvui.Rect.all(1),
-            .corner_radius = dvui.Rect.all(5),
-            .color_border = ring,
+            .corners = dvui.CornerRect.all(5),
+            .color_border = .{ .color = ring },
         });
         return;
     }
@@ -537,10 +537,10 @@ fn heroCoverInset(bytes_opt: ?[]const u8, thread_id: u64) void {
         .min_size_content = .{ .w = 92, .h = 124 },
         .max_size_content = .{ .w = 92, .h = 124 },
         .background = true,
-        .color_fill = .{ .r = 0x16, .g = 0x0c, .b = 0x12 },
+        .color_fill = .{ .color = .{ .r = 0x16, .g = 0x0c, .b = 0x12 } },
         .border = dvui.Rect.all(1),
-        .corner_radius = dvui.Rect.all(5),
-        .color_border = ring,
+        .corners = dvui.CornerRect.all(5),
+        .color_border = .{ .color = ring },
     });
     box.deinit();
 }
@@ -575,7 +575,7 @@ fn renderHeroChips(game: *const library.Game) void {
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 6, .h = 1 } });
         var lbl_buf: [48]u8 = undefined;
         const s = std.fmt.bufPrint(&lbl_buf, "{d:.1} ({d})", .{ r, game.vote_count orelse 0 }) catch "";
-        dvui.labelNoFmt(@src(), s, .{}, .{ .gravity_y = 0.5, .color_text = tokens.toDvui(t.ink2, dvui.Color) });
+        dvui.labelNoFmt(@src(), s, .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = tokens.toDvui(t.ink2, dvui.Color) } });
     }
 }
 
@@ -633,7 +633,7 @@ fn renderLabelsRow(frame: *Frame, game: *library.Game) void {
     dvui.label(@src(), "Labels", .{}, .{
         .min_size_content = .{ .w = 120, .h = 20 },
         .gravity_y = 0.5,
-        .color_text = style.labelDim(),
+        .color_text = .{ .color = style.labelDim() },
     });
 
     var flow = dvui.flexbox(@src(), .{}, .{ .expand = .horizontal });
@@ -659,7 +659,7 @@ fn renderLabelsRow(frame: *Frame, game: *library.Game) void {
             .id_extra = id_extra,
             .gravity_y = 0.5,
             .padding = .{ .x = 6, .y = 2, .w = 6, .h = 2 },
-            .corner_radius = .all(3),
+            .corners = .all(3),
         });
         if (components.iconOnly(@src(), "remove-label", entypo.cross, .{ .id_extra = id_extra, .gravity_y = 0.5 })) {
             saveOrToast(frame, "label", frame.lib.removeGameLabel(game.f95_thread_id, lid));
@@ -736,7 +736,7 @@ fn renderDetailEditForm(frame: *Frame, game: *library.Game) void {
         .expand = .horizontal,
         .padding = .{ .x = 0, .y = 9, .w = 0, .h = 9 },
         .border = .{ .x = 0, .y = 1, .w = 0, .h = 1 },
-        .color_border = style.borderColor(),
+        .color_border = .{ .color = style.borderColor() },
     });
     defer box.deinit();
 
@@ -746,7 +746,7 @@ fn renderDetailEditForm(frame: *Frame, game: *library.Game) void {
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .padding = .{ .x = 0, .y = 3, .w = 0, .h = 3 } });
         defer row.deinit();
-        dvui.label(@src(), "Engine", .{}, .{ .min_size_content = .{ .w = 90, .h = 26 }, .gravity_y = 0.5, .color_text = style.labelDim() });
+        dvui.label(@src(), "Engine", .{}, .{ .min_size_content = .{ .w = 90, .h = 26 }, .gravity_y = 0.5, .color_text = .{ .color = style.labelDim() } });
         var picked: usize = state.edit_engine_idx;
         if (style.dropdown(@src(), engineEditLabels(), .{ .choice = &picked }, .{}, .{ .gravity_y = 0.5, .min_size_content = .{ .w = 200, .h = 26 } })) {
             state.edit_engine_idx = picked;
@@ -773,7 +773,7 @@ fn renderDetailEditForm(frame: *Frame, game: *library.Game) void {
 fn editField(src: std.builtin.SourceLocation, label: []const u8, buf: []u8) void {
     var row = dvui.box(src, .{ .dir = .horizontal }, .{ .expand = .horizontal, .padding = .{ .x = 0, .y = 3, .w = 0, .h = 3 } });
     defer row.deinit();
-    dvui.label(@src(), "{s}", .{label}, .{ .min_size_content = .{ .w = 90, .h = 26 }, .gravity_y = 0.5, .color_text = style.labelDim() });
+    dvui.label(@src(), "{s}", .{label}, .{ .min_size_content = .{ .w = 90, .h = 26 }, .gravity_y = 0.5, .color_text = .{ .color = style.labelDim() } });
     const te = style.textEntry(@src(), .{ .text = .{ .buffer = buf } }, .{ .expand = .horizontal, .min_size_content = .{ .w = 240, .h = 26 }, .gravity_y = 0.5 });
     te.deinit();
 }
@@ -789,12 +789,12 @@ fn bylineItem(label: []const u8, value: []const u8, acc: bool) void {
         .gravity_y = 0.5,
         .padding = .{ .x = 14, .y = 0, .w = 14, .h = 0 },
         .border = .{ .x = 0, .y = 0, .w = 1, .h = 0 },
-        .color_border = style.borderColor(),
+        .color_border = .{ .color = style.borderColor() },
     });
     defer item.deinit();
-    dvui.labelNoFmt(@src(), label, .{}, .{ .gravity_y = 0.5, .color_text = style.labelDim(), .font = mono.withSize(mono.size * 0.72) });
+    dvui.labelNoFmt(@src(), label, .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = style.labelDim() }, .font = mono.withSize(mono.size * 0.72) });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 6, .h = 1 } });
-    dvui.labelNoFmt(@src(), value, .{}, .{ .gravity_y = 0.5, .color_text = tokens.toDvui(if (acc) t.acc else t.ink, dvui.Color), .font = mono.withSize(mono.size * 0.85) });
+    dvui.labelNoFmt(@src(), value, .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = tokens.toDvui(if (acc) t.acc else t.ink, dvui.Color) }, .font = mono.withSize(mono.size * 0.85) });
 }
 
 /// "About" — one glanceable byline of facts on a divider rule (Overview
@@ -810,7 +810,7 @@ fn renderDetailFacts(frame: *Frame, game: *library.Game) void {
         .expand = .horizontal,
         .padding = .{ .x = 0, .y = 9, .w = 0, .h = 9 },
         .border = .{ .x = 0, .y = 1, .w = 0, .h = 1 },
-        .color_border = style.borderColor(),
+        .color_border = .{ .color = style.borderColor() },
     });
     defer bar.deinit();
 
@@ -829,11 +829,11 @@ fn renderDetailFacts(frame: *Frame, game: *library.Game) void {
         var item = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 0.5, .padding = .{ .x = 14, .y = 0, .w = 0, .h = 0 } });
         defer item.deinit();
         const mono = dvui.Font.theme(.mono);
-        dvui.labelNoFmt(@src(), "SYNCED", .{}, .{ .gravity_y = 0.5, .color_text = style.labelDim(), .font = mono.withSize(mono.size * 0.72) });
+        dvui.labelNoFmt(@src(), "SYNCED", .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = style.labelDim() }, .font = mono.withSize(mono.size * 0.72) });
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 6, .h = 1 } });
         var dt_buf: [40]u8 = undefined;
         const dt = if (game.last_scraped_at) |ts| components.formatUtcDateTime(&dt_buf, ts) catch "—" else "never";
-        dvui.labelNoFmt(@src(), dt, .{}, .{ .gravity_y = 0.5, .color_text = tokens.toDvui(t.ink, dvui.Color), .font = mono.withSize(mono.size * 0.85) });
+        dvui.labelNoFmt(@src(), dt, .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = tokens.toDvui(t.ink, dvui.Color) }, .font = mono.withSize(mono.size * 0.85) });
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
         if (components.iconButton(@src(), "Sync now", entypo.cycle, .{ .style = .control, .gravity_y = 0.5, .padding = .{ .x = 6, .y = 2, .w = 6, .h = 2 } })) {
             actions.syncGame(frame, game);
@@ -873,7 +873,7 @@ fn renderGameConfig(frame: *Frame, game: *library.Game) void {
         dvui.label(@src(), "Your status", .{}, .{
             .min_size_content = .{ .w = 120, .h = 20 },
             .gravity_y = 0.5,
-            .color_text = style.labelDim(),
+            .color_text = .{ .color = style.labelDim() },
         });
         const labels = completionStatusLabels();
         var picked: usize = @intFromEnum(game.completion_status);
@@ -900,7 +900,7 @@ fn renderGameConfig(frame: *Frame, game: *library.Game) void {
         dvui.label(@src(), "Your rating", .{}, .{
             .min_size_content = .{ .w = 120, .h = 20 },
             .gravity_y = 0.5,
-            .color_text = style.labelDim(),
+            .color_text = .{ .color = style.labelDim() },
         });
         const ur_int: u8 = if (game.user_rating) |r| @as(u8, @intFromFloat(@round(r))) else 0;
         var n: u8 = 1;
@@ -912,7 +912,7 @@ fn renderGameConfig(frame: *Frame, game: *library.Game) void {
                 .gravity_y = 0.5,
                 .min_size_content = .{ .w = 22, .h = 22 },
                 .color_text = if (filled)
-                    tokens.toDvui(tokens.active.acc, dvui.Color)
+                    .{ .color = tokens.toDvui(tokens.active.acc, dvui.Color) }
                 else
                     null,
             })) {
@@ -939,7 +939,7 @@ fn renderGameConfig(frame: *Frame, game: *library.Game) void {
         dvui.label(@src(), "Sandbox", .{}, .{
             .min_size_content = .{ .w = 120, .h = 20 },
             .gravity_y = 0.5,
-            .color_text = style.labelDim(),
+            .color_text = .{ .color = style.labelDim() },
         });
         const labels = sandboxOverrideLabels(frame.state.sandbox_default);
         var picked: usize = @intFromEnum(game.sandbox);
@@ -966,7 +966,7 @@ fn renderGameConfig(frame: *Frame, game: *library.Game) void {
         dvui.label(@src(), "Version pin", .{}, .{
             .min_size_content = .{ .w = 120, .h = 20 },
             .gravity_y = 0.5,
-            .color_text = style.labelDim(),
+            .color_text = .{ .color = style.labelDim() },
         });
         if (game.pinned_version) |pv| {
             var pbuf: [80]u8 = undefined;
@@ -986,7 +986,7 @@ fn renderGameConfig(frame: *Frame, game: *library.Game) void {
                 game.pinned_version = frame.lib.alloc.dupe(u8, lv) catch null;
             }
         } else {
-            dvui.label(@src(), "no version known yet", .{}, .{ .gravity_y = 0.5, .color_text = style.labelDim() });
+            dvui.label(@src(), "no version known yet", .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = style.labelDim() } });
         }
     }
 
@@ -1010,7 +1010,7 @@ fn renderGameConfig(frame: *Frame, game: *library.Game) void {
             dvui.label(@src(), "Universal mods", .{}, .{
                 .min_size_content = .{ .w = 120, .h = 20 },
                 .gravity_y = 0.5,
-                .color_text = style.labelDim(),
+                .color_text = .{ .color = style.labelDim() },
             });
             var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal });
             defer col.deinit();
@@ -1035,7 +1035,7 @@ fn renderGameConfig(frame: *Frame, game: *library.Game) void {
         dvui.label(@src(), "Auto-update", .{}, .{
             .min_size_content = .{ .w = 120, .h = 20 },
             .gravity_y = 0.5,
-            .color_text = style.labelDim(),
+            .color_text = .{ .color = style.labelDim() },
         });
         const labels = autoUpdateOverrideLabels(frame.state.auto_update_default);
         var picked: usize = @intFromEnum(game.auto_update);
@@ -1085,7 +1085,7 @@ fn renderCustomLaunchRow(frame: *Frame, game: *const library.Game) void {
     dvui.label(@src(), "Custom launch", .{}, .{
         .min_size_content = .{ .w = 120, .h = 20 },
         .gravity_y = 0.5,
-        .color_text = style.labelDim(),
+        .color_text = .{ .color = style.labelDim() },
     });
     const te_exe = style.textEntry(@src(), .{
         .text = .{ .buffer = &state.launch_exec_buf },
@@ -1160,7 +1160,7 @@ fn factsRow(row_id: *u32, label: []const u8, value: FactsValue) void {
     dvui.labelNoFmt(@src(), label, .{}, .{
         .min_size_content = .{ .w = 120, .h = 18 },
         .gravity_y = 0.5,
-        .color_text = style.labelDim(),
+        .color_text = .{ .color = style.labelDim() },
     });
     switch (value) {
         .text => |t| dvui.labelNoFmt(@src(), t, .{}, .{
@@ -1223,13 +1223,13 @@ fn renderManualInstallPanel(frame: *Frame, game: *const library.Game) void {
         .margin = .{ .x = 0, .y = 4, .w = 0, .h = 4 },
         .background = true,
         .border = style.border_thin,
-        .corner_radius = style.corner_radius,
-        .color_fill = style.cardFill(),
-        .color_border = style.borderColor(),
+        .corners = style.corner_radius,
+        .color_fill = .{ .color = style.cardFill() },
+        .color_border = .{ .color = style.borderColor() },
     });
     defer panel.deinit();
 
-    dvui.label(@src(), "Install from file", .{}, .{ .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
+    dvui.label(@src(), "Install from file", .{}, .{ .color_text = .{ .color = tokens.toDvui(tokens.active.acc, dvui.Color) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 4 } });
     components.settingsHelpText(
         "Point at any .zip / .7z / .tar.gz on disk and we'll extract it as a new install. " ++
@@ -1280,7 +1280,7 @@ fn manualInstallPathRow(frame: *Frame) void {
     dvui.label(@src(), "Archive path", .{}, .{
         .min_size_content = .{ .w = 120, .h = 22 },
         .gravity_y = 0.5,
-        .color_text = helpTextColor(),
+        .color_text = .{ .color = helpTextColor() },
     });
     const te = style.textEntry(@src(), .{ .text = .{ .buffer = &state.manual_install_path_buf } }, .{
         .expand = .horizontal,
@@ -1333,7 +1333,7 @@ fn manualInstallRow(label: []const u8, buf: []u8, id_extra: u32, autofill_flag: 
     dvui.labelNoFmt(@src(), label, .{}, .{
         .min_size_content = .{ .w = 120, .h = 22 },
         .gravity_y = 0.5,
-        .color_text = style.labelDim(),
+        .color_text = .{ .color = style.labelDim() },
     });
     const te = style.textEntry(@src(), .{ .text = .{ .buffer = buf } }, .{
         .expand = .horizontal,
@@ -1355,13 +1355,13 @@ fn renderConvertHelp() void {
         .margin = .{ .x = 0, .y = 4, .w = 0, .h = 4 },
         .background = true,
         .border = style.border_thin,
-        .corner_radius = style.corner_radius,
-        .color_fill = style.cardFill(),
-        .color_border = style.borderColor(),
+        .corners = style.corner_radius,
+        .color_fill = .{ .color = style.cardFill() },
+        .color_border = .{ .color = style.borderColor() },
     });
     defer help.deinit();
 
-    dvui.label(@src(), "What the toolbar buttons do", .{}, .{ .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
+    dvui.label(@src(), "What the toolbar buttons do", .{}, .{ .color_text = .{ .color = tokens.toDvui(tokens.active.acc, dvui.Color) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 4 } });
     const help_lines = [_][]const u8{
         "Launch / Stop - run or kill the picked install. Grayed when there's no install.",
@@ -1375,7 +1375,7 @@ fn renderConvertHelp() void {
     for (help_lines) |line| {
         dvui.label(@src(), "- {s}", .{line}, .{
             .id_extra = std.hash.Wyhash.hash(0, line),
-            .color_text = helpTextColor(),
+            .color_text = .{ .color = helpTextColor() },
         });
     }
 }
@@ -1419,7 +1419,7 @@ fn renderImagePopup(frame: *Frame, game: *const library.Game) void {
         .resize = .none, // it's a fixed full-window lightbox — no edge resize
     }, .{
         .background = true,
-        .color_fill = .{ .r = 0x06, .g = 0x0a, .b = 0x0e, .a = 0xF2 },
+        .color_fill = .{ .color = .{ .r = 0x06, .g = 0x0a, .b = 0x0e, .a = 0xF2 } },
     });
     defer fw.deinit();
     fw.dragAreaSet(.{}); // and no click-drag move (default drag area = whole window)
@@ -1430,7 +1430,7 @@ fn renderImagePopup(frame: *Frame, game: *const library.Game) void {
         defer hdr.deinit();
         var nb: [160]u8 = undefined;
         const subj = std.fmt.bufPrint(&nb, "{s} — {s}", .{ game.name, if (idx == 0) "cover" else "screenshot" }) catch game.name;
-        dvui.labelNoFmt(@src(), subj, .{}, .{ .gravity_y = 0.5, .color_text = style.labelDim(), .font = dvui.Font.theme(.mono) });
+        dvui.labelNoFmt(@src(), subj, .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = style.labelDim() }, .font = dvui.Font.theme(.mono) });
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         var cb: [64]u8 = undefined;
         const ctr = blk: {
@@ -1440,7 +1440,7 @@ fn renderImagePopup(frame: *Frame, game: *const library.Game) void {
             }
             break :blk std.fmt.bufPrint(&cb, "{d} / {d}", .{ idx + 1, total }) catch "";
         };
-        dvui.labelNoFmt(@src(), ctr, .{}, .{ .gravity_y = 0.5, .color_text = style.labelDim(), .font = dvui.Font.theme(.mono) });
+        dvui.labelNoFmt(@src(), ctr, .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = style.labelDim() }, .font = dvui.Font.theme(.mono) });
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 10, .h = 1 } });
         if (components.iconOnly(@src(), "lb-close", entypo.cross, .{ .gravity_y = 0.5 })) state.image_popup_open = false;
     }
@@ -1530,7 +1530,7 @@ fn renderRenameInstallPopup(frame: *Frame, inst: *const library.Install) void {
 
     var ver_buf: [128]u8 = undefined;
     const ver_text = std.fmt.bufPrint(&ver_buf, "Version: {s} ({s})", .{ inst.version, @tagName(inst.source) }) catch inst.version;
-    dvui.labelNoFmt(@src(), ver_text, .{}, .{ .color_text = helpTextColor() });
+    dvui.labelNoFmt(@src(), ver_text, .{}, .{ .color_text = .{ .color = helpTextColor() } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     components.settingsHelpText(
         "A name disambiguates two installs of the same version (e.g. \"vanilla\", \"modded\"). " ++
@@ -1544,7 +1544,7 @@ fn renderRenameInstallPopup(frame: *Frame, inst: *const library.Install) void {
         dvui.label(@src(), "Name", .{}, .{
             .min_size_content = .{ .w = 80, .h = 24 },
             .gravity_y = 0.5,
-            .color_text = helpTextColor(),
+            .color_text = .{ .color = helpTextColor() },
         });
         const te = style.textEntry(@src(), .{ .text = .{ .buffer = &state.manage_rename_buf } }, .{
             .expand = .horizontal,
@@ -1600,7 +1600,7 @@ fn renderDeleteInstallPopup(frame: *Frame, inst: *const library.Install) void {
         std.fmt.bufPrint(&ver_buf, "{s} \u{2014} {s}  ({s})", .{ inst.version, inst.name.?, @tagName(inst.source) }) catch inst.version
     else
         std.fmt.bufPrint(&ver_buf, "{s}  ({s})", .{ inst.version, @tagName(inst.source) }) catch inst.version;
-    dvui.labelNoFmt(@src(), ver_text, .{}, .{ .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
+    dvui.labelNoFmt(@src(), ver_text, .{}, .{ .color_text = .{ .color = tokens.toDvui(tokens.active.acc, dvui.Color) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     components.settingsHelpText(
         "Deletes the install folder from disk AND removes the install record from the database. " ++
@@ -1610,7 +1610,7 @@ fn renderDeleteInstallPopup(frame: *Frame, inst: *const library.Install) void {
 
     var path_buf: [320]u8 = undefined;
     const path_text = std.fmt.bufPrint(&path_buf, "Path: {s}", .{inst.install_path}) catch inst.install_path;
-    dvui.labelNoFmt(@src(), path_text, .{}, .{ .color_text = helpTextColor() });
+    dvui.labelNoFmt(@src(), path_text, .{}, .{ .color_text = .{ .color = helpTextColor() } });
 
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 10 } });
     {
@@ -1650,7 +1650,7 @@ fn detailSectionHeader(label: []const u8, accent: bool) void {
     const factor: f32 = if (accent) 0.84 else 0.78;
     dvui.labelNoFmt(@src(), label, .{}, .{
         .gravity_y = 0.5,
-        .color_text = tokens.toDvui(if (accent) t.acc else t.ink3, dvui.Color),
+        .color_text = .{ .color = tokens.toDvui(if (accent) t.acc else t.ink3, dvui.Color) },
         .font = mono.withSize(mono.size * factor),
     });
     if (accent) {
@@ -1701,7 +1701,7 @@ fn renderCompactMeta(frame: *Frame, game: *const library.Game) void {
         .expand = .horizontal,
         .padding = .{ .x = 2, .y = 8, .w = 2, .h = 10 },
         .border = .{ .x = 0, .y = 0, .w = 0, .h = 1 },
-        .color_border = style.borderColor(),
+        .color_border = .{ .color = style.borderColor() },
     });
     defer bar.deinit();
 
@@ -1739,7 +1739,7 @@ fn renderCompactMeta(frame: *Frame, game: *const library.Game) void {
         if (style.button(@src(), tid_str, .{}, .{
             .gravity_y = 0.5,
             .style = .control,
-            .color_text = style.labelDim(),
+            .color_text = .{ .color = style.labelDim() },
         })) {
             actions.openInBrowser(frame, game.f95_thread_id);
         }
@@ -1790,19 +1790,19 @@ fn metaKv(src: std.builtin.SourceLocation, label: []const u8, value: []const u8)
     defer b.deinit();
     dvui.labelNoFmt(@src(), label, .{}, .{
         .gravity_y = 0.5,
-        .color_text = style.labelDim(),
+        .color_text = .{ .color = style.labelDim() },
         .font = mono.withSize(mono.size * 0.82),
     });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 6, .h = 1 } });
-    dvui.labelNoFmt(@src(), value, .{}, .{ .gravity_y = 0.5, .color_text = tokens.toDvui(t.ink, dvui.Color), .font = mono });
+    dvui.labelNoFmt(@src(), value, .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = tokens.toDvui(t.ink, dvui.Color) }, .font = mono });
 }
 
 /// Small teal dot separating meta key/values (Cinemascope).
 fn metaSep(src: std.builtin.SourceLocation) void {
     var d = dvui.box(src, .{}, .{
         .background = true,
-        .color_fill = tokens.toDvui(tokens.active.acc_dim, dvui.Color),
-        .corner_radius = dvui.Rect.all(2),
+        .color_fill = .{ .color = tokens.toDvui(tokens.active.acc_dim, dvui.Color) },
+        .corners = dvui.CornerRect.all(2),
         .min_size_content = .{ .w = 3, .h = 3 },
         .gravity_y = 0.5,
     });
@@ -1982,7 +1982,7 @@ fn renderInlineLineWithLinks(frame: *Frame, line: []const u8, id: u64) void {
             };
             const label_text = line[label_start..close_at];
             const shown = if (label_text.len == 0) url else label_text;
-            if (tl.addTextClick(shown, .{ .color_text = link_color })) |_| {
+            if (tl.addTextClick(shown, .{ .color_text = .{ .color = link_color } })) |_| {
                 actions.openExternalUrl(frame, url);
             }
             cursor = close_at + close_marker.len;
@@ -2028,7 +2028,7 @@ fn renderGuidesTab(frame: *Frame, game: *const library.Game) void {
         defer bar.deinit();
         dvui.label(@src(), "Walkthroughs, guides, cheats, notes — managed copies in your library.", .{}, .{
             .gravity_y = 0.5,
-            .color_text = helpTextColor(),
+            .color_text = .{ .color = helpTextColor() },
         });
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         if (components.iconButton(@src(), "Add guide", entypo.plus, .{ .style = .highlight })) {
@@ -2040,7 +2040,7 @@ fn renderGuidesTab(frame: *Frame, game: *const library.Game) void {
     // List of guides — re-walked every frame. Cheap because guides
     // dirs hold a handful of files at most.
     const guides = actions.listGuides(frame, game.f95_thread_id) catch {
-        dvui.label(@src(), "Couldn't read the guides directory.", .{}, .{ .color_text = helpTextColor() });
+        dvui.label(@src(), "Couldn't read the guides directory.", .{}, .{ .color_text = .{ .color = helpTextColor() } });
         return;
     };
     defer actions.freeGuides(alloc, guides);
@@ -2050,7 +2050,7 @@ fn renderGuidesTab(frame: *Frame, game: *const library.Game) void {
             @src(),
             "No guides yet. Click \"Add guide\" to pick a PDF / EPUB / HTML / TXT from anywhere — f69 will copy it into the game's library folder so it stays with the install.",
             .{},
-            .{ .color_text = helpTextColor() },
+            .{ .color_text = .{ .color = helpTextColor() } },
         );
         return;
     }
@@ -2063,9 +2063,9 @@ fn renderGuidesTab(frame: *Frame, game: *const library.Game) void {
             .margin = .{ .x = 0, .y = 0, .w = 0, .h = 4 },
             .background = true,
             .border = style.border_thin,
-            .corner_radius = style.corner_radius,
-            .color_fill = style.cardFill(),
-            .color_border = style.borderColor(),
+            .corners = style.corner_radius,
+            .color_fill = .{ .color = style.cardFill() },
+            .color_border = .{ .color = style.borderColor() },
         });
         defer row.deinit();
 
@@ -2152,7 +2152,7 @@ fn renderClashModal(frame: *Frame, game: *const library.Game) void {
 
     dvui.label(@src(), "Mod `{s}` overwrites paths owned by other installed mods.", .{m.recipe_id}, .{ .style = .err });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
-    dvui.label(@src(), "Last-applied wins — earlier mods' files will be replaced.", .{}, .{ .color_text = helpTextColor() });
+    dvui.label(@src(), "Last-applied wins — earlier mods' files will be replaced.", .{}, .{ .color_text = .{ .color = helpTextColor() } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
 
     {
@@ -2447,7 +2447,7 @@ fn renderDetailDownloadButton(frame: *Frame, game: *const library.Game) void {
     const known_not_donor = (state.is_donor orelse true) == false;
 
     const gray_color: dvui.Color = .{ .r = 0x80, .g = 0x80, .b = 0x80 };
-    const dim_opts: dvui.Options = .{ .style = .control, .color_text = gray_color };
+    const dim_opts: dvui.Options = .{ .style = .control, .color_text = .{ .color = gray_color } };
 
     var bar = dvui.menu(@src(), .horizontal, .{ .id_extra = game.f95_thread_id ^ 0xACCE });
     defer bar.deinit();
@@ -2510,7 +2510,7 @@ fn renderDetailDownloadButton(frame: *Frame, game: *const library.Game) void {
                 if (!busy) actions.startRpdlDownload(frame, game);
             }
         } else {
-            if (dvui.menuItemLabel(@src(), "Download via RPDL (sign in first)", .{}, .{ .expand = .horizontal, .color_text = gray_color }) != null) {
+            if (dvui.menuItemLabel(@src(), "Download via RPDL (sign in first)", .{}, .{ .expand = .horizontal, .color_text = .{ .color = gray_color } }) != null) {
                 bar.close();
                 state.screen = .settings;
                 state.settings_tab = .accounts;
@@ -2674,7 +2674,7 @@ fn renderIdleHint(id: u64, text: []const u8) void {
     defer row.deinit();
     dvui.labelNoFmt(@src(), text, .{}, .{
         .gravity_y = 0.5,
-        .color_text = helpTextColor(),
+        .color_text = .{ .color = helpTextColor() },
         .expand = .horizontal,
         .min_size_content = .{ .w = 0, .h = 20 },
     });
@@ -2696,9 +2696,9 @@ fn renderStatusStrip(frame: *Frame, args: StatusStripArgs) void {
         .margin = .{ .x = 0, .y = 4, .w = 0, .h = 4 },
         .background = true,
         .border = style.border_thin,
-        .corner_radius = style.corner_radius,
-        .color_fill = style.cardFill(),
-        .color_border = style.borderColor(),
+        .corners = style.corner_radius,
+        .color_fill = .{ .color = style.cardFill() },
+        .color_border = .{ .color = style.borderColor() },
     });
     defer wrap.deinit();
 
@@ -2710,7 +2710,7 @@ fn renderStatusStrip(frame: *Frame, args: StatusStripArgs) void {
         defer line.deinit();
         dvui.labelNoFmt(@src(), args.text, .{}, .{
             .gravity_y = 0.5,
-            .color_text = style.labelDim(),
+            .color_text = .{ .color = style.labelDim() },
             .expand = .horizontal,
             .min_size_content = .{ .w = 0, .h = 20 },
         });
@@ -2733,9 +2733,9 @@ fn renderStatusStrip(frame: *Frame, args: StatusStripArgs) void {
             .expand = .horizontal,
             .min_size_content = .{ .w = 1, .h = 10 },
             .border = style.border_thin,
-            .corner_radius = .all(2),
-            .color_border = style.borderColor(),
-            .color_fill = .{ .r = 0x16, .g = 0x0B, .b = 0x10 },
+            .corners = .all(2),
+            .color_border = .{ .color = style.borderColor() },
+            .color_fill = .{ .color = .{ .r = 0x16, .g = 0x0B, .b = 0x10 } },
             .padding = .all(0),
         });
         return;
@@ -2746,10 +2746,10 @@ fn renderStatusStrip(frame: *Frame, args: StatusStripArgs) void {
         .expand = .horizontal,
         .min_size_content = .{ .w = 1, .h = 10 },
         .border = style.border_thin,
-        .corner_radius = .all(2),
-        .color_border = style.borderColor(),
+        .corners = .all(2),
+        .color_border = .{ .color = style.borderColor() },
         .background = true,
-        .color_fill = .{ .r = 0x16, .g = 0x0B, .b = 0x10 },
+        .color_fill = .{ .color = .{ .r = 0x16, .g = 0x0B, .b = 0x10 } },
     });
     defer bar_outer.deinit();
 
@@ -2771,8 +2771,8 @@ fn renderStatusStrip(frame: *Frame, args: StatusStripArgs) void {
             .id_extra = args.id ^ 0x9002,
             .min_size_content = .{ .w = @max(8.0, slug_w_frac * 400.0), .h = 8 },
             .background = true,
-            .color_fill = args.accent,
-            .corner_radius = .all(1),
+            .color_fill = .{ .color = args.accent },
+            .corners = .all(1),
         });
         slug.deinit();
     }
@@ -2885,8 +2885,8 @@ fn renderRibbonThumb(bytes_opt: ?[]const u8, idx: usize, is_active: bool, thread
             .gravity_y = 0.5,
             .margin = .{ .x = 3, .y = 0, .w = 3, .h = 0 },
             .border = .all(if (is_active) 2 else 1),
-            .corner_radius = .all(3),
-            .color_border = border,
+            .corners = .all(3),
+            .color_border = .{ .color = border },
         });
         return dvui.clicked(&wd, .{});
     }
@@ -2897,9 +2897,9 @@ fn renderRibbonThumb(bytes_opt: ?[]const u8, idx: usize, is_active: bool, thread
         .margin = .{ .x = 3, .y = 0, .w = 3, .h = 0 },
         .background = true,
         .border = .all(if (is_active) 2 else 1),
-        .corner_radius = .all(3),
-        .color_fill = .{ .r = 0x2A, .g = 0x16, .b = 0x20 },
-        .color_border = border,
+        .corners = .all(3),
+        .color_fill = .{ .color = .{ .r = 0x2A, .g = 0x16, .b = 0x20 } },
+        .color_border = .{ .color = border },
     });
     defer slot.deinit();
     return dvui.clicked(slot.data(), .{});
@@ -2971,10 +2971,10 @@ fn renderCarousel(frame: *Frame, game: *const library.Game) void {
                 .gravity_y = 1.0,
                 .margin = .{ .x = 0, .y = 0, .w = 0, .h = 8 },
                 .padding = .{ .x = 8, .y = 2, .w = 8, .h = 2 },
-                .corner_radius = style.corner_radius,
+                .corners = style.corner_radius,
                 .background = true,
-                .color_fill = .{ .r = 0x14, .g = 0x0A, .b = 0x10 },
-                .color_text = dvui.Color.white,
+                .color_fill = .{ .color = .{ .r = 0x14, .g = 0x0A, .b = 0x10 } },
+                .color_text = .{ .color = dvui.Color.white },
             });
         }
 
@@ -3029,8 +3029,8 @@ fn renderSlideImage(frame: *Frame, bytes_opt: ?[]const u8, idx: usize, thread_id
             .gravity_y = 0.5,
             .min_size_content = aspect_min,
             .border = style.border_thin,
-            .corner_radius = style.corner_radius,
-            .color_border = style.borderColor(),
+            .corners = style.corner_radius,
+            .color_border = .{ .color = style.borderColor() },
         });
         return wd;
     }
@@ -3039,9 +3039,9 @@ fn renderSlideImage(frame: *Frame, bytes_opt: ?[]const u8, idx: usize, thread_id
         .expand = .both,
         .background = true,
         .border = style.border_thin,
-        .corner_radius = style.corner_radius,
-        .color_fill = .{ .r = 0x2A, .g = 0x16, .b = 0x20 },
-        .color_border = style.borderColor(),
+        .corners = style.corner_radius,
+        .color_fill = .{ .color = .{ .r = 0x2A, .g = 0x16, .b = 0x20 } },
+        .color_border = .{ .color = style.borderColor() },
         .padding = .{ .x = 12, .y = 12, .w = 12, .h = 12 },
     });
     defer slot.deinit();
@@ -3069,8 +3069,8 @@ fn renderCover(bytes_opt: ?[]const u8) void {
         }, .{
             .min_size_content = .{ .w = 220, .h = 320 },
             .border = style.border_thin,
-            .corner_radius = style.corner_radius,
-            .color_border = style.borderColor(),
+            .corners = style.corner_radius,
+            .color_border = .{ .color = style.borderColor() },
         });
         return;
     }
@@ -3078,9 +3078,9 @@ fn renderCover(bytes_opt: ?[]const u8) void {
         .min_size_content = .{ .w = 220, .h = 320 },
         .background = true,
         .border = style.border_thin,
-        .corner_radius = style.corner_radius,
-        .color_fill = .{ .r = 0x2A, .g = 0x16, .b = 0x20 },
-        .color_border = style.borderColor(),
+        .corners = style.corner_radius,
+        .color_fill = .{ .color = .{ .r = 0x2A, .g = 0x16, .b = 0x20 } },
+        .color_border = .{ .color = style.borderColor() },
         .padding = .{ .x = 12, .y = 12, .w = 12, .h = 12 },
     });
     defer cover.deinit();
@@ -3100,8 +3100,8 @@ fn renderCoverThumb(bytes_opt: ?[]const u8, thread_id: u64) void {
             .id_extra = thread_id,
             .min_size_content = .{ .w = 60, .h = 85 },
             .border = style.border_thin,
-            .corner_radius = .all(3),
-            .color_border = style.borderColor(),
+            .corners = .all(3),
+            .color_border = .{ .color = style.borderColor() },
         });
         return;
     }
@@ -3110,9 +3110,9 @@ fn renderCoverThumb(bytes_opt: ?[]const u8, thread_id: u64) void {
         .min_size_content = .{ .w = 60, .h = 85 },
         .background = true,
         .border = style.border_thin,
-        .corner_radius = .all(3),
-        .color_fill = .{ .r = 0x2A, .g = 0x16, .b = 0x20 },
-        .color_border = style.borderColor(),
+        .corners = .all(3),
+        .color_fill = .{ .color = .{ .r = 0x2A, .g = 0x16, .b = 0x20 } },
+        .color_border = .{ .color = style.borderColor() },
     });
     defer thumb.deinit();
 }
@@ -3138,13 +3138,13 @@ fn renderTagChips(frame: *Frame, tags: []const []const u8) void {
             .id_extra = i,
             .background = true,
             .border = style.border_thin,
-            .corner_radius = style.corner_radius,
+            .corners = style.corner_radius,
             .padding = .{ .x = 4, .y = 0, .w = 4, .h = 0 },
             .margin = .{ .x = 0, .y = 0, .w = 2, .h = 2 },
-            .color_fill = tc.fill,
-            .color_border = tc.border,
+            .color_fill = .{ .color = tc.fill },
+            .color_border = .{ .color = tc.border },
         });
-        dvui.labelNoFmt(@src(), tag, .{}, .{ .font = small, .color_text = tc.text });
+        dvui.labelNoFmt(@src(), tag, .{}, .{ .font = small, .color_text = .{ .color = tc.text } });
         const clicked = dvui.clicked(chip.data(), .{});
         chip.deinit();
         if (clicked) openTagColorEditor(state, tag, tc.border);
@@ -3223,7 +3223,7 @@ fn isPrintableTag(tag: []const u8) bool {
 
 fn renderJournalTab(frame: *Frame, game: *const library.Game) void {
     const sessions = frame.lib.listPlaySessions(game.f95_thread_id) catch {
-        dvui.labelNoFmt(@src(), "Failed to load journal.", .{}, .{ .color_text = helpTextColor() });
+        dvui.labelNoFmt(@src(), "Failed to load journal.", .{}, .{ .color_text = .{ .color = helpTextColor() } });
         return;
     };
     defer frame.lib.freePlaySessions(sessions);
@@ -3233,7 +3233,7 @@ fn renderJournalTab(frame: *Frame, game: *const library.Game) void {
             @src(),
             "No play sessions recorded yet. Sessions start counting from the first launch after this release.",
             .{},
-            .{ .color_text = helpTextColor() },
+            .{ .color_text = .{ .color = helpTextColor() } },
         );
         return;
     }
@@ -3311,7 +3311,7 @@ fn renderJournalTab(frame: *Frame, game: *const library.Game) void {
             defer srow.deinit();
             var row_buf: [256]u8 = undefined;
             const row = formatSessionRow(&row_buf, s);
-            dvui.labelNoFmt(@src(), row, .{}, .{ .color_text = helpTextColor(), .gravity_y = 0.5 });
+            dvui.labelNoFmt(@src(), row, .{}, .{ .color_text = .{ .color = helpTextColor() }, .gravity_y = 0.5 });
             _ = dvui.spacer(@src(), .{ .expand = .horizontal });
             if (components.iconButton(@src(), "Delete session", entypo.trash, .{ .id_extra = sid, .style = .err, .gravity_y = 0.5 })) {
                 to_delete = s.id;

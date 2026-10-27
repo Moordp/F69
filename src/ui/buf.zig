@@ -20,7 +20,7 @@ const std = @import("std");
 
 pub fn MessageBuf(comptime cap: usize) type {
     return struct {
-        bytes: [cap]u8 = [_]u8{0} ** cap,
+        bytes: [cap]u8 = @splat(0),
         len: usize = 0,
 
         const Self = @This();

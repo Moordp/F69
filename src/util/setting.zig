@@ -28,7 +28,7 @@ pub fn readSingleLine(io: std.Io, alloc: std.mem.Allocator, path: []const u8) Er
     // x86_64-windows-gnu always links mingw libc.
     if (builtin.os.tag == .windows) {
         var pz_buf: [1024]u8 = undefined;
-        const pz = std.fmt.bufPrintZ(&pz_buf, "{s}", .{path}) catch return null;
+        const pz = std.fmt.bufPrintSentinel(&pz_buf, "{s}", .{path}, 0) catch return null;
         const f = std.c.fopen(pz.ptr, "rb") orelse return null;
         defer _ = std.c.fclose(f);
         var buf: [256]u8 = undefined;

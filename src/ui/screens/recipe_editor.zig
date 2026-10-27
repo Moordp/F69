@@ -113,7 +113,7 @@ pub fn recipeEditorScreen(frame: *Frame) !bool {
             "Set up plan · step {d} of 2 · {s}",
             .{ step_num, step_title },
         ) catch "Set up plan";
-        dvui.labelNoFmt(@src(), title, .{}, .{ .color_text = tokens.toDvui(tokens.active.acc, dvui.Color), .gravity_y = 0.5 });
+        dvui.labelNoFmt(@src(), title, .{}, .{ .color_text = .{ .color = tokens.toDvui(tokens.active.acc, dvui.Color) }, .gravity_y = 0.5 });
     }
     _ = dvui.separator(@src(), .{ .expand = .horizontal });
 
@@ -237,10 +237,10 @@ fn renderMetaStepFresh(w: *state_mod.WizardState) void {
         .expand = .horizontal,
         .padding = .{ .x = 14, .y = 12, .w = 14, .h = 12 },
         .background = true,
-        .color_fill = cardFill(),
+        .color_fill = .{ .color = cardFill() },
         .border = style.border_thin,
-        .color_border = cardBorder(),
-        .corner_radius = style.corner_radius,
+        .color_border = .{ .color = cardBorder() },
+        .corners = style.corner_radius,
     });
     defer card.deinit();
 
@@ -268,7 +268,7 @@ fn metaFormRow(label: []const u8, buf: []u8, id_extra: usize) void {
         .min_size_content = .{ .w = META_LABEL_COL_W, .h = 26 },
         .max_size_content = .{ .w = META_LABEL_COL_W, .h = std.math.floatMax(f32) },
         .gravity_y = 0.5,
-        .color_text = helpTextColor(),
+        .color_text = .{ .color = helpTextColor() },
     });
     const te = style.textEntry(@src(), .{ .text = .{ .buffer = buf } }, .{
         .id_extra = id_extra,
@@ -294,7 +294,7 @@ fn metaTargetVersionRow(w: *state_mod.WizardState) void {
         .min_size_content = .{ .w = META_LABEL_COL_W, .h = 26 },
         .max_size_content = .{ .w = META_LABEL_COL_W, .h = std.math.floatMax(f32) },
         .gravity_y = 0.5,
-        .color_text = helpTextColor(),
+        .color_text = .{ .color = helpTextColor() },
     });
 
     var labels_buf: [state_mod.WIZARD_MAX_INSTALL_VERSIONS][]const u8 = undefined;
@@ -308,7 +308,7 @@ fn metaTargetVersionRow(w: *state_mod.WizardState) void {
         dvui.label(@src(), "(no installs)", .{}, .{
             .id_extra = 3,
             .gravity_y = 0.5,
-            .color_text = helpTextColor(),
+            .color_text = .{ .color = helpTextColor() },
         });
         return;
     }
@@ -335,7 +335,7 @@ fn renderStepIntro(title: []const u8, help: []const u8) void {
     const title_key = std.hash.Wyhash.hash(0, title);
     dvui.labelNoFmt(@src(), title, .{}, .{
         .id_extra = title_key,
-        .color_text = tokens.toDvui(tokens.active.acc, dvui.Color),
+        .color_text = .{ .color = tokens.toDvui(tokens.active.acc, dvui.Color) },
     });
     _ = dvui.spacer(@src(), .{
         .id_extra = title_key,
@@ -343,7 +343,7 @@ fn renderStepIntro(title: []const u8, help: []const u8) void {
     });
     dvui.labelNoFmt(@src(), help, .{}, .{
         .id_extra = title_key ^ 1,
-        .color_text = helpTextColor(),
+        .color_text = .{ .color = helpTextColor() },
     });
     _ = dvui.spacer(@src(), .{
         .id_extra = title_key ^ 2,
@@ -355,7 +355,7 @@ fn editorSectionHeader(title: []const u8) void {
     const key = std.hash.Wyhash.hash(0, title);
     _ = dvui.spacer(@src(), .{ .id_extra = key, .min_size_content = .{ .w = 1, .h = 8 } });
     dvui.labelNoFmt(@src(), title, .{}, .{
-        .color_text = tokens.toDvui(tokens.active.acc, dvui.Color),
+        .color_text = .{ .color = tokens.toDvui(tokens.active.acc, dvui.Color) },
         .id_extra = key,
     });
     _ = dvui.spacer(@src(), .{ .id_extra = key, .min_size_content = .{ .w = 1, .h = 4 } });
@@ -368,7 +368,7 @@ fn editorSectionDivider(key: []const u8) void {
 }
 
 fn renderWizardMeta(w: *state_mod.WizardState) void {
-    dvui.label(@src(), "Mod metadata. Required: Name, Version, Targets game version.", .{}, .{ .color_text = helpTextColor() });
+    dvui.label(@src(), "Mod metadata. Required: Name, Version, Targets game version.", .{}, .{ .color_text = .{ .color = helpTextColor() } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
     wizardTextRow(@src(), "Name", &w.name_buf);
     wizardTextRow(@src(), "Version", &w.version_buf);
@@ -385,7 +385,7 @@ fn renderWizardMeta(w: *state_mod.WizardState) void {
         dvui.label(@src(), "Targets game version", .{}, .{
             .min_size_content = .{ .w = 160, .h = 24 },
             .gravity_y = 0.5,
-            .color_text = helpTextColor(),
+            .color_text = .{ .color = helpTextColor() },
         });
 
         // Build a list of `[]const u8` slices into the wizard's
@@ -417,13 +417,13 @@ fn renderWizardMeta(w: *state_mod.WizardState) void {
     }
 
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
-    dvui.label(@src(), "for_game (auto): {s}", .{w.for_game_buf[0..w.for_game_len]}, .{ .color_text = helpTextColor() });
+    dvui.label(@src(), "for_game (auto): {s}", .{w.for_game_buf[0..w.for_game_len]}, .{ .color_text = .{ .color = helpTextColor() } });
 }
 
 fn wizardTextRow(src: std.builtin.SourceLocation, label: []const u8, buf: []u8) void {
     var row = dvui.box(src, .{ .dir = .horizontal }, .{ .expand = .horizontal, .padding = .{ .y = 2, .h = 2 } });
     defer row.deinit();
-    dvui.labelNoFmt(@src(), label, .{}, .{ .min_size_content = .{ .w = 160, .h = 24 }, .gravity_y = 0.5, .color_text = helpTextColor() });
+    dvui.labelNoFmt(@src(), label, .{}, .{ .min_size_content = .{ .w = 160, .h = 24 }, .gravity_y = 0.5, .color_text = .{ .color = helpTextColor() } });
     const te = style.textEntry(@src(), .{ .text = .{ .buffer = buf } }, .{
         .expand = .horizontal,
         .min_size_content = .{ .w = 280, .h = 26 },
@@ -449,7 +449,7 @@ fn wizardPathRow(
 ) void {
     var row = dvui.box(src, .{ .dir = .horizontal }, .{ .expand = .horizontal, .padding = .{ .y = 2, .h = 2 } });
     defer row.deinit();
-    dvui.labelNoFmt(@src(), label, .{}, .{ .min_size_content = .{ .w = 160, .h = 24 }, .gravity_y = 0.5, .color_text = helpTextColor() });
+    dvui.labelNoFmt(@src(), label, .{}, .{ .min_size_content = .{ .w = 160, .h = 24 }, .gravity_y = 0.5, .color_text = .{ .color = helpTextColor() } });
     const te = style.textEntry(@src(), .{ .text = .{ .buffer = buf } }, .{
         .expand = .horizontal,
         .min_size_content = .{ .w = 280, .h = 26 },
@@ -486,7 +486,7 @@ fn wizardBrowseMenu(
         .gravity_y = 0.5,
         .background = true,
         .style = .control,
-        .corner_radius = style.corner_radius,
+        .corners = style.corner_radius,
     })) |anchor| {
         var fw = dvui.floatingMenu(@src(), .{ .from = anchor }, .{});
         defer fw.deinit();
@@ -572,7 +572,7 @@ fn renderSimulationPanel(
     sim_opt: ?*const installer_mod.SimulationResult,
 ) void {
     if (sim_opt == null) {
-        dvui.label(@src(), "Preview: not available yet (need an install + an archive on disk).", .{}, .{ .color_text = helpTextColor() });
+        dvui.label(@src(), "Preview: not available yet (need an install + an archive on disk).", .{}, .{ .color_text = .{ .color = helpTextColor() } });
         return;
     }
     const sim = sim_opt.?;
@@ -597,7 +597,7 @@ fn renderSimulationAggregate(sim: *const installer_mod.SimulationResult) void {
     const del_n = sim.deletions.len;
 
     if (add_n + ow_van + ow_mod == 0 and mode_n == 0 and del_n == 0) {
-        dvui.label(@src(), "This plan won't touch any files. Add at least one step above.", .{}, .{ .color_text = helpTextColor() });
+        dvui.label(@src(), "This plan won't touch any files. Add at least one step above.", .{}, .{ .color_text = .{ .color = helpTextColor() } });
         return;
     }
 
@@ -606,27 +606,27 @@ fn renderSimulationAggregate(sim: *const installer_mod.SimulationResult) void {
         const size_txt = components.humanBytes(&size_buf, total_bytes);
         var buf: [128]u8 = undefined;
         const txt = std.fmt.bufPrint(&buf, "+ Adds {d} new file(s)  ({s})", .{ add_n, size_txt }) catch "+ Adds files";
-        dvui.labelNoFmt(@src(), txt, .{}, .{ .color_text = .{ .r = 0x4F, .g = 0xC3, .b = 0x6F } });
+        dvui.labelNoFmt(@src(), txt, .{}, .{ .color_text = .{ .color = .{ .r = 0x4F, .g = 0xC3, .b = 0x6F } } });
     }
     if (ow_van > 0) {
         var buf: [128]u8 = undefined;
         const txt = std.fmt.bufPrint(&buf, "~ Overwrites {d} vanilla file(s)", .{ow_van}) catch "~ Overwrites vanilla";
-        dvui.labelNoFmt(@src(), txt, .{}, .{ .color_text = tokens.toDvui(tokens.active.warn, dvui.Color) });
+        dvui.labelNoFmt(@src(), txt, .{}, .{ .color_text = .{ .color = tokens.toDvui(tokens.active.warn, dvui.Color) } });
     }
     if (ow_mod > 0) {
         var buf: [160]u8 = undefined;
         const txt = std.fmt.bufPrint(&buf, "[!] Conflicts: {d} file(s) already owned by another mod", .{ow_mod}) catch "Conflicts with another mod";
-        dvui.labelNoFmt(@src(), txt, .{}, .{ .color_text = tokens.toDvui(tokens.active.danger, dvui.Color) });
+        dvui.labelNoFmt(@src(), txt, .{}, .{ .color_text = .{ .color = tokens.toDvui(tokens.active.danger, dvui.Color) } });
     }
     if (mode_n > 0) {
         var buf: [128]u8 = undefined;
         const txt = std.fmt.bufPrint(&buf, "* Marks {d} file(s) as runnable", .{mode_n}) catch "Marks file(s) runnable";
-        dvui.labelNoFmt(@src(), txt, .{}, .{ .color_text = helpTextColor() });
+        dvui.labelNoFmt(@src(), txt, .{}, .{ .color_text = .{ .color = helpTextColor() } });
     }
     if (del_n > 0) {
         var buf: [128]u8 = undefined;
         const txt = std.fmt.bufPrint(&buf, "- Removes {d} file(s)", .{del_n}) catch "Removes file(s)";
-        dvui.labelNoFmt(@src(), txt, .{}, .{ .color_text = tokens.toDvui(tokens.active.warn, dvui.Color) });
+        dvui.labelNoFmt(@src(), txt, .{}, .{ .color_text = .{ .color = tokens.toDvui(tokens.active.warn, dvui.Color) } });
     }
 
     if (sim.diagnostics.len > 0) {
@@ -640,7 +640,7 @@ fn renderSimulationAggregate(sim: *const installer_mod.SimulationResult) void {
                 .warn => tokens.toDvui(tokens.active.warn, dvui.Color),
                 .err => tokens.toDvui(tokens.active.danger, dvui.Color),
             };
-            dvui.labelNoFmt(@src(), d.msg, .{}, .{ .color_text = color, .id_extra = std.hash.Wyhash.hash(0, d.msg) });
+            dvui.labelNoFmt(@src(), d.msg, .{}, .{ .color_text = .{ .color = color }, .id_extra = std.hash.Wyhash.hash(0, d.msg) });
         }
     }
 }
@@ -686,10 +686,10 @@ fn renderSimulationDetail(frame: *Frame, w: *state_mod.WizardState, sim: *const 
         .expand = .both,
         .background = true,
         .border = style.border_thin,
-        .corner_radius = style.corner_radius,
+        .corners = style.corner_radius,
         .padding = .{ .x = 8, .y = 8, .w = 8, .h = 8 },
-        .color_fill = tokens.toDvui(tokens.active.bg0, dvui.Color),
-        .color_border = style.borderColor(),
+        .color_fill = .{ .color = tokens.toDvui(tokens.active.bg0, dvui.Color) },
+        .color_border = .{ .color = style.borderColor() },
         .min_size_content = .{ .w = 1, .h = 240 },
     });
     defer pane.deinit();
@@ -712,7 +712,7 @@ fn renderSimulationDetail(frame: *Frame, w: *state_mod.WizardState, sim: *const 
         // relative to this root.
         _ = sim.install_dir;
         const hdr = std.fmt.bufPrint(&hdr_buf, "Game folder/{s}", .{counts_txt}) catch "Game folder/";
-        dvui.labelNoFmt(@src(), hdr, .{}, .{ .color_text = tokens.toDvui(tokens.active.acc, dvui.Color), .font = .theme(.mono) });
+        dvui.labelNoFmt(@src(), hdr, .{}, .{ .color_text = .{ .color = tokens.toDvui(tokens.active.acc, dvui.Color) }, .font = .theme(.mono) });
     }
 
     var scroll = dvui.scrollArea(@src(), .{}, .{
@@ -725,7 +725,7 @@ fn renderSimulationDetail(frame: *Frame, w: *state_mod.WizardState, sim: *const 
     renderTreeNode(w, root, 1, &rendered, ROW_CAP);
 
     if (rendered >= ROW_CAP) {
-        dvui.label(@src(), "... (more rows hidden; cap reached)", .{}, .{ .color_text = helpTextColor() });
+        dvui.label(@src(), "... (more rows hidden; cap reached)", .{}, .{ .color_text = .{ .color = helpTextColor() } });
     }
 }
 
@@ -910,7 +910,7 @@ fn renderOneRow(
         }) catch node.name;
         dvui.labelNoFmt(@src(), line, .{}, .{
             .id_extra = id_extra,
-            .color_text = .{ .r = 0xA0, .g = 0x80, .b = 0x90 },
+            .color_text = .{ .color = .{ .r = 0xA0, .g = 0x80, .b = 0x90 } },
             .font = .theme(.mono),
         });
         rendered.* += 1;
@@ -973,7 +973,7 @@ fn renderOneRow(
     }) catch node.name;
     dvui.labelNoFmt(@src(), line, .{}, .{
         .id_extra = id_extra,
-        .color_text = eff_color,
+        .color_text = .{ .color = eff_color },
         .font = .theme(.mono),
     });
     rendered.* += 1;
@@ -1016,7 +1016,7 @@ fn renderWizardPreviewPane(frame: *Frame, game: *const library.Game, w: *state_m
     defer scroll.deinit();
 
     // -- Archive tree (top-level entries only) --
-    dvui.labelNoFmt(@src(), "Archive contents", .{}, .{ .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
+    dvui.labelNoFmt(@src(), "Archive contents", .{}, .{ .color_text = .{ .color = tokens.toDvui(tokens.active.acc, dvui.Color) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 4 } });
 
     const modfile_id = w.modfile_id_buf[0..w.modfile_id_len];
@@ -1028,7 +1028,7 @@ fn renderWizardPreviewPane(frame: *Frame, game: *const library.Game, w: *state_m
             defer actions.freeTopDirs(frame.lib.alloc, dirs);
             if (dirs.len == 0) {
                 dvui.label(@src(), "  (archive has no top-level folders — files sit at the root)", .{}, .{
-                    .color_text = helpTextColor(),
+                    .color_text = .{ .color = helpTextColor() },
                 });
             } else if (dirs.len == 1) {
                 // Single top-level dir → almost always the "wrapper"
@@ -1072,7 +1072,7 @@ fn renderWizardPreviewPane(frame: *Frame, game: *const library.Game, w: *state_m
             dvui.label(@src(), "  (archive not readable from disk)", .{}, .{ .style = .err });
         }
     } else {
-        dvui.label(@src(), "  (no archive linked to this recipe yet)", .{}, .{ .color_text = helpTextColor() });
+        dvui.label(@src(), "  (no archive linked to this recipe yet)", .{}, .{ .color_text = .{ .color = helpTextColor() } });
     }
 
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 12 } });
@@ -1080,7 +1080,7 @@ fn renderWizardPreviewPane(frame: *Frame, game: *const library.Game, w: *state_m
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 12 } });
 
     // -- Impact diff (existing simulation panel) --
-    dvui.labelNoFmt(@src(), "After install", .{}, .{ .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
+    dvui.labelNoFmt(@src(), "After install", .{}, .{ .color_text = .{ .color = tokens.toDvui(tokens.active.acc, dvui.Color) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 4 } });
 
     // Search bar — filters the tree below by file/dir name (case-
@@ -1186,10 +1186,10 @@ fn renderWizardBlockRow(
         .padding = .{ .x = 12, .y = 10, .w = 12, .h = 10 },
         .id_extra = idx,
         .background = true,
-        .color_fill = if (is_highlight) cardFillHi() else cardFill(),
+        .color_fill = .{ .color = if (is_highlight) cardFillHi() else cardFill() },
         .border = style.border_thin,
-        .color_border = cardBorder(),
-        .corner_radius = style.corner_radius,
+        .color_border = .{ .color = cardBorder() },
+        .corners = style.corner_radius,
     });
     defer card.deinit();
 
@@ -1208,7 +1208,7 @@ fn renderWizardBlockRow(
         var step_buf: [16]u8 = undefined;
         const step_txt = std.fmt.bufPrint(&step_buf, "Step {d}", .{idx + 1}) catch "Step";
         dvui.labelNoFmt(@src(), step_txt, .{}, .{
-            .color_text = helpTextColor(),
+            .color_text = .{ .color = helpTextColor() },
             .gravity_y = 0.5,
             .id_extra = idx,
         });
@@ -1217,7 +1217,7 @@ fn renderWizardBlockRow(
             .min_size_content = .{ .w = 8, .h = 1 },
         });
         dvui.labelNoFmt(@src(), blockKindLabel(b.kind), .{}, .{
-            .color_text = tokens.toDvui(tokens.active.acc, dvui.Color),
+            .color_text = .{ .color = tokens.toDvui(tokens.active.acc, dvui.Color) },
             .gravity_y = 0.5,
             .id_extra = idx,
         });
@@ -1300,7 +1300,7 @@ fn renderWizardBlockRow(
                 .err => tokens.toDvui(tokens.active.danger, dvui.Color),
             };
             dvui.labelNoFmt(@src(), d.msg, .{}, .{
-                .color_text = color,
+                .color_text = .{ .color = color },
                 .id_extra = std.hash.Wyhash.hash(0, d.msg) ^ @as(u64, idx),
             });
         }
@@ -1312,7 +1312,7 @@ fn renderWizardBlockRow(
 /// each step before saving.
 fn renderBlockImpactLine(kind: state_mod.WizardBlockKind, imp: installer_mod.simulate_mod.StepImpact) void {
     if (imp.no_op) {
-        dvui.label(@src(), "No effect from this step yet.", .{}, .{ .color_text = helpTextColor() });
+        dvui.label(@src(), "No effect from this step yet.", .{}, .{ .color_text = .{ .color = helpTextColor() } });
         return;
     }
     switch (kind) {
@@ -1328,23 +1328,23 @@ fn renderBlockImpactLine(kind: state_mod.WizardBlockKind, imp: installer_mod.sim
             const line = std.fmt.bufPrint(&buf, "Will write {d} file(s), {s}{s}", .{
                 imp.files_written, size_txt, mod_part,
             }) catch "";
-            dvui.labelNoFmt(@src(), line, .{}, .{ .color_text = style.labelDim() });
+            dvui.labelNoFmt(@src(), line, .{}, .{ .color_text = .{ .color = style.labelDim() } });
         },
         .move => {
             if (imp.files_written == 0) return;
-            dvui.label(@src(), "Will relocate 1 file.", .{}, .{ .color_text = style.labelDim() });
+            dvui.label(@src(), "Will relocate 1 file.", .{}, .{ .color_text = .{ .color = style.labelDim() } });
         },
         .delete => {
             if (imp.deletions == 0) return;
             var buf: [64]u8 = undefined;
             const line = std.fmt.bufPrint(&buf, "Will remove {d} path(s).", .{imp.deletions}) catch "";
-            dvui.labelNoFmt(@src(), line, .{}, .{ .color_text = style.labelDim() });
+            dvui.labelNoFmt(@src(), line, .{}, .{ .color_text = .{ .color = style.labelDim() } });
         },
         .chmod_x => {
             if (imp.mode_changes == 0) return;
             var buf: [64]u8 = undefined;
             const line = std.fmt.bufPrint(&buf, "Will mark {d} file(s) runnable.", .{imp.mode_changes}) catch "";
-            dvui.labelNoFmt(@src(), line, .{}, .{ .color_text = style.labelDim() });
+            dvui.labelNoFmt(@src(), line, .{}, .{ .color_text = .{ .color = style.labelDim() } });
         },
     }
 }
@@ -1379,7 +1379,7 @@ fn wizardStripCheckbox(b: *state_mod.WizardBlock) void {
 fn renderWizardRelations(frame: *Frame, game: *const library.Game, w: *state_mod.WizardState) void {
     _ = frame;
     _ = game;
-    dvui.label(@src(), "Relations to other mods. Comma-separated recipe ids.", .{}, .{ .color_text = helpTextColor() });
+    dvui.label(@src(), "Relations to other mods. Comma-separated recipe ids.", .{}, .{ .color_text = .{ .color = helpTextColor() } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
 
     // For v1: each row is a fixed-size textbox the user types one id
@@ -1401,7 +1401,7 @@ fn wizardRelationGroup(group_idx: usize, label: []const u8, bufs: [][64]u8, len:
         .id_extra = group_idx,
     });
     defer box.deinit();
-    dvui.label(@src(), "{s}:", .{label}, .{ .color_text = tokens.toDvui(tokens.active.acc, dvui.Color) });
+    dvui.label(@src(), "{s}:", .{label}, .{ .color_text = .{ .color = tokens.toDvui(tokens.active.acc, dvui.Color) } });
     var i: usize = 0;
     while (i < len.*) : (i += 1) {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .id_extra = i });
@@ -1439,7 +1439,7 @@ fn bufToSlice(buf: []const u8) []const u8 {
 }
 
 fn renderWizardReview(frame: *Frame, game: *const library.Game, w: *state_mod.WizardState) void {
-    dvui.label(@src(), "Review. Save writes <id>.mod.zon to your local recipes dir.", .{}, .{ .color_text = helpTextColor() });
+    dvui.label(@src(), "Review. Save writes <id>.mod.zon to your local recipes dir.", .{}, .{ .color_text = .{ .color = helpTextColor() } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
 
     // Slice the inline buffers up to the first null byte — printing
@@ -1477,7 +1477,7 @@ fn renderWizardReview(frame: *Frame, game: *const library.Game, w: *state_mod.Wi
     {
         var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
         defer row.deinit();
-        dvui.label(@src(), "Trust-but-verify:", .{}, .{ .gravity_y = 0.5, .color_text = helpTextColor() });
+        dvui.label(@src(), "Trust-but-verify:", .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = helpTextColor() } });
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 6, .h = 1 } });
         const running = actions.isTestInstallRunning(frame.state);
         const lbl: []const u8 = if (running) "Testing\u{2026}" else "Test install (real)";
@@ -1485,5 +1485,5 @@ fn renderWizardReview(frame: *Frame, game: *const library.Game, w: *state_mod.Wi
             if (!running) actions.doTestInstallPreview(frame, game);
         }
     }
-    dvui.label(@src(), "Runs the actual installer against `/tmp/f69-preview-…` on a background thread. Doesn't touch your game's install dir.", .{}, .{ .color_text = helpTextColor() });
+    dvui.label(@src(), "Runs the actual installer against `/tmp/f69-preview-…` on a background thread. Doesn't touch your game's install dir.", .{}, .{ .color_text = .{ .color = helpTextColor() } });
 }

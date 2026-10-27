@@ -80,9 +80,9 @@ pub const FOLDER_IMPORT_ISSUE_ID_LEN: usize = 64;
 /// reference. `id` is the recipe slug for caller lookups; `title`
 /// is the human-readable label rendered on the chip.
 pub const FolderImportIssue = struct {
-    id_buf: [FOLDER_IMPORT_ISSUE_ID_LEN]u8 = [_]u8{0} ** FOLDER_IMPORT_ISSUE_ID_LEN,
+    id_buf: [FOLDER_IMPORT_ISSUE_ID_LEN]u8 = @splat(0),
     id_len: u8 = 0,
-    title_buf: [96]u8 = [_]u8{0} ** 96,
+    title_buf: [96]u8 = @splat(0),
     title_len: u8 = 0,
 
     pub fn id(self: *const FolderImportIssue) []const u8 {
@@ -100,15 +100,15 @@ pub const FolderImportRowState = struct {
     /// Editable name. Used only when `link_state == .custom_new` —
     /// for linked rows the library game's stored name wins. Prefilled
     /// from `folder_scan.parseFolderName`.
-    name_buf: [128]u8 = [_]u8{0} ** 128,
+    name_buf: [128]u8 = @splat(0),
     /// Editable version. Becomes the install row's `version` (which
     /// is also the install's user-facing name). Prefilled from the
     /// folder name, or from the linked game's `latest_version` when
     /// the folder name carried no version token.
-    version_buf: [64]u8 = [_]u8{0} ** 64,
+    version_buf: [64]u8 = @splat(0),
     /// What the user has typed (or what we prefilled from the best
     /// library match) for the Link cell. Drives the typeahead.
-    link_buf: [256]u8 = [_]u8{0} ** 256,
+    link_buf: [256]u8 = @splat(0),
     /// User's committed state for this row. Determines the commit
     /// path: linked_existing / custom_new / f95_url / unresolved.
     link_state: FolderImportLinkState = .unresolved,
@@ -127,7 +127,7 @@ pub const FolderImportRowState = struct {
     /// stat-only and cheap enough to run inline. The user sees the
     /// matched recipes as chips on the row; after commit, the
     /// Apply Fix dialog on the detail screen takes over.
-    issues: [FOLDER_IMPORT_MAX_ISSUES]FolderImportIssue = [_]FolderImportIssue{.{}} ** FOLDER_IMPORT_MAX_ISSUES,
+    issues: [FOLDER_IMPORT_MAX_ISSUES]FolderImportIssue = @splat(.{}),
     issue_count: u8 = 0,
 };
 /// Sort options. `weighted` uses Game.weightedRating against the
@@ -204,11 +204,11 @@ pub const WizardBlock = struct {
     kind: WizardBlockKind,
     /// extract.to / extract_inner.to / chmod_x first path / copy.src /
     /// move.src / delete.path — the "first" path field of the block.
-    a_buf: [256]u8 = [_]u8{0} ** 256,
+    a_buf: [256]u8 = @splat(0),
     /// extract_inner.archive (the inner archive within main staging) /
     /// copy.dest / move.dest — the "second" path field, unused for
     /// `extract`/`delete`/`chmod_x`.
-    b_buf: [256]u8 = [_]u8{0} ** 256,
+    b_buf: [256]u8 = @splat(0),
     /// strip count for `extract` / `extract_inner`.
     strip: u8 = 0,
 };
@@ -222,44 +222,44 @@ pub const WIZARD_MAX_INSTALL_VERSIONS: usize = 16;
 pub const WizardState = struct {
     step: WizardStep = .meta,
     /// Modfile this wizard is authoring a recipe for. SHA-256 hex.
-    modfile_id_buf: [64]u8 = [_]u8{0} ** 64,
+    modfile_id_buf: [64]u8 = @splat(0),
     modfile_id_len: usize = 0,
     /// Which game the modfile belongs to (used for recipe.for_game
     /// and to look up the modfile back at finalize time).
     game_thread_id: u64 = 0,
     /// Cached game recipe id for the current game — set when the
     /// wizard opens. Drives the `for_game` field of the output.
-    for_game_buf: [128]u8 = [_]u8{0} ** 128,
+    for_game_buf: [128]u8 = @splat(0),
     for_game_len: usize = 0,
 
-    name_buf: [160]u8 = [_]u8{0} ** 160,
-    version_buf: [32]u8 = [_]u8{0} ** 32,
-    post_url_buf: [512]u8 = [_]u8{0} ** 512,
-    for_game_version_buf: [64]u8 = [_]u8{0} ** 64,
+    name_buf: [160]u8 = @splat(0),
+    version_buf: [32]u8 = @splat(0),
+    post_url_buf: [512]u8 = @splat(0),
+    for_game_version_buf: [64]u8 = @splat(0),
 
     /// Versions of installed builds for this game, captured when the
     /// wizard opens. Rendered as a dropdown on the meta page so the
     /// user picks the existing install instead of typing a version
     /// by hand (and getting it subtly wrong).
-    install_versions_buf: [WIZARD_MAX_INSTALL_VERSIONS][32]u8 = [_][32]u8{[_]u8{0} ** 32} ** WIZARD_MAX_INSTALL_VERSIONS,
+    install_versions_buf: [WIZARD_MAX_INSTALL_VERSIONS][32]u8 = @splat(@splat(0)),
     install_versions_count: usize = 0,
     install_versions_pick: usize = 0,
 
-    blocks: [WIZARD_MAX_BLOCKS]WizardBlock = [_]WizardBlock{.{ .kind = .extract }} ** WIZARD_MAX_BLOCKS,
+    blocks: [WIZARD_MAX_BLOCKS]WizardBlock = @splat(.{ .kind = .extract }),
     block_count: usize = 0,
 
     /// Selected requires / conflicts / load_after — each entry is a
     /// recipe id picked from the existing mod recipes for this game.
-    requires_buf: [WIZARD_MAX_RELATIONS][64]u8 = [_][64]u8{[_]u8{0} ** 64} ** WIZARD_MAX_RELATIONS,
+    requires_buf: [WIZARD_MAX_RELATIONS][64]u8 = @splat(@splat(0)),
     requires_len: usize = 0,
-    conflicts_buf: [WIZARD_MAX_RELATIONS][64]u8 = [_][64]u8{[_]u8{0} ** 64} ** WIZARD_MAX_RELATIONS,
+    conflicts_buf: [WIZARD_MAX_RELATIONS][64]u8 = @splat(@splat(0)),
     conflicts_len: usize = 0,
-    load_after_buf: [WIZARD_MAX_RELATIONS][64]u8 = [_][64]u8{[_]u8{0} ** 64} ** WIZARD_MAX_RELATIONS,
+    load_after_buf: [WIZARD_MAX_RELATIONS][64]u8 = @splat(@splat(0)),
     load_after_len: usize = 0,
 
     /// Last error message (validator failure, file write failure…)
     /// shown on the review page.
-    err_msg_buf: [240]u8 = [_]u8{0} ** 240,
+    err_msg_buf: [240]u8 = @splat(0),
     err_msg_len: usize = 0,
 
     /// True when the simulation detail-list (per-file rows) is
@@ -282,7 +282,7 @@ pub const WizardState = struct {
     /// descendant's name) doesn't contain the substring,
     /// case-insensitive. The buffer is fixed-size so the wizard
     /// stays alloc-free.
-    preview_search_buf: [128]u8 = [_]u8{0} ** 128,
+    preview_search_buf: [128]u8 = @splat(0),
 };
 
 /// Lifecycle of a single Sync click. Driven by the UI thread off
@@ -371,7 +371,7 @@ pub const ToastKind = enum { info, success, warn, err };
 /// 144 Hz monitors fade twice as fast — fine for transient UI.
 pub const MAX_TOAST_MSG: usize = 240;
 pub const Toast = struct {
-    buf: [MAX_TOAST_MSG]u8 = [_]u8{0} ** MAX_TOAST_MSG,
+    buf: [MAX_TOAST_MSG]u8 = @splat(0),
     len: usize = 0,
     kind: ToastKind = .info,
     /// Frames remaining before this toast disappears. `maxInt(u32)`
@@ -493,12 +493,12 @@ pub const Filters = struct {
     installed: InstalledFilter = .all,
     /// Substring match against `Game.developer`, case-insensitive.
     /// Empty buffer = no filter. ASCII-only contains check.
-    developer_buf: [64]u8 = [_]u8{0} ** 64,
+    developer_buf: [64]u8 = @splat(0),
     /// Comma-separated tag list — game must have EVERY listed tag
     /// (case-insensitive substring of any of `Game.tags`).
-    tag_include_buf: [256]u8 = [_]u8{0} ** 256,
+    tag_include_buf: [256]u8 = @splat(0),
     /// Comma-separated tag list — game must have NONE of these tags.
-    tag_exclude_buf: [256]u8 = [_]u8{0} ** 256,
+    tag_exclude_buf: [256]u8 = @splat(0),
     /// Dev-status mask: scraped from F95 (completed / abandoned /
     /// on hold / in progress / unknown). Any-bit-set ⇒ filter active.
     dev_status: DevStatusMask = .{},
@@ -645,7 +645,7 @@ pub const State = struct {
     sort_applied_column: ?SortColumn = null,
     sort_applied_dir: ?SortDir = null,
     filters: Filters = .{},
-    search_buf: [64]u8 = [_]u8{0} ** 64,
+    search_buf: [64]u8 = @splat(0),
     /// f95_thread_id of the game currently displayed in detail screen.
     selected_thread: ?u64 = null,
     /// Currently shown slide in the detail-screen carousel. Slide 0
@@ -689,7 +689,7 @@ pub const State = struct {
     /// with more screenshots fall through to a null read (placeholder
     /// renders) for indices >= 32 — `slideBytes` checks the bound.
     slide_cache_thread: ?u64 = null,
-    slide_cache_bytes: [SLIDE_CACHE_SLOTS]?[]u8 = [_]?[]u8{null} ** SLIDE_CACHE_SLOTS,
+    slide_cache_bytes: [SLIDE_CACHE_SLOTS]?[]u8 = @splat(null),
     /// In-flight off-thread loader for a slide_cache slot. Set when
     /// `slideSlotBytes` encounters a miss; cleared by `drainSlideLoads`
     /// once the worker finishes. Single-slot serialises misses — fine
@@ -702,7 +702,7 @@ pub const State = struct {
     /// 1..N = screenshots). Filled lazily on first paint, freed on
     /// thread change / detail-page exit.
     thumb_cache_thread: ?u64 = null,
-    thumb_cache_bytes: [THUMB_CACHE_CAP]?[]u8 = [_]?[]u8{null} ** THUMB_CACHE_CAP,
+    thumb_cache_bytes: [THUMB_CACHE_CAP]?[]u8 = @splat(null),
     /// Active tab inside the detail screen.
     detail_tab: Tab = .overview,
     /// Active tab inside the Mods page. Filters which lists render
@@ -719,7 +719,7 @@ pub const State = struct {
     /// chosen to fit both SHA-256 hex (64 chars) and recipe slugs.
     /// Empty = nothing selected → detail pane shows the empty-state
     /// hint.
-    mods_selected_id_buf: [80]u8 = [_]u8{0} ** 80,
+    mods_selected_id_buf: [80]u8 = @splat(0),
     mods_selected_id_len: usize = 0,
     /// Filter checkboxes in the left pane of the Mods view. All three
     /// default ON so the user sees every modfile on first visit.
@@ -750,22 +750,22 @@ pub const State = struct {
     manage_install_id: ?[36]u8 = null,
     /// Text-entry buffer for the rename modal. NUL-terminated;
     /// `manualInstallNameSlice`-style trimmed reads.
-    manage_rename_buf: [64]u8 = [_]u8{0} ** 64,
+    manage_rename_buf: [64]u8 = @splat(0),
     /// Manual "edit game details" form (detail screen). Non-null thread-id
     /// means the form is open for that game; the buffers are seeded from the
     /// game when it opens. NUL-terminated. `edit_engine_idx` indexes
     /// `EDITABLE_ENGINES` in detail.zig.
     edit_details_for: ?u64 = null,
-    edit_name_buf: [256]u8 = [_]u8{0} ** 256,
-    edit_dev_buf: [128]u8 = [_]u8{0} ** 128,
-    edit_ver_buf: [64]u8 = [_]u8{0} ** 64,
+    edit_name_buf: [256]u8 = @splat(0),
+    edit_dev_buf: [128]u8 = @splat(0),
+    edit_ver_buf: [64]u8 = @splat(0),
     edit_engine_idx: usize = 0,
 
     /// User tag-color overrides (tag -> 0xRRGGBB), loaded lazily from the DB
     /// and rebuilt (freed + null) after an edit. Freed at shutdown in ui.zig.
     tag_colors: ?std.StringHashMap(u32) = null,
     /// Tag whose color picker is open (NUL-terminated; empty = none).
-    tag_color_editing: [128]u8 = [_]u8{0} ** 128,
+    tag_color_editing: [128]u8 = @splat(0),
     /// Working HSV bound to the open color picker.
     tag_color_hsv: dvui.Color.HSV = .{},
     /// Thread-id the per-detail-page state is currently scoped to.
@@ -783,7 +783,7 @@ pub const State = struct {
     /// companion buffer is prefilled with the current thread URL when the
     /// bar opens. Cleared on cancel, apply, or when switching games.
     set_url_for: ?u64 = null,
-    set_url_buf: [256]u8 = [_]u8{0} ** 256,
+    set_url_buf: [256]u8 = @splat(0),
     /// True when the user clicked the `?` next to Convert; expands an
     /// inline help block under the action row.
     convert_help_open: bool = false,
@@ -828,7 +828,7 @@ pub const State = struct {
     /// state (see `serializeLibPrefs`). The persisted snapshot is
     /// compared against a fresh serialization each frame to debounce
     /// disk writes; only the first `_len` bytes are meaningful.
-    lib_prefs_persisted: [128]u8 = [_]u8{0} ** 128,
+    lib_prefs_persisted: [128]u8 = @splat(0),
     lib_prefs_persisted_len: usize = 0,
     /// One-shot flag — flips to true after the on-startup auto check
     /// has fired (or been skipped because workers were busy). Stays
@@ -850,7 +850,7 @@ pub const State = struct {
     /// Kanban view: one independent scroll per status column so each
     /// column scrolls on its own (and to its own height). Indexed by
     /// `@intFromEnum(CompletionStatus)` — the player's progress, 7 variants.
-    lib_kanban_scroll: [7]dvui.ScrollInfo = [_]dvui.ScrollInfo{.{}} ** 7,
+    lib_kanban_scroll: [7]dvui.ScrollInfo = @splat(.{}),
     /// Last Sync action's status. Reset to `.idle` when entering detail.
     sync_status: SyncStatus = .idle,
     /// Short message describing the last sync (success or error).
@@ -860,7 +860,7 @@ pub const State = struct {
     /// syncs go into the first empty slot via `findEmptySyncSlot`.
     /// Mirrors F95Checker's `full_checks_sem`. Each slot is held as
     /// anyopaque so `state.zig` doesn't pull in f95/library/std.Thread.
-    active_syncs: [MAX_PARALLEL_SYNC]?*owned.SyncJob = [_]?*owned.SyncJob{null} ** MAX_PARALLEL_SYNC,
+    active_syncs: [MAX_PARALLEL_SYNC]?*owned.SyncJob = @splat(null),
     /// Sync-all queue: thread_ids waiting to be synced. drainSync pops
     /// the head and spawns the next job once the current one finishes.
     /// Heap-alloc'd via `lib.alloc`; null when no batch is in flight.
@@ -927,9 +927,9 @@ pub const State = struct {
     manual_install_open: bool = false,
     /// Editable text fields for the manual-install panel. Loaded
     /// from / written back to disk on enqueue.
-    manual_install_path_buf: [1024]u8 = [_]u8{0} ** 1024,
-    manual_install_version_buf: [64]u8 = [_]u8{0} ** 64,
-    manual_install_name_buf: [64]u8 = [_]u8{0} ** 64,
+    manual_install_path_buf: [1024]u8 = @splat(0),
+    manual_install_version_buf: [64]u8 = @splat(0),
+    manual_install_name_buf: [64]u8 = @splat(0),
     /// True while the version buffer holds an auto-filled placeholder
     /// (the thread's `latest_version`, pre-filled by the Update flow)
     /// rather than a value the user typed or one derived from the picked
@@ -953,7 +953,7 @@ pub const State = struct {
     /// Unix seconds when the master list was last fetched. 0 = never.
     tags_master_fetched_at: i64 = 0,
     /// Quick-filter text for the sidebar tag checkbox lists.
-    tags_filter_buf: [64]u8 = [_]u8{0} ** 64,
+    tags_filter_buf: [64]u8 = @splat(0),
     /// Cached library-list filter result. Without this, every frame
     /// (including each frame that wakes for a mouse-motion event)
     /// walks `frame.games` and runs `cardVisible` — three substring
@@ -1046,7 +1046,7 @@ pub const State = struct {
     /// `null` slot = free. drainImageQueue iterates all slots; new
     /// jobs go into the first empty slot. Mirrors the parallel sync
     /// slot pool.
-    active_images: [MAX_PARALLEL_IMAGE]?*owned.ImageJob = [_]?*owned.ImageJob{null} ** MAX_PARALLEL_IMAGE,
+    active_images: [MAX_PARALLEL_IMAGE]?*owned.ImageJob = @splat(null),
     /// Name of the game whose ImageJob is in flight (for the second
     /// banner row). Sentinel-trimmed.
     image_active_name: buf_mod.MessageBuf(160) = .{},
@@ -1080,27 +1080,27 @@ pub const State = struct {
     /// Round-robin cache of cover bytes, shared by detail screen and
     /// grid thumbs. Owned by `lib.alloc`; freed on quit and on entry
     /// eviction. Sync invalidates the entry for the synced thread.
-    cover_cache: [COVER_CACHE_CAP]?CoverCacheEntry = [_]?CoverCacheEntry{null} ** COVER_CACHE_CAP,
+    cover_cache: [COVER_CACHE_CAP]?CoverCacheEntry = @splat(null),
     cover_cache_next: usize = 0,
     /// Pool of in-flight async cover-thumbnail loaders. `coverBytes`
     /// kicks one off on a cache miss and returns the placeholder;
     /// `drainCoverLoads` lands the bytes in `cover_cache` a frame later.
     /// Keeps slow FUSE/NTFS reads off the UI thread.
-    cover_load_jobs: [COVER_LOAD_WORKERS]?*owned.CoverLoadJob = [_]?*owned.CoverLoadJob{null} ** COVER_LOAD_WORKERS,
+    cover_load_jobs: [COVER_LOAD_WORKERS]?*owned.CoverLoadJob = @splat(null),
     /// Edit buffer for the Notes tab — re-loaded from the DB whenever
     /// `notes_for_thread` changes. UI flushes back to DB on Save click.
-    notes_buf: [4096]u8 = [_]u8{0} ** 4096,
+    notes_buf: [4096]u8 = @splat(0),
     notes_for_thread: ?u64 = null,
 
     /// Custom-launch editor (detail facts grid). Re-loaded from the latest
     /// install whenever `launch_cfg_for_thread` changes; Save flushes to DB.
-    launch_exec_buf: [256]u8 = [_]u8{0} ** 256,
-    launch_args_buf: [256]u8 = [_]u8{0} ** 256,
+    launch_exec_buf: [256]u8 = @splat(0),
+    launch_args_buf: [256]u8 = @splat(0),
     launch_cfg_for_thread: u64 = 0,
-    launch_cfg_install_id: [36]u8 = [_]u8{0} ** 36,
+    launch_cfg_install_id: [36]u8 = @splat(0),
     launch_cfg_has_install: bool = false,
     /// Paste-area for the bookmark/thread-list importer (8 KiB cap).
-    import_buf: [8192]u8 = [_]u8{0} ** 8192,
+    import_buf: [8192]u8 = @splat(0),
     /// Imported / skipped counts shown to the user post-import.
     import_msg: buf_mod.MessageBuf(128) = .{},
     /// Folder-scan importer state. The scan walks a directory of
@@ -1109,7 +1109,7 @@ pub const State = struct {
     /// `*importers.Bundle` (owned by the bundle's arena) so the
     /// downstream UI can iterate `bundle.games`. Freed on a fresh
     /// scan, on screen exit, and on shutdown.
-    folder_scan_path_buf: [512]u8 = [_]u8{0} ** 512,
+    folder_scan_path_buf: [512]u8 = @splat(0),
     /// Live scan-in-progress session. Stays non-null while the UI
     /// iterator is still walking the scan root; cleared when
     /// finalized into `folder_scan_bundle` or when the user clears
@@ -1181,67 +1181,67 @@ pub const State = struct {
     /// Bulk-edit affordance for the preview table: name suffix and
     /// version values that the "Apply to selected" button writes
     /// across all ticked rows.
-    folder_bulk_name_buf: [128]u8 = [_]u8{0} ** 128,
-    folder_bulk_version_buf: [64]u8 = [_]u8{0} ** 64,
+    folder_bulk_name_buf: [128]u8 = @splat(0),
+    folder_bulk_version_buf: [64]u8 = @splat(0),
     /// Per-row resolution-popup state. `null` = no popup. Otherwise
     /// the index into `bundle.games` whose F95 association the user
     /// is editing right now. The user can paste an F95 URL/id to
     /// resolve the synthetic id, OR confirm "add as custom" to
     /// keep the synthetic id.
     folder_resolve_idx: ?usize = null,
-    folder_resolve_url_buf: [256]u8 = [_]u8{0} ** 256,
+    folder_resolve_url_buf: [256]u8 = @splat(0),
     /// Set by the importer; runMainLoop checks each iteration and
     /// re-runs `lib.listGames` when true.
     reload_requested: bool = false,
     /// Editable buffer for the Downloads screen's URL paste field.
-    dl_url_buf: [512]u8 = [_]u8{0} ** 512,
+    dl_url_buf: [512]u8 = @splat(0),
     /// Editable buffer for the Settings → Downloads aria2-port field.
     /// "0" or empty means "random ephemeral port". Persisted to
     /// `<data_root>/aria2_port`; effective on next launch.
-    aria2_port_buf: [8]u8 = [_]u8{0} ** 8,
+    aria2_port_buf: [8]u8 = @splat(0),
     /// Last-persisted port (mirrored from disk via RuntimeInfo). Used
     /// to render the "(restart required)" hint when the buffer differs.
     aria2_port_persisted: u16 = 0,
     /// Short message after Save click in the Downloads settings tab.
-    aria2_port_msg_buf: [80]u8 = [_]u8{0} ** 80,
+    aria2_port_msg_buf: [80]u8 = @splat(0),
     aria2_port_msg_len: usize = 0,
     /// Editable buffer for the Settings → Downloads seed-ratio field.
     /// Float like "5.0". Floor 2.0 enforced on Save.
-    aria2_seed_ratio_buf: [16]u8 = [_]u8{0} ** 16,
+    aria2_seed_ratio_buf: [16]u8 = @splat(0),
     /// Detail-page "add label" text entry. Typing an existing name re-uses
     /// it (createLabel is idempotent); a new name creates it.
-    label_input_buf: [48]u8 = [_]u8{0} ** 48,
+    label_input_buf: [48]u8 = @splat(0),
     /// Universal-mods screen add-form: name + selected engine (index into
     /// the screen's engine list).
-    universal_mod_name_buf: [80]u8 = [_]u8{0} ** 80,
+    universal_mod_name_buf: [80]u8 = @splat(0),
     universal_mod_engine_idx: usize = 0,
     /// Library label filter — selected label ids (union/OR semantics). Fixed
     /// cap; toggled by the sidebar checkboxes. Empty = no label filtering.
     label_filter: [64]i64 = undefined,
     label_filter_len: usize = 0,
     /// Editable seed-time cap (minutes) text buffer + last-saved value.
-    aria2_seed_time_buf: [16]u8 = [_]u8{0} ** 16,
+    aria2_seed_time_buf: [16]u8 = @splat(0),
     aria2_seed_time_persisted: u32 = 0,
     aria2_seed_ratio_persisted: f32 = 5.0,
-    aria2_seed_ratio_msg_buf: [80]u8 = [_]u8{0} ** 80,
+    aria2_seed_ratio_msg_buf: [80]u8 = @splat(0),
     aria2_seed_ratio_msg_len: usize = 0,
     /// Status from Settings → Library → "Re-detect engines from installs".
     /// Cleared on next click. Sized for the summary line.
-    engine_reanalyse_msg_buf: [256]u8 = [_]u8{0} ** 256,
+    engine_reanalyse_msg_buf: [256]u8 = @splat(0),
     engine_reanalyse_msg_len: usize = 0,
     /// Browser path buffer (settings → "Browser"). Filled at startup
     /// from `RuntimeInfo.initial_browser_path`; the dropdown copies
     /// detected paths into it. `actions.openInBrowser` reads from here.
-    browser_path_buf: [512]u8 = [_]u8{0} ** 512,
+    browser_path_buf: [512]u8 = @splat(0),
     /// "OK" / error message after a browser save click.
     browser_msg: buf_mod.MessageBuf(80) = .{},
     /// F95 login form state.
-    f95_user_buf: [128]u8 = [_]u8{0} ** 128,
-    f95_pass_buf: [128]u8 = [_]u8{0} ** 128,
+    f95_user_buf: [128]u8 = @splat(0),
+    f95_pass_buf: [128]u8 = @splat(0),
     // Cookie sign-in (the 2FA / passkey workaround): the two values the user
     // pastes from their browser. The `xf_user` token can be long, so 512.
-    f95_cookie_user_buf: [512]u8 = [_]u8{0} ** 512,
-    f95_cookie_session_buf: [512]u8 = [_]u8{0} ** 512,
+    f95_cookie_user_buf: [512]u8 = @splat(0),
+    f95_cookie_session_buf: [512]u8 = @splat(0),
     /// When true, the F95 login card shows the cookie form instead of the
     /// username/password form.
     f95_login_use_cookie: bool = false,
@@ -1250,7 +1250,7 @@ pub const State = struct {
     /// the gpa) to hand to `submitTwoStep`; freed on submit / cancel / logout.
     two_step_pending: bool = false,
     two_step_carry: ?[]u8 = null,
-    two_step_code_buf: [16]u8 = [_]u8{0} ** 16,
+    two_step_code_buf: [16]u8 = @splat(0),
     login_status: LoginStatus = .unknown,
     login_msg: buf_mod.MessageBuf(128) = .{},
     /// Donor-tier check result. `null` = not yet probed (either
@@ -1274,20 +1274,20 @@ pub const State = struct {
     /// `thread_id` lets the Fix and Try Anyway buttons re-invoke
     /// `doLaunchGame` for the same game.
     launch_diag_open: bool = false,
-    launch_diag_summary_buf: [256]u8 = [_]u8{0} ** 256,
+    launch_diag_summary_buf: [256]u8 = @splat(0),
     launch_diag_summary_len: usize = 0,
-    launch_diag_log_buf: [8192]u8 = [_]u8{0} ** 8192,
+    launch_diag_log_buf: [8192]u8 = @splat(0),
     launch_diag_log_len: usize = 0,
     launch_diag_fix_id: ?LaunchFixId = null,
     launch_diag_thread_id: u64 = 0,
     /// Recipe id to apply when the user clicks the `compat_recipe`
     /// fix button. Empty when fix_id != `compat_recipe`. 64 bytes
     /// covers the longest current recipe slug comfortably.
-    launch_diag_compat_recipe_buf: [64]u8 = [_]u8{0} ** 64,
+    launch_diag_compat_recipe_buf: [64]u8 = @splat(0),
     launch_diag_compat_recipe_len: usize = 0,
     /// install_id (UUID-style 36 char) the compat recipe should be
     /// applied to. Set alongside `launch_diag_compat_recipe_buf`.
-    launch_diag_install_id_buf: [36]u8 = [_]u8{0} ** 36,
+    launch_diag_install_id_buf: [36]u8 = @splat(0),
     launch_diag_install_id_set: bool = false,
     /// Flips true once the user clicks the Fix button and the fix
     /// succeeds. Renders the dialog into "Fix applied — close + try
@@ -1332,8 +1332,8 @@ pub const State = struct {
     /// from `<config>/f69/rpdl_token` at startup; freed on quit. The
     /// per-game Download action reads this when an `.rpdl` source is
     /// dispatched.
-    rpdl_user_buf: [128]u8 = [_]u8{0} ** 128,
-    rpdl_pass_buf: [128]u8 = [_]u8{0} ** 128,
+    rpdl_user_buf: [128]u8 = @splat(0),
+    rpdl_pass_buf: [128]u8 = @splat(0),
     rpdl_status: LoginStatus = .unknown,
     rpdl_msg: buf_mod.MessageBuf(128) = .{},
     rpdl_token: ?[]u8 = null,
@@ -1410,8 +1410,8 @@ pub const State = struct {
     max_parallel_image_persisted: u32 = DEFAULT_PARALLEL,
     /// Buffers for the Settings textEntry widgets (mutated live by
     /// dvui). Parsed + clamped on Save.
-    max_parallel_sync_buf: [4]u8 = [_]u8{0} ** 4,
-    max_parallel_image_buf: [4]u8 = [_]u8{0} ** 4,
+    max_parallel_sync_buf: [4]u8 = @splat(0),
+    max_parallel_image_buf: [4]u8 = @splat(0),
     /// Minimum session duration in seconds for `counts_as_played` to
     /// be true. 0 = any successful launch counts; max 1800 (30 min).
     /// Evaluated at session close — past `counts_as_played` values
@@ -1419,7 +1419,7 @@ pub const State = struct {
     min_session_seconds: u32 = 60,
     min_session_seconds_persisted: u32 = 60,
     /// TextEntry buffer for the Settings → min_session_seconds widget.
-    min_session_seconds_buf: [8]u8 = [_]u8{0} ** 8,
+    min_session_seconds_buf: [8]u8 = @splat(0),
     /// Per-game F95-thread-id → host PID of the currently-launched
     /// game. Populated by `doLaunchGame`, consumed by `doStopGame` +
     /// the detail screen (Launch ↔ Stop button swap). Pruned each
@@ -1432,7 +1432,7 @@ pub const State = struct {
     /// this stack and the global `renderToasts` overlay displays them
     /// kind-appropriately. Drains via `actions.drainExpiredToasts`
     /// each frame.
-    toasts: [MAX_TOASTS]Toast = [_]Toast{.{}} ** MAX_TOASTS,
+    toasts: [MAX_TOASTS]Toast = @splat(.{}),
     toast_count: usize = 0,
     /// Persistent rect for the toast `floatingWindow`. We overwrite
     /// it every frame to keep the strip anchored at the bottom of the
@@ -1466,7 +1466,7 @@ pub const State = struct {
     /// Stored as a fixed buffer so we can compare without allocating.
     /// Length 0 = "no install selected" (cache built without an
     /// install context — happens when no installs exist for the game).
-    mods_page_cache_install_id_buf: [64]u8 = [_]u8{0} ** 64,
+    mods_page_cache_install_id_buf: [64]u8 = @splat(0),
     mods_page_cache_install_id_len: usize = 0,
     mods_page_cache: ?*owned.ModsPageCache = null,
     /// Scan in flight — UI greys the Scan button + shows a status row.
@@ -1477,14 +1477,14 @@ pub const State = struct {
     /// Modfile id currently waiting for a confirm-delete press. UI
     /// flips the row's button to "Confirm delete" when set; any other
     /// click clears it. `null` = idle.
-    modfile_pending_delete_id_buf: [64]u8 = [_]u8{0} ** 64,
+    modfile_pending_delete_id_buf: [64]u8 = @splat(0),
     modfile_pending_delete_id_len: usize = 0,
 
     /// User-preset id currently armed for delete. Separate from the
     /// modfile buffer so a preset id can't accidentally collide with
     /// a modfile id (different name spaces, but both go through the
     /// same two-click pattern).
-    preset_pending_delete_id_buf: [128]u8 = [_]u8{0} ** 128,
+    preset_pending_delete_id_buf: [128]u8 = @splat(0),
     preset_pending_delete_id_len: usize = 0,
 
     /// Cached `recipe.MergedPresetSet`. Filled lazily on first access

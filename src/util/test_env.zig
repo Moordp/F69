@@ -167,7 +167,7 @@ pub const TestEnv = struct {
             // libc all the way — see the module header note on the std.Io park.
             if (std.fs.path.dirname(full)) |d| winMkdirP(d);
             var pz_buf: [1024]u8 = undefined;
-            const pz = std.fmt.bufPrintZ(&pz_buf, "{s}", .{full}) catch return error.NameTooLong;
+            const pz = std.fmt.bufPrintSentinel(&pz_buf, "{s}", .{full}, 0) catch return error.NameTooLong;
             const f = std.c.fopen(pz.ptr, "wb") orelse return error.FileNotFound;
             defer _ = std.c.fclose(f);
             if (bytes.len > 0 and std.c.fwrite(bytes.ptr, 1, bytes.len, f) != bytes.len) {

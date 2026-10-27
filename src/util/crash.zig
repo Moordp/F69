@@ -25,7 +25,7 @@ const builtin = @import("builtin");
 const util_paths = @import("util_paths");
 const atomic_io = @import("util_atomic_io");
 
-pub const build_git_rev: []const u8 = if (builtin.mode == .Debug) "dev" else "unknown";
+pub const build_git_rev: []const u8 = if (builtin.mode == .debug) "dev" else "unknown";
 
 var g_crash_io: ?std.Io = null;
 var g_crash_dir: ?[]const u8 = null;

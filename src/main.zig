@@ -506,7 +506,7 @@ pub fn main(init: std.process.Init) !void {
     const browser_choice_path = try std.fmt.allocPrint(gpa, "{s}/browser", .{data_root});
     defer gpa.free(browser_choice_path);
 
-    var browser_path_buf: [512]u8 = [_]u8{0} ** 512;
+    var browser_path_buf: [512]u8 = @splat(0);
     if (util_setting.readSingleLine(init.io, gpa, browser_choice_path)) |loaded_opt| {
         if (loaded_opt) |loaded| {
             defer gpa.free(loaded);

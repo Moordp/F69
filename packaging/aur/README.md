@@ -26,7 +26,7 @@ Notes:
   build.zig.zon land in a build-local cache. AUR convention prefers all
   network in `source=()`; zig has no tarball-per-dep story yet, and this
   is the accepted pattern for zig packages.
-- Arch's `zig` package satisfies `minimum_zig_version` 0.16.0. If Arch
+- Arch's `zig` package satisfies `minimum_zig_version` 0.17.0. If Arch
   jumps to a breaking zig before we do, pin via `zig-bin` in makedepends.
 - The v0.10.1 tag predates the 2026-07-15 bug fixes (sync crash, wrong
   row clicks, phantom UPDATE badge, invisible settings titles). Cut a

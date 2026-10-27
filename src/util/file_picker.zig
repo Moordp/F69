@@ -16,9 +16,7 @@
 
 const std = @import("std");
 
-const c = @cImport({
-    @cInclude("nfd.h");
-});
+const c = @import("c");
 
 /// One row in the filter dropdown shown by the picker. `spec` is
 /// comma-separated extensions without leading `*.` or `.` — e.g.
@@ -109,9 +107,9 @@ pub fn open(
     }
 
     for (filters, 0..) |f, i| {
-        const name_z = alloc.dupeZ(u8, f.name) catch return Error.OutOfMemory;
+        const name_z = alloc.dupeSentinel(u8, f.name, 0) catch return Error.OutOfMemory;
         owned.append(alloc, name_z) catch return Error.OutOfMemory;
-        const spec_z = alloc.dupeZ(u8, f.spec) catch return Error.OutOfMemory;
+        const spec_z = alloc.dupeSentinel(u8, f.spec, 0) catch return Error.OutOfMemory;
         owned.append(alloc, spec_z) catch return Error.OutOfMemory;
         c_filters[i] = .{
             .name = name_z.ptr,
@@ -122,7 +120,7 @@ pub fn open(
     var default_z_owned: ?[:0]u8 = null;
     defer if (default_z_owned) |s| alloc.free(s);
     const default_z_ptr: ?[*:0]const u8 = if (default_path) |p| blk: {
-        const z = alloc.dupeZ(u8, p) catch return Error.OutOfMemory;
+        const z = alloc.dupeSentinel(u8, p, 0) catch return Error.OutOfMemory;
         default_z_owned = z;
         break :blk z.ptr;
     } else null;
@@ -164,7 +162,7 @@ pub fn openFolder(
     var default_z_owned: ?[:0]u8 = null;
     defer if (default_z_owned) |s| alloc.free(s);
     const default_z_ptr: ?[*:0]const u8 = if (default_path) |p| blk: {
-        const z = alloc.dupeZ(u8, p) catch return Error.OutOfMemory;
+        const z = alloc.dupeSentinel(u8, p, 0) catch return Error.OutOfMemory;
         default_z_owned = z;
         break :blk z.ptr;
     } else null;

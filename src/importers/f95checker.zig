@@ -45,7 +45,7 @@ pub const DEFAULT_DB_BASENAME = "db.sqlite3";
 /// theory for the field report of imports needing several repeats.
 fn walIsHot(db_path: []const u8) bool {
     var buf: [1024]u8 = undefined;
-    const wal = std.fmt.bufPrintZ(&buf, "{s}-wal", .{db_path}) catch return false;
+    const wal = std.fmt.bufPrintSentinel(&buf, "{s}-wal", .{db_path}, 0) catch return false;
     const f = std.c.fopen(wal.ptr, "rb") orelse return false;
     defer _ = std.c.fclose(f);
     // Non-empty ⟺ at least one byte readable (no fseek binding in std.c).

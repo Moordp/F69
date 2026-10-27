@@ -186,6 +186,10 @@ pub fn runMainLoop(
         if (std.c.getenv("F69_OPEN_THREAD")) |tid_z| {
             state.selected_thread = std.fmt.parseInt(u64, std.mem.span(tid_z), 10) catch null;
         }
+        if (std.c.getenv("F69_OPEN_VIEW")) |v_z| {
+            const v = std.mem.span(v_z);
+            if (std.mem.eql(u8, v, "list")) state.view = .list else if (std.mem.eql(u8, v, "kanban")) state.view = .kanban;
+        }
         if (std.c.getenv("F69_DOCK_OPEN") != null) state.dock_expanded = true;
         if (state.selected_thread) |tid| state.detail_state_for_thread = tid; // don't reset the boot tab
         if (std.c.getenv("F69_OPEN_TAB")) |tab_z| {
@@ -352,7 +356,7 @@ pub fn runMainLoop(
             // window (wake-up), the daemon, and the jobs map.
             dl_mgr.stopPoller();
             // End this frame cleanly first.
-            _ = try win.end(.{});
+            _ = try win.end(.{ .manage_backend = false });
 
             // Graceful shutdown: signal cancel on every detached
             // worker, then spin a small drain loop so they hit a
@@ -457,13 +461,13 @@ pub fn runMainLoop(
         if (!try guiFrame(&frame)) break :main_loop;
         const pf_build1 = perfNowNs(io);
 
-        const end_micros = try win.end(.{});
+        const end_micros = try win.end(.{ .manage_backend = false });
         const pf_gpu1 = perfNowNs(io);
         dumpTags(&win);
-        try backend.setCursor(win.cursorRequested());
-        try backend.textInputRect(win.textInputRequested());
+        backend.setCursor(win.cursorRequested());
+        backend.textInputRect(win.textInputRequested());
         const pf_present0 = perfNowNs(io);
-        try backend.renderPresent();
+        backend.renderPresent();
         const pf_present1 = perfNowNs(io);
         perfFrame(
             io,

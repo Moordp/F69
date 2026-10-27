@@ -131,6 +131,6 @@ test "verifyFile: missing file → HashMismatch" {
     defer tio.deinit();
     const io = tio.io();
 
-    const empty: [32]u8 = .{0} ** 32;
+    const empty: [32]u8 = @splat(0);
     try testing.expectError(errs.Error.HashMismatch, verifyFile(io, "/nonexistent-asdf", empty));
 }

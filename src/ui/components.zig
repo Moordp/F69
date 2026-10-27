@@ -223,7 +223,7 @@ pub fn iconOnly(
         .color_fill = opts.color_fill,
         .color_border = opts.color_border,
         .border = opts.border,
-        .corner_radius = opts.corner_radius,
+        .corners = opts.corners,
         .background = opts.background,
     });
 }
@@ -241,9 +241,9 @@ pub fn emptyState(icon: []const u8, title: []const u8, subtitle: []const u8) voi
             .gravity_x = 0.5,
             .background = true,
             .border = style.border_thin,
-            .corner_radius = style.corner_radius,
-            .color_fill = style.cardFill(),
-            .color_border = style.borderColor(),
+            .corners = style.corner_radius,
+            .color_fill = .{ .color = style.cardFill() },
+            .color_border = .{ .color = style.borderColor() },
             .padding = .{ .x = 36, .y = 30, .w = 36, .h = 30 },
             .min_size_content = .{ .w = 380, .h = 0 },
         });
@@ -251,16 +251,16 @@ pub fn emptyState(icon: []const u8, title: []const u8, subtitle: []const u8) voi
         dvui.icon(@src(), "empty", icon, .{}, .{
             .gravity_x = 0.5,
             .min_size_content = .{ .w = 44, .h = 44 },
-            .color_text = td(t.ink3),
+            .color_text = .{ .color = td(t.ink3) },
         });
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 14 } });
         dvui.labelNoFmt(@src(), title, .{}, .{
             .gravity_x = 0.5,
-            .color_text = td(t.ink),
+            .color_text = .{ .color = td(t.ink) },
             .font = dvui.Font.theme(.title),
         });
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
-        dvui.labelNoFmt(@src(), subtitle, .{}, .{ .gravity_x = 0.5, .color_text = td(t.ink3) });
+        dvui.labelNoFmt(@src(), subtitle, .{}, .{ .gravity_x = 0.5, .color_text = .{ .color = td(t.ink3) } });
     }
     _ = dvui.spacer(@src(), .{ .expand = .vertical });
 }
@@ -283,7 +283,7 @@ pub fn tabButton(label: []const u8, active: bool) bool {
         .padding = .{ .x = 4, .y = 8, .w = 4, .h = 7 },
         .gravity_x = 0.5,
         .min_size_content = .{ .w = 72, .h = 0 },
-        .color_text = td(if (active) t.acc else t.ink2),
+        .color_text = .{ .color = td(if (active) t.acc else t.ink2) },
         .style = if (active) .highlight else .control,
     });
 
@@ -292,8 +292,8 @@ pub fn tabButton(label: []const u8, active: bool) bool {
         .expand = .horizontal,
         .min_size_content = .{ .w = 0, .h = 2 },
         .background = true,
-        .color_fill = td(if (active) t.acc else t.bg1),
-        .corner_radius = dvui.Rect.all(1),
+        .color_fill = .{ .color = td(if (active) t.acc else t.bg1) },
+        .corners = dvui.CornerRect.all(1),
     });
     bar.deinit();
 
@@ -326,8 +326,8 @@ pub fn settingsHelpText(text: []const u8) void {
         .expand = .horizontal,
         .background = false,
         .border = .all(0),
-        .color_border = helpTextColor(),
-        .color_text = helpTextColor(),
+        .color_border = .{ .color = helpTextColor() },
+        .color_text = .{ .color = helpTextColor() },
     });
     defer tl.deinit();
     tl.addText(text, .{});
@@ -455,7 +455,7 @@ pub fn renderLaunchDiagPopup(frame: *Frame) void {
                 "Fix applied. Close this window and click Launch again.",
                 .{},
                 .{
-                    .color_text = .{ .r = 0x4F, .g = 0xC3, .b = 0x6F },
+                    .color_text = .{ .color = .{ .r = 0x4F, .g = 0xC3, .b = 0x6F } },
                     .style = .highlight,
                     .expand = .horizontal,
                 },
@@ -483,7 +483,7 @@ pub fn renderLaunchDiagPopup(frame: *Frame) void {
         });
         defer log_box.deinit();
         dvui.labelNoFmt(@src(), "Log", .{}, .{
-            .color_text = helpTextColor(),
+            .color_text = .{ .color = helpTextColor() },
         });
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 4 } });
 
@@ -491,9 +491,9 @@ pub fn renderLaunchDiagPopup(frame: *Frame) void {
             .expand = .both,
             .background = true,
             .border = style.border_thin,
-            .corner_radius = style.corner_radius,
-            .color_fill = .{ .r = 0x14, .g = 0x0A, .b = 0x10 },
-            .color_border = style.borderColor(),
+            .corners = style.corner_radius,
+            .color_fill = .{ .color = .{ .r = 0x14, .g = 0x0A, .b = 0x10 } },
+            .color_border = .{ .color = style.borderColor() },
             .padding = .{ .x = 8, .y = 8, .w = 8, .h = 8 },
         });
         defer border.deinit();
@@ -502,7 +502,7 @@ pub fn renderLaunchDiagPopup(frame: *Frame) void {
         defer scroll.deinit();
         const log_text = state.launch_diag_log_buf[0..state.launch_diag_log_len];
         if (log_text.len == 0) {
-            dvui.label(@src(), "(no further detail)", .{}, .{ .color_text = helpTextColor() });
+            dvui.label(@src(), "(no further detail)", .{}, .{ .color_text = .{ .color = helpTextColor() } });
         } else {
             // `labelNoFmt` is single-line and clips at the right edge.
             // `textLayout` wraps long lines + handles user text
@@ -601,8 +601,8 @@ fn accountHeader(letter: []const u8, name: []const u8, subtitle: []const u8, sig
             .min_size_content = .{ .w = 32, .h = 32 },
             .max_size_content = .{ .w = 32, .h = 32 },
             .background = true,
-            .color_fill = td(if (signed_in) t.acc else t.bg3),
-            .corner_radius = dvui.Rect.all(16),
+            .color_fill = .{ .color = td(if (signed_in) t.acc else t.bg3) },
+            .corners = dvui.CornerRect.all(16),
             .gravity_y = 0.5,
         });
         defer av.deinit();
@@ -610,7 +610,7 @@ fn accountHeader(letter: []const u8, name: []const u8, subtitle: []const u8, sig
             .gravity_x = 0.5,
             .gravity_y = 0.5,
             .style = .highlight,
-            .color_text = td(if (signed_in) t.ink_on_acc else t.ink2),
+            .color_text = .{ .color = td(if (signed_in) t.ink_on_acc else t.ink2) },
         });
     }
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 10, .h = 1 } });
@@ -619,10 +619,10 @@ fn accountHeader(letter: []const u8, name: []const u8, subtitle: []const u8, sig
     {
         var info = dvui.box(@src(), .{ .dir = .vertical }, .{ .gravity_y = 0.5 });
         defer info.deinit();
-        dvui.labelNoFmt(@src(), name, .{}, .{ .style = .highlight, .color_text = td(t.ink) });
+        dvui.labelNoFmt(@src(), name, .{}, .{ .style = .highlight, .color_text = .{ .color = td(t.ink) } });
         const body = dvui.Font.theme(.body);
         dvui.labelNoFmt(@src(), subtitle, .{}, .{
-            .color_text = td(t.ink3),
+            .color_text = .{ .color = td(t.ink3) },
             .font = body.withSize(body.size * 0.85),
         });
     }
@@ -633,10 +633,10 @@ fn accountHeader(letter: []const u8, name: []const u8, subtitle: []const u8, sig
     {
         var pill = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .background = true,
-            .color_fill = td(t.bg2),
-            .color_border = td(if (signed_in) t.ok else t.line),
+            .color_fill = .{ .color = td(t.bg2) },
+            .color_border = .{ .color = td(if (signed_in) t.ok else t.line) },
             .border = dvui.Rect.all(1),
-            .corner_radius = dvui.Rect.all(11),
+            .corners = dvui.CornerRect.all(11),
             .padding = .{ .x = 9, .y = 3, .w = 9, .h = 3 },
             .gravity_y = 0.5,
         });
@@ -644,8 +644,8 @@ fn accountHeader(letter: []const u8, name: []const u8, subtitle: []const u8, sig
         if (signed_in) {
             var d = dvui.box(@src(), .{}, .{
                 .background = true,
-                .color_fill = td(t.ok),
-                .corner_radius = dvui.Rect.all(3),
+                .color_fill = .{ .color = td(t.ok) },
+                .corners = dvui.CornerRect.all(3),
                 .min_size_content = .{ .w = 6, .h = 6 },
                 .gravity_y = 0.5,
                 .margin = .{ .x = 0, .y = 0, .w = 6, .h = 0 },
@@ -653,7 +653,7 @@ fn accountHeader(letter: []const u8, name: []const u8, subtitle: []const u8, sig
             d.deinit();
         }
         dvui.labelNoFmt(@src(), if (signed_in) "signed in" else "signed out", .{}, .{
-            .color_text = td(if (signed_in) t.ok else t.ink3),
+            .color_text = .{ .color = td(if (signed_in) t.ok else t.ink3) },
             .gravity_y = 0.5,
         });
     }
@@ -665,7 +665,7 @@ fn accountStatusLine(msg: []const u8, is_err: bool) void {
     if (msg.len == 0) return;
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     dvui.labelNoFmt(@src(), msg, .{}, .{
-        .color_text = td(if (is_err) t.danger else t.ink3),
+        .color_text = .{ .color = td(if (is_err) t.danger else t.ink3) },
         .expand = .horizontal,
     });
 }
@@ -679,9 +679,9 @@ fn renderF95LoginCard(frame: *Frame) void {
         .expand = .horizontal,
         .background = true,
         .border = style.border_thin,
-        .corner_radius = style.corner_radius,
-        .color_fill = style.cardFill(),
-        .color_border = style.borderColor(),
+        .corners = style.corner_radius,
+        .color_fill = .{ .color = style.cardFill() },
+        .color_border = .{ .color = style.borderColor() },
         .padding = .{ .x = 14, .y = 12, .w = 14, .h = 12 },
         .margin = .{ .x = 4, .y = 4, .w = 4, .h = 4 },
     });
@@ -706,7 +706,7 @@ fn renderF95LoginCard(frame: *Frame) void {
         const u = state.f95UserSlice();
         dvui.labelNoFmt(@src(), if (u.len > 0) u else "(signed in)", .{}, .{
             .gravity_y = 0.5,
-            .color_text = td(t.ink),
+            .color_text = .{ .color = td(t.ink) },
         });
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         if (style.button(@src(), "Sign out", .{}, .{ .style = .err, .gravity_y = 0.5 })) {
@@ -717,7 +717,7 @@ fn renderF95LoginCard(frame: *Frame) void {
 
     // Two-step (TOTP) challenge in progress → show only the code prompt.
     if (state.two_step_pending) {
-        dvui.labelNoFmt(@src(), "Enter the code from your authenticator app:", .{}, .{ .color_text = td(t.ink) });
+        dvui.labelNoFmt(@src(), "Enter the code from your authenticator app:", .{}, .{ .color_text = .{ .color = td(t.ink) } });
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
         {
             const te = style.textEntry(@src(), .{
@@ -768,8 +768,8 @@ fn renderF95LoginCard(frame: *Frame) void {
     } else {
         // Cookie sign-in: password login can't clear a passkey/2FA challenge,
         // so let the user paste the session cookie from a browser that can.
-        dvui.labelNoFmt(@src(), "2FA or passkey? Sign in at f95zone.to in your browser,", .{}, .{ .color_text = td(t.ink) });
-        dvui.labelNoFmt(@src(), "then paste these two cookies (devtools → Application):", .{}, .{ .color_text = td(t.ink) });
+        dvui.labelNoFmt(@src(), "2FA or passkey? Sign in at f95zone.to in your browser,", .{}, .{ .color_text = .{ .color = td(t.ink) } });
+        dvui.labelNoFmt(@src(), "then paste these two cookies (devtools → Application):", .{}, .{ .color_text = .{ .color = td(t.ink) } });
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
         if (style.button(@src(), "Open F95 login page", .{}, .{ .expand = .horizontal })) {
             actions.doOpenF95Login(frame);
@@ -815,9 +815,9 @@ fn renderRpdlLoginCard(frame: *Frame) void {
         .expand = .horizontal,
         .background = true,
         .border = style.border_thin,
-        .corner_radius = style.corner_radius,
-        .color_fill = style.cardFill(),
-        .color_border = style.borderColor(),
+        .corners = style.corner_radius,
+        .color_fill = .{ .color = style.cardFill() },
+        .color_border = .{ .color = style.borderColor() },
         .padding = .{ .x = 14, .y = 12, .w = 14, .h = 12 },
         .margin = .{ .x = 4, .y = 4, .w = 4, .h = 4 },
     });
@@ -831,7 +831,7 @@ fn renderRpdlLoginCard(frame: *Frame) void {
             @src(),
             "Optional — community torrent fallback when an F95 download has no DDL.",
             .{},
-            .{ .expand = .horizontal, .color_text = td(t.ink3) },
+            .{ .expand = .horizontal, .color_text = .{ .color = td(t.ink3) } },
         );
     }
 
@@ -879,7 +879,7 @@ fn renderRpdlLoginCard(frame: *Frame) void {
             actions.doRpdlLogin(frame, state.rpdlUserSlice(), state.rpdlPassSlice());
         }
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-        if (style.button(@src(), "create account ↗", .{}, .{ .gravity_y = 0.5, .color_text = td(t.acc) })) {
+        if (style.button(@src(), "create account ↗", .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = td(t.acc) } })) {
             actions.openExternalUrl(frame, "https://dl.rpdl.net/register");
         }
     }
@@ -917,7 +917,7 @@ pub fn renderSyncRecapPopup(frame: *Frame) void {
         const msg = std.fmt.bufPrint(&msg_buf, "{d} game{s} updated", .{
             entries.len, if (entries.len == 1) "" else "s",
         }) catch "";
-        dvui.labelNoFmt(@src(), msg, .{}, .{ .color_text = td(tokens.active.acc) });
+        dvui.labelNoFmt(@src(), msg, .{}, .{ .color_text = .{ .color = td(tokens.active.acc) } });
     }
 
     _ = dvui.separator(@src(), .{ .expand = .horizontal });
@@ -939,9 +939,9 @@ pub fn renderSyncRecapPopup(frame: *Frame) void {
             .margin = .{ .x = 0, .y = 0, .w = 0, .h = 6 },
             .background = true,
             .border = style.border_thin,
-            .corner_radius = style.corner_radius,
-            .color_fill = style.cardFill(),
-            .color_border = style.borderColor(),
+            .corners = style.corner_radius,
+            .color_fill = .{ .color = style.cardFill() },
+            .color_border = .{ .color = style.borderColor() },
         });
         defer row.deinit();
 
@@ -965,7 +965,7 @@ pub fn renderSyncRecapPopup(frame: *Frame) void {
             dvui.labelNoFmt(@src(), e.name, .{}, .{
                 .id_extra = e.thread_id,
                 .expand = .horizontal,
-                .color_text = td(tokens.active.acc),
+                .color_text = .{ .color = td(tokens.active.acc) },
             });
 
             _ = dvui.spacer(@src(), .{ .id_extra = e.thread_id, .min_size_content = .{ .w = 1, .h = 4 } });
@@ -983,27 +983,27 @@ pub fn renderSyncRecapPopup(frame: *Frame) void {
                 dvui.labelNoFmt(@src(), e.old_version, .{}, .{
                     .id_extra = e.thread_id,
                     .gravity_y = 0.5,
-                    .color_text = style.labelDim(),
+                    .color_text = .{ .color = style.labelDim() },
                 });
                 _ = dvui.spacer(@src(), .{ .id_extra = e.thread_id, .min_size_content = .{ .w = 6, .h = 1 } });
                 dvui.icon(@src(), "diff-arrow", entypo.arrow_right, .{}, .{
                     .id_extra = e.thread_id,
                     .min_size_content = .{ .w = 16, .h = 16 },
                     .gravity_y = 0.5,
-                    .color_text = tokens.toDvui(tokens.active.acc, dvui.Color),
+                    .color_text = .{ .color = tokens.toDvui(tokens.active.acc, dvui.Color) },
                 });
                 _ = dvui.spacer(@src(), .{ .id_extra = e.thread_id, .min_size_content = .{ .w = 6, .h = 1 } });
                 dvui.labelNoFmt(@src(), e.new_version, .{}, .{
                     .id_extra = e.thread_id +% 1, // disambiguate from old_version label above
                     .gravity_y = 0.5,
-                    .color_text = td(tokens.active.acc),
+                    .color_text = .{ .color = td(tokens.active.acc) },
                 });
                 if (e.auto_downloaded) {
                     _ = dvui.spacer(@src(), .{ .id_extra = e.thread_id, .min_size_content = .{ .w = 10, .h = 1 } });
                     dvui.labelNoFmt(@src(), "auto-downloaded", .{}, .{
                         .id_extra = e.thread_id +% 2,
                         .gravity_y = 0.5,
-                        .color_text = .{ .r = 0xA0, .g = 0xA0, .b = 0xC0 },
+                        .color_text = .{ .color = .{ .r = 0xA0, .g = 0xA0, .b = 0xC0 } },
                     });
                 }
             }
@@ -1040,9 +1040,9 @@ fn renderRecapThumb(frame: *Frame, thread_id: u64) void {
             .id_extra = thread_id,
             .min_size_content = .{ .w = w, .h = h },
             .gravity_y = 0.5,
-            .corner_radius = .all(3),
+            .corners = .all(3),
             .border = style.border_thin,
-            .color_border = style.borderColor(),
+            .color_border = .{ .color = style.borderColor() },
         });
         return;
     }
@@ -1051,10 +1051,10 @@ fn renderRecapThumb(frame: *Frame, thread_id: u64) void {
         .min_size_content = .{ .w = w, .h = h },
         .gravity_y = 0.5,
         .background = true,
-        .corner_radius = .all(3),
+        .corners = .all(3),
         .border = style.border_thin,
-        .color_border = style.borderColor(),
-        .color_fill = .{ .r = 0x1A, .g = 0x10, .b = 0x14 },
+        .color_border = .{ .color = style.borderColor() },
+        .color_fill = .{ .color = .{ .r = 0x1A, .g = 0x10, .b = 0x14 } },
     });
     defer slot.deinit();
 }
@@ -1100,7 +1100,7 @@ pub fn renderToasts(frame: *Frame) void {
     }, .{
         .background = false,
         .border = .all(0),
-        .corner_radius = .all(0),
+        .corners = .all(0),
     });
     defer fw.deinit();
 
@@ -1158,9 +1158,9 @@ fn renderToastPill(index: usize, t: state_mod.Toast) bool {
         .margin = .{ .x = 0, .y = 3, .w = 0, .h = 3 },
         .background = true,
         .border = style.border_thin,
-        .corner_radius = .all(6),
-        .color_fill = style.cardFill(),
-        .color_border = style.borderColor(),
+        .corners = .all(6),
+        .color_fill = .{ .color = style.cardFill() },
+        .color_border = .{ .color = style.borderColor() },
         .expand = .horizontal,
     });
     bw.processEvents();
@@ -1176,7 +1176,7 @@ fn renderToastPill(index: usize, t: state_mod.Toast) bool {
         .expand = .horizontal,
         .background = false,
         .border = .all(0),
-        .color_text = text_color,
+        .color_text = .{ .color = text_color },
     });
     defer tl.deinit();
     tl.addText(label_text, .{});
@@ -1199,8 +1199,8 @@ pub fn renderIconRail(frame: *Frame) void {
         .min_size_content = .{ .w = 54, .h = 0 },
         .expand = .vertical,
         .background = true,
-        .color_fill = td(tokens.active.bg1),
-        .color_border = td(tokens.active.line),
+        .color_fill = .{ .color = td(tokens.active.bg1) },
+        .color_border = .{ .color = td(tokens.active.line) },
         .border = .{ .x = 0, .y = 0, .w = 1, .h = 0 },
         .padding = .{ .x = 0, .y = 10, .w = 0, .h = 10 },
     });
@@ -1212,7 +1212,7 @@ pub fn renderIconRail(frame: *Frame) void {
         const title = dvui.Font.theme(.title);
         dvui.labelNoFmt(@src(), "f69", .{}, .{
             .gravity_x = 0.5,
-            .color_text = td(tokens.active.acc),
+            .color_text = .{ .color = td(tokens.active.acc) },
             .font = title.withSize(title.size * 1.05),
             .margin = .{ .x = 0, .y = 0, .w = 0, .h = 10 },
         });
@@ -1241,10 +1241,10 @@ fn railAccount(state: *state_mod.State) void {
         .min_size_content = .{ .w = 38, .h = 38 },
         .gravity_x = 0.5,
         .background = open,
-        .color_fill = td(t.acc_wash),
+        .color_fill = .{ .color = td(t.acc_wash) },
         .border = if (open) .{ .x = 2, .y = 0, .w = 0, .h = 0 } else dvui.Rect.all(0),
-        .color_border = td(t.acc),
-        .corner_radius = dvui.Rect.all(tokens.r),
+        .color_border = .{ .color = td(t.acc) },
+        .corners = dvui.CornerRect.all(tokens.r),
         .margin = .{ .x = 8, .y = 3, .w = 8, .h = 3 },
     });
     defer cell.deinit();
@@ -1252,7 +1252,7 @@ fn railAccount(state: *state_mod.State) void {
         .gravity_x = 0.5,
         .gravity_y = 0.5,
         .min_size_content = .{ .w = 19, .h = 19 },
-        .color_text = td(if (signed_in) t.acc else t.ink3),
+        .color_text = .{ .color = td(if (signed_in) t.acc else t.ink3) },
     });
     if (dvui.clicked(cell.data(), .{})) state.login_popup_open = !state.login_popup_open;
 }
@@ -1270,10 +1270,10 @@ fn railItem(state: *state_mod.State, key: u32, name: []const u8, icon: []const u
         .min_size_content = .{ .w = 38, .h = 38 },
         .gravity_x = 0.5,
         .background = on,
-        .color_fill = td(t.acc_wash),
+        .color_fill = .{ .color = td(t.acc_wash) },
         .border = if (on) .{ .x = 2, .y = 0, .w = 0, .h = 0 } else dvui.Rect.all(0),
-        .color_border = td(t.acc),
-        .corner_radius = dvui.Rect.all(tokens.r),
+        .color_border = .{ .color = td(t.acc) },
+        .corners = dvui.CornerRect.all(tokens.r),
         .margin = .{ .x = 8, .y = 3, .w = 8, .h = 3 },
     });
     defer cell.deinit();
@@ -1281,7 +1281,7 @@ fn railItem(state: *state_mod.State, key: u32, name: []const u8, icon: []const u
         .gravity_x = 0.5,
         .gravity_y = 0.5,
         .min_size_content = .{ .w = 19, .h = 19 },
-        .color_text = td(if (on) t.acc else t.ink3),
+        .color_text = .{ .color = td(if (on) t.acc else t.ink3) },
     });
     if (dvui.clicked(cell.data(), .{})) state.screen = screen;
 }
@@ -1291,8 +1291,8 @@ fn railItem(state: *state_mod.State, key: u32, name: []const u8, icon: []const u
 fn statusDot(col: dvui.Color) void {
     var d = dvui.box(@src(), .{}, .{
         .background = true,
-        .color_fill = col,
-        .corner_radius = dvui.Rect.all(3),
+        .color_fill = .{ .color = col },
+        .corners = dvui.CornerRect.all(3),
         .min_size_content = .{ .w = 6, .h = 6 },
         .gravity_y = 0.5,
         .margin = .{ .x = 0, .y = 0, .w = 7, .h = 0 },
@@ -1305,16 +1305,16 @@ fn statusMiniBar(frac: f32, w: f32) void {
     const f = std.math.clamp(frac, 0, 1);
     var outer = dvui.box(@src(), .{ .dir = .horizontal }, .{
         .background = true,
-        .color_fill = td(t.bg3),
-        .corner_radius = dvui.Rect.all(2),
+        .color_fill = .{ .color = td(t.bg3) },
+        .corners = dvui.CornerRect.all(2),
         .min_size_content = .{ .w = w, .h = 5 },
         .gravity_y = 0.5,
     });
     defer outer.deinit();
     var inner = dvui.box(@src(), .{}, .{
         .background = true,
-        .color_fill = td(t.acc),
-        .corner_radius = dvui.Rect.all(2),
+        .color_fill = .{ .color = td(t.acc) },
+        .corners = dvui.CornerRect.all(2),
         .min_size_content = .{ .w = w * f, .h = 5 },
     });
     inner.deinit();
@@ -1330,7 +1330,7 @@ fn statusProgress(frac: f32, done: u32, total: u32, font: dvui.Font) void {
     statusMiniBar(frac, 110);
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 9, .h = 1 } });
     var b: [32]u8 = undefined;
-    dvui.labelNoFmt(@src(), std.fmt.bufPrint(&b, "{d}/{d}", .{ done, total }) catch "", .{}, .{ .gravity_y = 0.5, .color_text = td(t.ink3), .font = font });
+    dvui.labelNoFmt(@src(), std.fmt.bufPrint(&b, "{d}/{d}", .{ done, total }) catch "", .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = td(t.ink3) }, .font = font });
 }
 
 /// Cancel affordance for an in-flight sync (pre-flight or `/full`),
@@ -1341,7 +1341,7 @@ fn statusProgress(frac: f32, done: u32, total: u32, font: dvui.Font) void {
 /// distinct widget ids.
 fn statusCancelButton(frame: *Frame, src: std.builtin.SourceLocation, cancelling: bool) void {
     if (cancelling) {
-        _ = iconButton(src, "Cancelling…", entypo.cross, .{ .style = .control, .gravity_y = 0.5, .color_text = .{ .r = 0x80, .g = 0x80, .b = 0x80 } });
+        _ = iconButton(src, "Cancelling…", entypo.cross, .{ .style = .control, .gravity_y = 0.5, .color_text = .{ .color = .{ .r = 0x80, .g = 0x80, .b = 0x80 } } });
     } else {
         if (iconButton(src, "Cancel", entypo.cross, .{ .style = .err, .gravity_y = 0.5 })) actions.cancelSync(frame);
     }
@@ -1360,7 +1360,7 @@ fn statusSeg(key: u32, label: []const u8, n: u32, col: dvui.Color, font: dvui.Fo
     var seg = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = key, .padding = .{ .x = 9, .y = 0, .w = 0, .h = 0 } });
     defer seg.deinit();
     var b: [48]u8 = undefined;
-    dvui.labelNoFmt(@src(), std.fmt.bufPrint(&b, "{s} {d}", .{ label, n }) catch label, .{}, .{ .gravity_y = 0.5, .color_text = col, .font = font });
+    dvui.labelNoFmt(@src(), std.fmt.bufPrint(&b, "{s} {d}", .{ label, n }) catch label, .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = col }, .font = font });
 }
 
 /// Bottom status bar — an always-present thin strip showing global activity
@@ -1376,8 +1376,8 @@ pub fn renderStatusBar(frame: *Frame) void {
         .expand = .horizontal,
         .min_size_content = .{ .w = 0, .h = 30 },
         .background = true,
-        .color_fill = td(t.bg1),
-        .color_border = if (state.dock_expanded) td(t.acc_dim) else td(t.line),
+        .color_fill = .{ .color = td(t.bg1) },
+        .color_border = .{ .color = if (state.dock_expanded) td(t.acc_dim) else td(t.line) },
         .border = .{ .x = 0, .y = 1, .w = 0, .h = 0 },
         .padding = .{ .x = 12, .y = 0, .w = 10, .h = 0 },
         .tag = "activity-dock",
@@ -1406,7 +1406,7 @@ pub fn renderStatusBar(frame: *Frame) void {
     // ---- left: primary activity ----
     if (primary) |j| {
         statusDot(td(t.acc));
-        dvui.labelNoFmt(@src(), statusJobTitle(frame, j), .{}, .{ .gravity_y = 0.5, .color_text = td(t.ink2), .font = mono });
+        dvui.labelNoFmt(@src(), statusJobTitle(frame, j), .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = td(t.ink2) }, .font = mono });
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 9, .h = 1 } });
         const frac: f32 = if (j.bytes_total) |tot|
             (if (tot > 0) @as(f32, @floatFromInt(j.bytes_done)) / @as(f32, @floatFromInt(tot)) else 0)
@@ -1417,10 +1417,10 @@ pub fn renderStatusBar(frame: *Frame) void {
         var b2: [48]u8 = undefined;
         const pct: u32 = @intFromFloat(std.math.clamp(frac, 0, 1) * 100);
         const mbps = @as(f64, @floatFromInt(j.download_speed)) / (1024.0 * 1024.0);
-        dvui.labelNoFmt(@src(), std.fmt.bufPrint(&b2, "{d}% · {d:.1} MB/s", .{ pct, mbps }) catch "", .{}, .{ .gravity_y = 0.5, .color_text = td(t.ink3), .font = mono });
+        dvui.labelNoFmt(@src(), std.fmt.bufPrint(&b2, "{d}% · {d:.1} MB/s", .{ pct, mbps }) catch "", .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = td(t.ink3) }, .font = mono });
     } else if (n_post > 0) {
         statusDot(td(t.warn));
-        dvui.labelNoFmt(@src(), "Installing…", .{}, .{ .gravity_y = 0.5, .color_text = td(t.ink2), .font = mono });
+        dvui.labelNoFmt(@src(), "Installing…", .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = td(t.ink2) }, .font = mono });
     } else if (state.folder_import_job) |fj| {
         // Background folder copy/move (cross-device or copy mode). The
         // byte total is 2× the data size (copy + verify), so a percent
@@ -1431,7 +1431,7 @@ pub fn renderStatusBar(frame: *Frame) void {
         const name = if (ci < p.items.len) p.items[ci].name else "";
         var bimp: [96]u8 = undefined;
         const lbl = if (name.len > 0) (std.fmt.bufPrint(&bimp, "Importing {s}", .{name}) catch "Importing…") else "Importing…";
-        dvui.labelNoFmt(@src(), lbl, .{}, .{ .gravity_y = 0.5, .color_text = td(t.ink2), .font = mono });
+        dvui.labelNoFmt(@src(), lbl, .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = td(t.ink2) }, .font = mono });
         const bd = p.bytes_done.load(.monotonic);
         const bt = p.bytes_total.load(.acquire);
         const frac: f32 = if (bt > 0) @as(f32, @floatFromInt(bd)) / @as(f32, @floatFromInt(bt)) else 0;
@@ -1440,9 +1440,9 @@ pub fn renderStatusBar(frame: *Frame) void {
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 9, .h = 1 } });
         var bpct: [16]u8 = undefined;
         const pct: u32 = @intFromFloat(std.math.clamp(frac, 0, 1) * 100);
-        dvui.labelNoFmt(@src(), std.fmt.bufPrint(&bpct, "{d}%", .{pct}) catch "", .{}, .{ .gravity_y = 0.5, .color_text = td(t.ink3), .font = mono });
+        dvui.labelNoFmt(@src(), std.fmt.bufPrint(&bpct, "{d}%", .{pct}) catch "", .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = td(t.ink3) }, .font = mono });
         if (fj.cancelRequested()) {
-            _ = iconButton(@src(), "Cancelling…", entypo.cross, .{ .style = .control, .gravity_y = 0.5, .color_text = .{ .r = 0x80, .g = 0x80, .b = 0x80 } });
+            _ = iconButton(@src(), "Cancelling…", entypo.cross, .{ .style = .control, .gravity_y = 0.5, .color_text = .{ .color = .{ .r = 0x80, .g = 0x80, .b = 0x80 } } });
         } else {
             if (iconButton(@src(), "Cancel", entypo.cross, .{ .style = .err, .gravity_y = 0.5 })) actions.cancelFolderImport(frame);
         }
@@ -1450,7 +1450,7 @@ pub fn renderStatusBar(frame: *Frame) void {
         // Phase 0: indexer `/fast` pre-flight. No per-game name yet —
         // the bar is purely count-driven off the worker's atomics.
         statusDot(td(t.acc));
-        dvui.labelNoFmt(@src(), "Checking for changes", .{}, .{ .gravity_y = 0.5, .color_text = td(t.ink2), .font = mono });
+        dvui.labelNoFmt(@src(), "Checking for changes", .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = td(t.ink2) }, .font = mono });
         const fd = fc.payload.fast_done.load(.acquire);
         const ftot = fc.payload.fast_total;
         const frac: f32 = if (ftot > 0) @as(f32, @floatFromInt(fd)) / @as(f32, @floatFromInt(ftot)) else 0;
@@ -1463,7 +1463,7 @@ pub fn renderStatusBar(frame: *Frame) void {
         const nm = state.currentSyncName();
         var b3: [96]u8 = undefined;
         const lbl = if (nm.len > 0) (std.fmt.bufPrint(&b3, "Syncing {s}", .{nm}) catch "Syncing…") else "Syncing…";
-        dvui.labelNoFmt(@src(), lbl, .{}, .{ .gravity_y = 0.5, .color_text = td(t.ink2), .font = mono });
+        dvui.labelNoFmt(@src(), lbl, .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = td(t.ink2) }, .font = mono });
         const done = state.sync_queue_started;
         const tot = state.sync_queue_total;
         const frac: f32 = if (tot > 0) @as(f32, @floatFromInt(done)) / @as(f32, @floatFromInt(tot)) else 0;
@@ -1476,13 +1476,13 @@ pub fn renderStatusBar(frame: *Frame) void {
         // Phase 2: background screenshot backfill. Lower-key dot — the
         // library is fully usable while this trickles in.
         statusDot(td(t.acc_dim));
-        dvui.labelNoFmt(@src(), "Fetching screenshots", .{}, .{ .gravity_y = 0.5, .color_text = td(t.ink2), .font = mono });
+        dvui.labelNoFmt(@src(), "Fetching screenshots", .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = td(t.ink2) }, .font = mono });
         const idone = state.image_done.load(.acquire);
         const itot = state.image_total;
         const frac: f32 = if (itot > 0) @as(f32, @floatFromInt(idone)) / @as(f32, @floatFromInt(itot)) else 0;
         statusProgress(frac, idone, itot, mono);
         if (state.image_cancel.load(.acquire)) {
-            _ = iconButton(@src(), "Cancelling…", entypo.cross, .{ .style = .control, .gravity_y = 0.5, .color_text = .{ .r = 0x80, .g = 0x80, .b = 0x80 } });
+            _ = iconButton(@src(), "Cancelling…", entypo.cross, .{ .style = .control, .gravity_y = 0.5, .color_text = .{ .color = .{ .r = 0x80, .g = 0x80, .b = 0x80 } } });
         } else {
             if (iconButton(@src(), "Cancel", entypo.cross, .{ .style = .control, .gravity_y = 0.5 })) actions.cancelImageQueue(frame);
         }
@@ -1497,9 +1497,9 @@ pub fn renderStatusBar(frame: *Frame) void {
         if (smsg.len > 0) {
             const is_err = state.sync_status == .err;
             statusDot(td(if (is_err) t.danger else t.ink3));
-            dvui.labelNoFmt(@src(), smsg, .{}, .{ .gravity_y = 0.5, .color_text = td(if (is_err) t.danger else t.ink3), .font = mono });
+            dvui.labelNoFmt(@src(), smsg, .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = td(if (is_err) t.danger else t.ink3) }, .font = mono });
         } else {
-            dvui.labelNoFmt(@src(), "Ready", .{}, .{ .gravity_y = 0.5, .color_text = td(t.ink3), .font = mono });
+            dvui.labelNoFmt(@src(), "Ready", .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = td(t.ink3) }, .font = mono });
         }
     }
 
@@ -1514,7 +1514,7 @@ pub fn renderStatusBar(frame: *Frame) void {
         dvui.labelNoFmt(@src(), if (syncing) "\u{27F3} syncing" else "\u{27F3} idle", .{}, .{
             .id_extra = 0xD9,
             .gravity_y = 0.5,
-            .color_text = td(if (syncing) t.acc else t.ink3),
+            .color_text = .{ .color = td(if (syncing) t.acc else t.ink3) },
             .font = mono,
             .padding = .{ .x = 9, .y = 0, .w = 0, .h = 0 },
         });
@@ -1525,7 +1525,7 @@ pub fn renderStatusBar(frame: *Frame) void {
     dvui.icon(@src(), "dock-chev", if (state.dock_expanded) entypo.chevron_down else entypo.chevron_up, .{}, .{
         .gravity_y = 0.5,
         .min_size_content = .{ .w = 14, .h = 14 },
-        .color_text = td(t.ink3),
+        .color_text = .{ .color = td(t.ink3) },
         .padding = .{ .x = 8, .y = 0, .w = 0, .h = 0 },
     });
     if (dvui.clicked(bar.data(), .{})) state.dock_expanded = !state.dock_expanded;

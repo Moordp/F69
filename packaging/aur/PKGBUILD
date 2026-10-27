@@ -29,7 +29,7 @@ depends=(
   'libavif' 'dav1d'     # static preferred, dynamic fallback on Arch
   'nettle' 'libxml2' 'zstd' 'lz4' 'xz' 'zlib' 'bzip2' 'acl'
 )
-makedepends=('zig>=0.16.0' 'pkgconf')
+makedepends=('zig>=0.17.0' 'pkgconf')
 optdepends=(
   'aria2: automatic downloads (rpdl / donor DDL)'
   'bubblewrap: sandboxed game launches'

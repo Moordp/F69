@@ -208,7 +208,7 @@
         # each other. Keep in sync with `.version` in build.zig.zon (the
         # binary's own `--version` is single-sourced from the zon in
         # build.zig; parsing the zon here would need a fragile Nix regex).
-        f69Version = "0.11.1";
+        f69Version = "0.15.0";
 
         f69NativeBuildInputs = with pkgs; [
           zig
@@ -275,8 +275,7 @@
             mkdir -p "$ZIG_GLOBAL_CACHE_DIR"
             zig build install \
               -Doptimize=ReleaseSafe \
-              -Dgui=true \
-              --global-cache-dir "$ZIG_GLOBAL_CACHE_DIR" || true
+              -Dgui=true || true
             test -d "$ZIG_GLOBAL_CACHE_DIR/p" \
               || { echo "no packages fetched — dependency fetch failed"; exit 1; }
             mkdir -p "$out"
@@ -284,7 +283,7 @@
           '';
           outputHashMode = "recursive";
           outputHashAlgo = "sha256";
-          outputHash = "sha256-g2/4OvBEUWpQyYUf1iHNCdca8Aa6zpPKp/51pYMmU7s=";
+          outputHash = "sha256-1S62Kyy4FxPmUZO+Pfhl7J5Rfa5VPbpX+B9s78JqM6A=";
         };
       in {
         packages.renpy7-fhs-libs = renpy7-fhs-libs;

@@ -338,7 +338,7 @@ test "Sandboxie.launch: relative exe overflowing the join buffer fails cleanly" 
     var env = try test_env.TestEnv.init(testing.allocator, "sbie-launch-long");
     defer env.deinit();
     var sb = Sandboxie{ .start_exe = "C:\\SB\\Start.exe", .alloc = testing.allocator, .io = env.io };
-    const long_exe = "x" ** 1100 ++ ".exe";
+    const long_exe = &@as([1100]u8, @splat('x')) ++ ".exe";
     try testing.expectError(errs.Error.LaunchFailed, sb.launch(testing.allocator, .{
         .sandbox_home = "",
         .install_path = env.root,

@@ -11,10 +11,7 @@
 
 const std = @import("std");
 
-const c = @cImport({
-    @cInclude("archive.h");
-    @cInclude("archive_entry.h");
-});
+const c = @import("c");
 
 pub const Error = error{
     /// libarchive returned ARCHIVE_FATAL during open / read header /

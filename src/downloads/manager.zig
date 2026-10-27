@@ -878,8 +878,8 @@ fn jobStatusToString(s: dom.JobStatus) []const u8 {
 }
 
 fn jobStatusFromString(s: []const u8) dom.JobStatus {
-    inline for (@typeInfo(dom.JobStatus).@"enum".fields) |f| {
-        if (std.mem.eql(u8, s, f.name)) return @field(dom.JobStatus, f.name);
+    inline for (comptime std.meta.fieldNames(dom.JobStatus)) |name| {
+        if (std.mem.eql(u8, s, name)) return @field(dom.JobStatus, name);
     }
     return .queued;
 }

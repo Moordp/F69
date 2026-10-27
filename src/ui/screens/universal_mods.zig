@@ -53,7 +53,7 @@ pub fn universalModsScreen(frame: *Frame) !bool {
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
         dvui.labelNoFmt(@src(), "Universal Mods", .{}, .{
             .gravity_y = 0.5,
-            .color_text = tokens.toDvui(t.ink, dvui.Color),
+            .color_text = .{ .color = tokens.toDvui(t.ink, dvui.Color) },
             .font = dvui.Font.theme(.title),
         });
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 10, .h = 1 } });
@@ -61,7 +61,7 @@ pub fn universalModsScreen(frame: *Frame) !bool {
             var cb: [48]u8 = undefined;
             const cnt = std.fmt.bufPrint(&cb, "{d} mods \u{00b7} {d} engines", .{ mods.len, engines_present }) catch "";
             const mono = dvui.Font.theme(.mono);
-            dvui.labelNoFmt(@src(), cnt, .{}, .{ .gravity_y = 0.5, .color_text = style.labelDim(), .font = mono.withSize(mono.size * 0.85) });
+            dvui.labelNoFmt(@src(), cnt, .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = style.labelDim() }, .font = mono.withSize(mono.size * 0.85) });
         }
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
         if (components.iconButton(@src(), "Add universal mod", entypo.plus, .{ .style = .highlight, .gravity_y = 0.5, .tag = "mod-add" })) {
@@ -109,7 +109,7 @@ fn modGroupHeader(label: []const u8, n: usize) void {
     const mono = dvui.Font.theme(.mono);
     dvui.labelNoFmt(@src(), s, .{}, .{
         .id_extra = @intFromPtr(label.ptr),
-        .color_text = style.labelDim(),
+        .color_text = .{ .color = style.labelDim() },
         .font = mono.withSize(mono.size * 0.8),
         .padding = .{ .x = 2, .y = 10, .w = 0, .h = 4 },
     });
@@ -127,11 +127,11 @@ fn renderModCard(frame: *Frame, m: library.UniversalMod) bool {
         .expand = .horizontal,
         .background = true,
         .border = style.border_thin,
-        .corner_radius = style.corner_radius,
+        .corners = style.corner_radius,
         .padding = .{ .x = 12, .y = 10, .w = 12, .h = 10 },
         .margin = .{ .x = 0, .y = 0, .w = 0, .h = 8 },
-        .color_fill = style.cardFill(),
-        .color_border = style.borderColor(),
+        .color_fill = .{ .color = style.cardFill() },
+        .color_border = .{ .color = style.borderColor() },
     });
     defer card.deinit();
 
@@ -148,7 +148,7 @@ fn renderModCard(frame: *Frame, m: library.UniversalMod) bool {
         .gravity_y = 0.5,
         .min_size_content = .{ .w = 72, .h = 1 },
         .padding = .{ .x = 6, .y = 2, .w = 6, .h = 2 },
-        .corner_radius = .all(3),
+        .corners = .all(3),
     });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 12, .h = 1 } });
 
@@ -158,12 +158,12 @@ fn renderModCard(frame: *Frame, m: library.UniversalMod) bool {
         defer col.deinit();
         const name = if (m.name.len > 0) m.name else "(unnamed mod)";
         dvui.labelNoFmt(@src(), name, .{}, .{
-            .color_text = tokens.toDvui(if (m.enabled) t.ink else t.ink3, dvui.Color),
+            .color_text = .{ .color = tokens.toDvui(if (m.enabled) t.ink else t.ink3, dvui.Color) },
             .font = dvui.Font.theme(.title).withSize(dvui.Font.theme(.title).size * 0.88),
         });
         const mono = dvui.Font.theme(.mono);
         dvui.labelNoFmt(@src(), m.modfile_path, .{}, .{
-            .color_text = style.labelDim(),
+            .color_text = .{ .color = style.labelDim() },
             .font = mono.withSize(mono.size * 0.82),
         });
     }
@@ -182,10 +182,10 @@ fn renderModCard(frame: *Frame, m: library.UniversalMod) bool {
         const mono = dvui.Font.theme(.mono);
         var ab: [40]u8 = undefined;
         const act_s = std.fmt.bufPrint(&ab, "active on {d}", .{active}) catch "";
-        dvui.labelNoFmt(@src(), act_s, .{}, .{ .gravity_x = 1.0, .color_text = tokens.toDvui(t.ink2, dvui.Color), .font = mono.withSize(mono.size * 0.82) });
+        dvui.labelNoFmt(@src(), act_s, .{}, .{ .gravity_x = 1.0, .color_text = .{ .color = tokens.toDvui(t.ink2, dvui.Color) }, .font = mono.withSize(mono.size * 0.82) });
         var ob: [40]u8 = undefined;
         const out_s = std.fmt.bufPrint(&ob, "{d} opted out", .{opted_out}) catch "";
-        dvui.labelNoFmt(@src(), out_s, .{}, .{ .gravity_x = 1.0, .color_text = style.labelDim(), .font = mono.withSize(mono.size * 0.76) });
+        dvui.labelNoFmt(@src(), out_s, .{}, .{ .gravity_x = 1.0, .color_text = .{ .color = style.labelDim() }, .font = mono.withSize(mono.size * 0.76) });
     }
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 12, .h = 1 } });
 
@@ -195,7 +195,7 @@ fn renderModCard(frame: *Frame, m: library.UniversalMod) bool {
         const opts: dvui.Options = if (m.enabled)
             .{ .id_extra = id_extra, .style = .highlight, .gravity_y = 0.5 }
         else
-            .{ .id_extra = id_extra, .style = .control, .gravity_y = 0.5, .color_text = tokens.toDvui(t.ink3, dvui.Color) };
+            .{ .id_extra = id_extra, .style = .control, .gravity_y = 0.5, .color_text = .{ .color = tokens.toDvui(t.ink3, dvui.Color) } };
         if (style.button(@src(), lbl, .{}, opts)) {
             frame.lib.setUniversalModEnabled(m.id, !m.enabled) catch {};
         }
@@ -207,7 +207,7 @@ fn renderModCard(frame: *Frame, m: library.UniversalMod) bool {
         const apply_opts: dvui.Options = if (m.enabled)
             .{ .id_extra = id_extra, .gravity_y = 0.5 }
         else
-            .{ .id_extra = id_extra, .gravity_y = 0.5, .style = .control, .color_text = tokens.toDvui(t.ink3, dvui.Color) };
+            .{ .id_extra = id_extra, .gravity_y = 0.5, .style = .control, .color_text = .{ .color = tokens.toDvui(t.ink3, dvui.Color) } };
         if (components.iconButton(@src(), "Apply", entypo.cycle, apply_opts) and m.enabled) {
             actions.applyUniversalMod(frame, m.id, m.engine, m.modfile_path);
         }
@@ -258,7 +258,7 @@ fn renderAddSlideover(frame: *Frame) void {
     components.settingsHelpText("Applies to every game of the chosen engine. Turn it off for a specific game from that game's detail page.");
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 12 } });
 
-    dvui.labelNoFmt(@src(), "Name", .{}, .{ .color_text = style.labelDim() });
+    dvui.labelNoFmt(@src(), "Name", .{}, .{ .color_text = .{ .color = style.labelDim() } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 4 } });
     const te = style.textEntry(@src(), .{
         .text = .{ .buffer = &state.universal_mod_name_buf },
@@ -267,7 +267,7 @@ fn renderAddSlideover(frame: *Frame) void {
     te.deinit();
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 12 } });
 
-    dvui.labelNoFmt(@src(), "Engine", .{}, .{ .color_text = style.labelDim() });
+    dvui.labelNoFmt(@src(), "Engine", .{}, .{ .color_text = .{ .color = style.labelDim() } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 4 } });
     _ = style.dropdown(@src(), &ENGINE_LABELS, .{ .choice = &state.universal_mod_engine_idx }, .{}, .{
         .min_size_content = .{ .w = 200, .h = 28 },
