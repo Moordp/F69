@@ -48,6 +48,23 @@ pub const ScrapedThread = struct {
     /// Capped at `thread.MAX_SCREENSHOTS` per game.
     screenshots: []const []const u8 = &.{},
     download_links: []const DownloadLink = &.{},
+    /// Raw per-link catalogue of the OP's download region (see
+    /// `dl_scan.zig`). Owned; free with `dl_scan.freeRecords`.
+    dl_records: []const DlRecord = &.{},
+};
+
+/// One link from the OP's download region, exactly as the page had it.
+/// Meaning (host, platform, part, extra/mod) is derived later by
+/// `dl_classify.zig` from these fields.
+pub const DlRecord = struct {
+    href: []const u8,
+    text: []const u8,
+    /// Other text on the same line, e.g. "Win/Linux:".
+    lead: []const u8,
+    /// Last few link-free lines above, '\n'-joined.
+    ctx: []const u8,
+    spoiler: u8 = 0,
+    line: u32 = 0,
 };
 
 pub const DownloadHost = enum {

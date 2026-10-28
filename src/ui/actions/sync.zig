@@ -471,6 +471,9 @@ fn syncWorker(job: *SyncJob) void {
     if (scraped.changelog_md) |c| p.changelog_md = @constCast(c);
     if (scraped.reviews_md) |r| p.reviews_md = @constCast(r);
     if (scraped.downloads_md) |d| p.downloads_md = @constCast(d);
+    // Zero records usually means a parse miss or a login redirect, not a
+    // game with no downloads — keep the old catalogue in that case.
+    if (scraped.dl_records.len > 0) p.dl_records = scraped.dl_records;
     if (scraped.download_links.len > 0) {
         p.download_links = encodeDownloadLinks(job.alloc, scraped.download_links) catch null;
         // Encoded copy lives on the job; free the source list now.
@@ -1252,6 +1255,21 @@ fn invalidateCachesForJob(frame: *Frame, job: *SyncJob) void {
 /// Free every payload-owned heap allocation. Called from both
 /// handlers right before drainBackgroundJob destroys the carrier.
 /// Idempotent — every field is null-checked.
+/// Persist the scraped download-link catalogue. Best-effort: a failure is
+/// logged and the sync itself still succeeds (the old catalogue stays).
+fn storeDownloadCatalogue(frame: *Frame, thread_id: u64, recs: ?[]const f95.DlRecord, now_s: i64) void {
+    const list = recs orelse return;
+    const alloc = frame.lib.alloc;
+    const rows = alloc.alloc(library.DownloadSource, list.len) catch return;
+    defer alloc.free(rows);
+    for (list, rows) |r, *row| {
+        row.* = .{ .href = r.href, .text = r.text, .lead = r.lead, .ctx = r.ctx, .spoiler = r.spoiler, .line = r.line };
+    }
+    frame.lib.replaceDownloadSources(thread_id, rows, now_s) catch |e| {
+        log.warn("download catalogue for {d} not saved: {s}", .{ thread_id, @errorName(e) });
+    };
+}
+
 fn freeSyncPayload(job: *SyncJob) void {
     const p = &job.payload;
     job.alloc.free(p.url);
@@ -1276,6 +1294,7 @@ fn freeSyncPayload(job: *SyncJob) void {
         for (dl) |d| job.alloc.free(d);
         job.alloc.free(dl);
     }
+    if (p.dl_records) |r| f95.dl_scan.freeRecords(job.alloc, r);
 }
 
 fn onSyncFailed(frame: *Frame, job: *SyncJob) void {
@@ -1413,6 +1432,8 @@ fn onSyncDone(frame: *Frame, job: *SyncJob) void {
         freeSyncPayload(job);
         return;
     };
+
+    storeDownloadCatalogue(frame, game.f95_thread_id, p.dl_records, now_s);
 
     // The scrape edited this game's fields IN PLACE (name/status/version/…)
     // without replacing the `games` slice, so bump game_edit_gen to

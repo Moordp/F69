@@ -34,6 +34,7 @@ pub const CensoredState = dom.CensoredState;
 pub const SandboxOverride = dom.SandboxOverride;
 pub const SavesPaths = dom.SavesPaths;
 pub const PlaySession = dom.PlaySession;
+pub const DownloadSource = dom.DownloadSource;
 pub const errors = errs;
 
 pub const Library = struct {
@@ -1392,6 +1393,82 @@ pub const Library = struct {
         return out.toOwnedSlice(self.alloc) catch return errs.Error.OutOfMemory;
     }
 
+    // ----- download catalogue -----
+
+    /// Replace a game's catalogued download links with `links` (page
+    /// order). One transaction, so a failed write keeps the old list. An
+    /// empty `links` clears the game's catalogue.
+    pub fn replaceDownloadSources(
+        self: *Library,
+        game_thread_id: u64,
+        links: []const DownloadSource,
+        now_s: i64,
+    ) errs.Error!void {
+        const tid: i64 = @intCast(game_thread_id);
+        self.beginTx() catch return self.dbFail();
+        errdefer self.rollbackTx() catch {};
+        self.conn.inner.exec("DELETE FROM download_sources WHERE game_thread_id = ?", .{tid}) catch return self.dbFail();
+        for (links, 0..) |l, i| {
+            self.conn.inner.exec(
+                \\INSERT INTO download_sources
+                \\  (game_thread_id, ord, href, text, lead, ctx, spoiler, line, scraped_at)
+                \\VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ,
+                .{ tid, @as(i64, @intCast(i)), l.href, l.text, l.lead, l.ctx, @as(i64, l.spoiler), @as(i64, l.line), now_s },
+            ) catch return self.dbFail();
+        }
+        self.commitTx() catch return self.dbFail();
+    }
+
+    /// A game's catalogued links in page order. Free with
+    /// `freeDownloadSources`.
+    pub fn listDownloadSources(self: *Library, game_thread_id: u64) errs.Error![]DownloadSource {
+        var rows = self.conn.inner.rows(
+            \\SELECT href, text, lead, ctx, spoiler, line
+            \\FROM download_sources WHERE game_thread_id = ? ORDER BY ord
+        ,
+            .{@as(i64, @intCast(game_thread_id))},
+        ) catch return self.dbFail();
+        defer rows.deinit();
+
+        var out: std.ArrayList(DownloadSource) = .empty;
+        errdefer {
+            for (out.items) |l| freeDownloadSourceFields(self.alloc, l);
+            out.deinit(self.alloc);
+        }
+        while (rows.next()) |r| {
+            const href = self.alloc.dupe(u8, r.text(0)) catch return errs.Error.OutOfMemory;
+            errdefer self.alloc.free(href);
+            const text = self.alloc.dupe(u8, r.text(1)) catch return errs.Error.OutOfMemory;
+            errdefer self.alloc.free(text);
+            const lead = self.alloc.dupe(u8, r.text(2)) catch return errs.Error.OutOfMemory;
+            errdefer self.alloc.free(lead);
+            const ctx = self.alloc.dupe(u8, r.text(3)) catch return errs.Error.OutOfMemory;
+            errdefer self.alloc.free(ctx);
+            out.append(self.alloc, .{
+                .href = href,
+                .text = text,
+                .lead = lead,
+                .ctx = ctx,
+                .spoiler = @intCast(std.math.clamp(r.int(4), 0, 255)),
+                .line = @intCast(std.math.clamp(r.int(5), 0, std.math.maxInt(u32))),
+            }) catch return errs.Error.OutOfMemory;
+        }
+        return out.toOwnedSlice(self.alloc) catch return errs.Error.OutOfMemory;
+    }
+
+    pub fn freeDownloadSources(self: *Library, links: []DownloadSource) void {
+        for (links) |l| freeDownloadSourceFields(self.alloc, l);
+        self.alloc.free(links);
+    }
+
+    fn freeDownloadSourceFields(alloc: std.mem.Allocator, l: DownloadSource) void {
+        alloc.free(l.href);
+        alloc.free(l.text);
+        alloc.free(l.lead);
+        alloc.free(l.ctx);
+    }
+
     pub fn freePlaySessions(self: *Library, sessions: []dom.PlaySession) void {
         for (sessions) |*s| freePlaySessionFields(self.alloc, s);
         self.alloc.free(sessions);
@@ -1822,6 +1899,27 @@ const migrations = [_]Migration{
         // Deliberately NOT in upsertGame's column list, so a metadata sync's
         // ON CONFLICT DO UPDATE leaves it untouched.
         \\ALTER TABLE games ADD COLUMN save_path_override TEXT;
+        ,
+    },
+    .{
+        .id = 24,
+        .sql =
+        // Raw catalogue of every link in a thread's download region, one
+        // row per link in page order (`ord`). Replaced wholesale on each
+        // scrape; nothing else references it. Meaning is derived at read
+        // time, so the classifier can improve without a re-scrape.
+        \\CREATE TABLE IF NOT EXISTS download_sources (
+        \\  game_thread_id INTEGER NOT NULL,
+        \\  ord            INTEGER NOT NULL,
+        \\  href           TEXT NOT NULL,
+        \\  text           TEXT NOT NULL DEFAULT '',
+        \\  lead           TEXT NOT NULL DEFAULT '',
+        \\  ctx            TEXT NOT NULL DEFAULT '',
+        \\  spoiler        INTEGER NOT NULL DEFAULT 0,
+        \\  line           INTEGER NOT NULL DEFAULT 0,
+        \\  scraped_at     INTEGER NOT NULL DEFAULT 0,
+        \\  PRIMARY KEY (game_thread_id, ord)
+        \\);
         ,
     },
 };
@@ -2423,6 +2521,43 @@ test "library: upsert + list + getGame round-trip" {
     } else {
         return error.MissingGame;
     }
+}
+
+test "library: download catalogue replaces wholesale and keeps order" {
+    var lib = try Library.open(std.testing.allocator, ":memory:");
+    defer lib.close();
+
+    const first = [_]DownloadSource{
+        .{ .href = "https://mega.nz/a", .text = "MEGA", .lead = "Win:", .ctx = "Chapter 3", .spoiler = 0, .line = 0 },
+        .{ .href = "https://pixeldrain.com/u/b", .text = "", .lead = "", .ctx = "", .spoiler = 2, .line = 1 },
+    };
+    try lib.replaceDownloadSources(42, &first, 100);
+    try lib.replaceDownloadSources(7, first[0..1], 100);
+
+    const got = try lib.listDownloadSources(42);
+    defer lib.freeDownloadSources(got);
+    try std.testing.expectEqual(@as(usize, 2), got.len);
+    try std.testing.expectEqualStrings("https://mega.nz/a", got[0].href);
+    try std.testing.expectEqualStrings("Chapter 3", got[0].ctx);
+    try std.testing.expectEqual(@as(u8, 2), got[1].spoiler);
+    try std.testing.expectEqual(@as(u32, 1), got[1].line);
+
+    // A re-scrape replaces the list; other games are untouched.
+    try lib.replaceDownloadSources(42, first[1..], 200);
+    const again = try lib.listDownloadSources(42);
+    defer lib.freeDownloadSources(again);
+    try std.testing.expectEqual(@as(usize, 1), again.len);
+    try std.testing.expectEqualStrings("https://pixeldrain.com/u/b", again[0].href);
+
+    const other = try lib.listDownloadSources(7);
+    defer lib.freeDownloadSources(other);
+    try std.testing.expectEqual(@as(usize, 1), other.len);
+
+    // Empty clears.
+    try lib.replaceDownloadSources(42, &.{}, 300);
+    const none = try lib.listDownloadSources(42);
+    defer lib.freeDownloadSources(none);
+    try std.testing.expectEqual(@as(usize, 0), none.len);
 }
 
 test "library: migration 16 — play_sessions table exists" {

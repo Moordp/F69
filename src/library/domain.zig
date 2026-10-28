@@ -365,6 +365,19 @@ pub const UniversalMod = struct {
     enabled: bool = true,
 };
 
+/// One catalogued download link for a game, as scraped (see
+/// `f95/dl_scan.zig`). Raw fields only — what a link *is* gets worked out
+/// at read time by `f95/dl_classify.zig`.
+pub const DownloadSource = struct {
+    href: []const u8,
+    text: []const u8,
+    lead: []const u8,
+    /// Link-free lines above the link, '\n'-joined.
+    ctx: []const u8,
+    spoiler: u8 = 0,
+    line: u32 = 0,
+};
+
 pub const PlaySession = struct {
     id: i64,
     game_thread_id: u64,

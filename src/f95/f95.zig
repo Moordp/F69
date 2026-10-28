@@ -11,6 +11,7 @@ pub const ScrapedThread = dom.ScrapedThread;
 pub const DownloadHost = dom.DownloadHost;
 pub const DownloadLink = dom.DownloadLink;
 pub const BookmarkEntry = dom.BookmarkEntry;
+pub const DlRecord = dom.DlRecord;
 
 pub const Client = cli.Client;
 /// Login/session parsing. Exposed so the test suite can exercise the pure
@@ -36,6 +37,9 @@ pub const tags = @import("tags.zig");
 /// short-lived signed URL. Caller frees the returned slice.
 pub const donor_ddl = @import("donor_ddl.zig");
 pub const rss = @import("rss.zig");
+/// Raw download-link scanner + classifier (catalogue of every link in the OP's download region).
+pub const dl_scan = @import("dl_scan.zig");
+pub const dl_classify = @import("dl_classify.zig");
 /// `/watched/threads?tab=new` feed parser (old → new version per row).
 pub const newfeed = @import("newfeed.zig");
 
@@ -48,6 +52,8 @@ test {
     _ = @import("bookmarks.zig");
     _ = @import("client.zig");
     _ = @import("domain.zig");
+    _ = @import("dl_classify.zig");
+    _ = @import("dl_scan.zig");
     _ = @import("donor_ddl.zig");
     _ = @import("errors.zig");
     _ = @import("newfeed.zig");

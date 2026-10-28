@@ -9,6 +9,8 @@ const errs = @import("errors.zig");
 const domain = @import("domain.zig");
 const cli = @import("client.zig");
 const Client = cli.Client;
+const dl_scan = @import("dl_scan.zig");
+const dl_classify = @import("dl_classify.zig");
 
 const log = std.log.scoped(.f95_scrape);
 
@@ -89,6 +91,7 @@ pub fn scrape(client: *Client, alloc: std.mem.Allocator, url: []const u8) errs.E
     out.reviews_md = extractReviews(alloc, body) catch null;
     out.downloads_md = extractDownloadsSection(alloc, body) catch null;
     out.download_links = extractDownloadLinks(alloc, body) catch &.{};
+    out.dl_records = extractDlRecords(alloc, body) catch &.{};
     out.last_updated_at = extractLastUpdatedAt(body);
     out.thread_info_md = extractThreadInfo(alloc, body) catch null;
     // Re-derive the "Censored:" value from the formatted info block
@@ -292,6 +295,7 @@ fn freeScraped(alloc: std.mem.Allocator, s: *domain.ScrapedThread) void {
         for (s.screenshots) |u| alloc.free(u);
         alloc.free(s.screenshots);
     }
+    if (s.dl_records.len > 0) dl_scan.freeRecords(alloc, s.dl_records);
     if (s.download_links.len > 0) {
         for (s.download_links) |link| {
             alloc.free(link.url);
@@ -1890,6 +1894,29 @@ fn extractReviews(alloc: std.mem.Allocator, html: []const u8) !?[]u8 {
         return null;
     }
     return try buf.toOwnedSlice(alloc);
+}
+
+// ----- download catalogue -----
+
+/// Header words that open the OP's download region.
+const DL_REGION_HEADERS = [_][]const u8{
+    "DOWNLOAD", "Download", "Downloads", "Download Link", "Download Links", "DOWNLOADS",
+};
+
+/// Raw catalogue of every link from the first download heading to the
+/// end of the OP — deliberately NOT cut at the next section heading, so
+/// extras, mods and spoiler-folded old versions further down are kept.
+/// Without a recognisable heading the whole OP is scanned and only links
+/// that look like downloads survive. Caller frees with
+/// `dl_scan.freeRecords`.
+fn extractDlRecords(alloc: std.mem.Allocator, html: []const u8) ![]const domain.DlRecord {
+    const op = opBodyRange(html) orelse return &.{};
+    const start = locateHeaderRelaxed(op, &DL_REGION_HEADERS);
+    const recs = try dl_scan.scan(alloc, if (start) |s| op[s..] else op);
+    if (start != null) return recs;
+
+    // No heading: keep only links the classifier recognises as downloads.
+    return dl_scan.filter(alloc, recs, dl_classify.looksLikeDownload);
 }
 
 // ----- download links -----

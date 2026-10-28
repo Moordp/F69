@@ -2,6 +2,21 @@
 
 All notable, user-facing changes. Dates are YYYY-MM-DD.
 
+## [0.15.9] - 2026-10-28
+
+### Added
+- **Download link catalogue (groundwork for in-app downloads).** Every game
+  sync now saves each link found from the thread's Download heading to the end
+  of the first post, including links inside spoilers, F95 "masked" links
+  (`/masked/<host>/…`), hidden-host links and attachments. Each link is stored
+  raw, with the text on its line and the headings above it (stored in a new
+  `download_sources` table, one row per link). A separate classifier reads
+  host, platform (Win / Linux / Mac / Android), "Part N", extra / mod /
+  translation and compressed / unofficial from that text, so better rules apply
+  to saved links without re-syncing. Nothing in the UI uses the catalogue yet
+  and the Downloads tab is unchanged; the next step is resolving a link to a
+  real file URL at click time. A sync that finds no links keeps the old list.
+
 ## [0.15.8] - 2026-10-28
 
 ### Changed

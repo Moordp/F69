@@ -185,6 +185,10 @@ pub const SyncPayload = struct {
     /// Download link entries, each pre-formatted as
     /// `<host>\t<url>\t<label>`. Same lifetime as `tags`.
     download_links: ?[]const []const u8 = null,
+    /// Raw per-link catalogue of the OP's download region (null when the
+    /// scrape found none, or the job came from the indexer). Owned by the
+    /// job; stored by drainSync via `Library.replaceDownloadSources`.
+    dl_records: ?[]const f95.DlRecord = null,
     /// Set when phase == .failed; static string, not allocator-owned.
     err_name: ?[]const u8 = null,
     url: []u8,
