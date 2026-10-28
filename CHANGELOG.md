@@ -2,6 +2,18 @@
 
 All notable, user-facing changes. Dates are YYYY-MM-DD.
 
+## [0.15.14] - 2026-10-28
+
+### Fixed
+- **Game downloads and mods are split properly.** Sentences in the game
+  description (such as "Download patch from OP and apply it") no longer turn
+  game links into mod links, and nothing above the Download heading is read as
+  a label. "Patch only (v1 -> v2)" rows count as game updates, not mods.
+- Links to forum threads are typed from their own text ("Gallery Mod",
+  "Chinese Translation"), and each link now reports what it points at: a file,
+  a forum thread or post, a member profile, a dead host, or an unknown site.
+  Forum links are never offered as downloads.
+
 ## [0.15.13] - 2026-10-28
 
 ### Changed

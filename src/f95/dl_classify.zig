@@ -319,8 +319,89 @@ pub const Entry = struct {
     update_only: bool,
 };
 
+/// What a catalogued link points at. Mods, translations and extras are
+/// mostly forum links, not files: only `.file` can be downloaded directly.
+pub const Target = enum {
+    /// A file host (or an F95 archive attachment): downloadable.
+    file,
+    /// A thread or post on the F95 forum: open it, do not download it.
+    forum,
+    /// A member profile (credits, translators).
+    profile,
+    /// The host is gone.
+    dead,
+    /// Some site we do not know; open it in the browser.
+    other,
+};
+
+pub fn targetOf(e: Entry) Target {
+    return switch (e.host) {
+        .f95_thread => .forum,
+        .dead => .dead,
+        .other, .unknown, .f95_wrapped => .other,
+        else => .file,
+    };
+}
+
+pub const ForumRefKind = enum { thread, post, member };
+
+pub const ForumRef = struct {
+    kind: ForumRefKind,
+    id: u64,
+};
+
+/// Parse an F95 forum link: `/threads/<slug>.<id>/…`, `/posts/<id>/` or
+/// `/members/<slug>.<id>/`. Null for anything else.
+pub fn forumRef(href: []const u8) ?ForumRef {
+    if (parseHref(href).host != .f95_thread) return null;
+    const path_full = skipToPath(href);
+    const q = std.mem.indexOfAny(u8, path_full, "?#") orelse path_full.len;
+    const path = path_full[0..q];
+    const kinds = [_]struct { prefix: []const u8, kind: ForumRefKind }{
+        .{ .prefix = "/threads/", .kind = .thread },
+        .{ .prefix = "/posts/", .kind = .post },
+        .{ .prefix = "/members/", .kind = .member },
+    };
+    for (kinds) |k| {
+        if (!std.mem.startsWith(u8, path, k.prefix)) continue;
+        var seg = path[k.prefix.len..];
+        if (std.mem.indexOfScalar(u8, seg, '/')) |e| seg = seg[0..e];
+        // "<slug>.<id>" for threads and members, bare "<id>" for posts.
+        const num = if (std.mem.lastIndexOfScalar(u8, seg, '.')) |d| seg[d + 1 ..] else seg;
+        const id = std.fmt.parseInt(u64, num, 10) catch return null;
+        return .{ .kind = k.kind, .id = id };
+    }
+    return null;
+}
+
 /// Longest heading/label line still treated as a label.
 const MAX_LABEL_LINE: usize = 48;
+
+/// True for a short heading-like line, false for a sentence, a bullet or a
+/// numbered instruction ("2. Download patch from OP and apply it.").
+fn isHeadingLine(line: []const u8) bool {
+    const t = std.mem.trim(u8, line, " \t");
+    if (t.len == 0 or t.len > MAX_LABEL_LINE) return false;
+    if (t[0] == '-' or t[0] == '*' or t[0] == '>') return false;
+    if (t.len > 1 and std.ascii.isDigit(t[0]) and (t[1] == '.' or t[1] == ')')) return false;
+    // A full stop followed by a space or the end is a sentence end;
+    // "v0.15" and "Ep.10" keep their dots.
+    for (t, 0..) |ch, i| {
+        if (ch == '.' and (i + 1 == t.len or t[i + 1] == ' ')) return false;
+    }
+    var words: usize = 0;
+    var it = std.mem.tokenizeScalar(u8, t, ' ');
+    while (it.next()) |_| words += 1;
+    return words <= 7;
+}
+
+/// The "Download" heading that opens the download area. Everything above
+/// it is the game description, not a label for the links below.
+fn isDownloadBoundary(line: []const u8) bool {
+    const t = std.mem.trim(u8, line, " \t:*");
+    return std.ascii.eqlIgnoreCase(t, "download") or std.ascii.eqlIgnoreCase(t, "downloads") or
+        std.ascii.eqlIgnoreCase(t, "download links");
+}
 
 fn containsWord(hay: []const u8, word: []const u8) bool {
     var from: usize = 0;
@@ -397,7 +478,8 @@ fn kindOf(text: []const u8) Kind {
 fn updateOnlyOf(text: []const u8) bool {
     return std.ascii.findIgnoreCase(text, "update only") != null or
         std.ascii.findIgnoreCase(text, "updated only") != null or
-        std.ascii.findIgnoreCase(text, "update-only") != null;
+        std.ascii.findIgnoreCase(text, "update-only") != null or
+        std.ascii.findIgnoreCase(text, "patch only") != null;
 }
 
 fn variantOf(text: []const u8) bool {
@@ -424,7 +506,10 @@ pub fn classify(href: []const u8, text: []const u8, lead: []const u8, ctx: []con
     var kind: Kind = kindOf(lead);
     var variant = variantOf(lead) or variantOf(text);
     var update_only = updateOnlyOf(lead) or updateOnlyOf(text);
-    if (kind == .game) kind = kindOf(text);
+    // The link text is more specific than a generic "Extras:" label, so
+    // "Gallery Mod" under "Extras:" is a mod.
+    const text_kind = kindOf(text);
+    if (kind == .game or (kind == .extra and text_kind != .game)) kind = text_kind;
 
     // Attachments that aren't archives are almost never the game itself.
     if (parsed.host == .f95_attachment and kind == .game and !isArchiveName(href)) kind = .extra;
@@ -433,7 +518,8 @@ pub fn classify(href: []const u8, text: []const u8, lead: []const u8, ctx: []con
     var steps: usize = 0;
     while (it.next()) |line| : (steps += 1) {
         if (steps >= 4) break;
-        if (line.len > MAX_LABEL_LINE) continue;
+        if (isDownloadBoundary(line)) break;
+        if (!isHeadingLine(line)) continue;
         // Extras and mods are not tied to the game's platform headings.
         if (!plat.any() and kind == .game) plat = platformOf(line);
         if (part == null) part = partOf(line);
@@ -441,6 +527,9 @@ pub fn classify(href: []const u8, text: []const u8, lead: []const u8, ctx: []con
         if (!variant) variant = variantOf(line);
         if (!update_only) update_only = updateOnlyOf(line);
     }
+
+    // "Patch only (v1 -> v2)" is the next game version, not a mod.
+    if (update_only and kind == .mod) kind = .game;
 
     // A link to another F95 thread is never a file: it points at a
     // companion thread (compressed build, port, mod, walkthrough).
@@ -617,4 +706,43 @@ test "classify: Win64, episodes, update-only, companion threads" {
     try testing.expect(!full.update_only);
     const th = classify("https://f95zone.to/threads/foo.12/", "COMPRESSED", "Others:", "DOWNLOAD");
     try testing.expectEqual(Kind.extra, th.kind);
+}
+
+test "classify: description sentences above Download do not make a game link a mod" {
+    const ctx = "2. Download patch from OP and apply it.\nDOWNLOAD";
+    const e = classify("https://gofile.io/d/x", "GOFILE", "Win:", ctx);
+    try testing.expectEqual(Kind.game, e.kind);
+    // Text above the Download heading is never read, even if it is short.
+    const above = classify("https://gofile.io/d/x", "GOFILE", "Win:", "Cheat Menu\nDOWNLOAD");
+    try testing.expectEqual(Kind.game, above.kind);
+    // A real section heading under Download still counts.
+    const sec = classify("https://gofile.io/d/x", "GOFILE", "Win:", "DOWNLOAD\nPatch");
+    try testing.expectEqual(Kind.mod, sec.kind);
+}
+
+test "forumRef and targetOf: mods are mostly forum links" {
+    const t = forumRef("https://f95zone.to/threads/anna-exciting-affection-mod.12345/post-9?x=1").?;
+    try testing.expectEqual(ForumRefKind.thread, t.kind);
+    try testing.expectEqual(@as(u64, 12345), t.id);
+    const po = forumRef("https://f95zone.to/posts/777/").?;
+    try testing.expectEqual(ForumRefKind.post, po.kind);
+    try testing.expectEqual(@as(u64, 777), po.id);
+    const m = forumRef("https://f95zone.to/members/some-dev.42/").?;
+    try testing.expectEqual(ForumRefKind.member, m.kind);
+    try testing.expect(forumRef("https://mega.nz/file/x") == null);
+    try testing.expect(forumRef("https://f95zone.to/threads/nodigits/") == null);
+
+    const mod = classify("https://f95zone.to/threads/x-mod.5/", "Gallery Mod", "Extras:", "DOWNLOAD");
+    try testing.expectEqual(Kind.mod, mod.kind);
+    try testing.expectEqual(Target.forum, targetOf(mod));
+    const game = classify("https://mega.nz/file/x", "MEGA", "Win:", "DOWNLOAD");
+    try testing.expectEqual(Target.file, targetOf(game));
+}
+
+test "classify: update-only patches are the game, not a mod" {
+    const e = classify("https://mega.nz/file/x", "MEGA", "Patch Only (v0.11 -> v0.12):", "DOWNLOAD");
+    try testing.expect(e.update_only);
+    try testing.expectEqual(Kind.game, e.kind);
+    const mod = classify("https://mega.nz/file/x", "MEGA", "Uncensor Patch:", "DOWNLOAD");
+    try testing.expectEqual(Kind.mod, mod.kind);
 }
