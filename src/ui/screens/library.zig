@@ -469,7 +469,7 @@ fn renderVirtualizedList(frame: *Frame, games: []const library.Game, query: []co
     const state = frame.state;
     actions.dbgResetCoverMisses(); // DIAG: count cover-cache misses this frame
 
-    const layout = if (state.view == .grid) gridLayout() else GridLayout{
+    const layout = if (state.view == .grid) gridLayout(state.lib_scroll_info.viewport.w, state_mod.GRID_COVER_SHAPES[state.grid_cover_shape].ratio) else GridLayout{
         .cols = 1,
         .card_w = 0,
         .card_h = 0,
@@ -1131,6 +1131,8 @@ const NON_GRID_WIDTH: f32 = 240.0;
 const GRID_SCROLLBAR_W: f32 = 14.0;
 
 const COVER_H_PER_W: f32 = 120.0 / 280.0;
+/// Card width minus the cover area width (card padding + border).
+const COVER_AREA_PAD_W: f32 = 12.0;
 
 const CARD_TEXT_CHROME_H: f32 = 50.0;
 
@@ -1141,20 +1143,24 @@ const GridLayout = struct {
     cover_h: f32,
 };
 
-fn gridLayout() GridLayout {
-    const win_w = dvui.windowRect().w;
-    const usable = @max(win_w - NON_GRID_WIDTH - GRID_SCROLLBAR_W, MIN_CARD_W + CARD_CHROME_W);
+/// `measured_w` is the grid scroll area's real width from the previous frame
+/// (`viewport.w`, already net of the scrollbar). Sizing from it keeps the row
+/// of cards exactly as wide as the area, so no card gets squeezed. Before the
+/// first layout it is 0 and the window-width estimate is used.
+fn gridLayout(measured_w: f32, cover_ratio: f32) GridLayout {
+    const estimate = dvui.windowRect().w - NON_GRID_WIDTH - GRID_SCROLLBAR_W;
+    const usable = @max(if (measured_w > 1) measured_w else estimate, MIN_CARD_W + CARD_CHROME_W);
 
     const slot_w_max = MAX_CARD_W + CARD_CHROME_W;
     var cols: usize = @intFromFloat(@ceil(usable / slot_w_max));
     if (cols < 1) cols = 1;
     if (cols > 12) cols = 12;
 
-    const slot_w = usable / @as(f32, @floatFromInt(cols));
+    const slot_w = @floor(usable / @as(f32, @floatFromInt(cols)));
     var card_w = slot_w - CARD_CHROME_W;
     if (card_w < MIN_CARD_W) card_w = MIN_CARD_W;
     if (card_w > MAX_CARD_W) card_w = MAX_CARD_W;
-    const cover_h = card_w * COVER_H_PER_W;
+    const cover_h = @round((card_w - COVER_AREA_PAD_W) / cover_ratio);
     const card_h = cover_h + CARD_TEXT_CHROME_H;
     return .{ .cols = cols, .card_w = card_w, .card_h = card_h, .cover_h = cover_h };
 }
@@ -2139,31 +2145,54 @@ fn truncEllipsis(buf: []u8, s: []const u8, max: usize) []const u8 {
     return buf[0 .. cut + 3];
 }
 
-const CoverFit = union(enum) {
-    cover_center: dvui.Rect,
-    cover_top: dvui.Rect,
-    fit_backdrop: void,
-    zoom_height: dvui.Rect,
-};
+/// Most of a cover's width (or height) a card may crop away. Past this the
+/// cover is shown smaller with dark bars instead, so a cover is never cut hard.
+/// 25% keeps at least 75% of the image for ~90% of an F95 library; see the
+/// 0.15.6 changelog entry.
+const MAX_COVER_CROP: f32 = 0.25;
 
-fn planCoverFit(source_aspect: f32, target_aspect: f32) CoverFit {
-    if (source_aspect <= 0 or target_aspect <= 0) {
-        return .{ .cover_center = .{ .w = 1, .h = 1 } };
-    }
+/// Crop rectangle (uv, 0..1) for showing a `source_aspect` image in a
+/// `target_aspect` area: crop toward the target shape, but by no more than
+/// `MAX_COVER_CROP`. The cropped region is then fitted inside the area (bars
+/// fill any difference). Wider covers are cropped at the sides, centered;
+/// taller ones top/bottom, biased to the top where faces and titles usually are.
+fn coverCropUv(source_aspect: f32, target_aspect: f32) dvui.Rect {
+    if (source_aspect <= 0 or target_aspect <= 0) return .{ .w = 1, .h = 1 };
     if (source_aspect >= target_aspect) {
-        const uv_w = target_aspect / source_aspect;
-        const uv_x = (1.0 - uv_w) * 0.5;
-        return .{ .cover_center = .{ .x = uv_x, .y = 0, .w = uv_w, .h = 1 } };
+        const keep = @max(target_aspect / source_aspect, 1.0 - MAX_COVER_CROP);
+        return .{ .x = (1.0 - keep) * 0.5, .y = 0, .w = keep, .h = 1 };
     }
-    if (source_aspect >= target_aspect * 0.75) {
-        const uv_h = source_aspect / target_aspect;
-        const uv_y = (1.0 - uv_h) * 0.2;
-        return .{ .cover_top = .{ .x = 0, .y = uv_y, .w = 1, .h = uv_h } };
-    }
-    if (source_aspect <= 1.0) {
-        return .{ .zoom_height = .{ .x = 0, .y = 0.1, .w = 1, .h = 0.8 } };
-    }
-    return .{ .fit_backdrop = {} };
+    const keep = @max(source_aspect / target_aspect, 1.0 - MAX_COVER_CROP);
+    return .{ .x = 0, .y = (1.0 - keep) * 0.2, .w = 1, .h = keep };
+}
+
+test "coverCropUv: crops toward the target but never past the limit" {
+    const t: f32 = 3.0;
+    // Slightly wider than the target (3.3:1): cropped exactly to 3:1, no bars.
+    const near = coverCropUv(3.3, t);
+    try std.testing.expectApproxEqAbs(t, 3.3 * near.w / near.h, 1e-3);
+    // Very wide banner (5.7:1): crop limited to 25%, centered, full height.
+    const wide = coverCropUv(5.7, t);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.75), wide.w, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), wide.h, 1e-5);
+    try std.testing.expectApproxEqAbs(wide.x * 2 + wide.w, @as(f32, 1), 1e-5);
+    // 16:9 in a 3:1 area: taller than the target, crop limited to 25% of the
+    // height, biased to the top.
+    const tall = coverCropUv(1.78, t);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), tall.w, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.75), tall.h, 1e-5);
+    try std.testing.expect(tall.y + tall.h <= 1.0 + 1e-5);
+    try std.testing.expect(tall.y < (1.0 - tall.h) * 0.5);
+    // Portrait: same limit.
+    const port = coverCropUv(0.7, t);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.75), port.h, 1e-5);
+    // Same shape as the target: no crop.
+    const same = coverCropUv(t, t);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), same.w, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), same.h, 1e-5);
+    // Bad input: no crop.
+    const bad = coverCropUv(0, t);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), bad.w * bad.h, 1e-5);
 }
 
 fn renderCardCover(bytes_opt: ?[]const u8, thread_id: u64, engine: library.Engine, status: library.DevStatus, layout: GridLayout) void {
@@ -2186,78 +2215,34 @@ fn renderCardCover(bytes_opt: ?[]const u8, thread_id: u64, engine: library.Engin
         const target_aspect = (layout.card_w - 12) / cover_h;
         const source_aspect = if (natural.h > 0) natural.w / natural.h else 16.0 / 9.0;
 
-        switch (planCoverFit(source_aspect, target_aspect)) {
-            .cover_center, .cover_top => |uv| {
-                _ = dvui.image(@src(), .{
-                    .source = source,
-                    .shrink = null,
-                    .uv = uv,
-                }, .{
-                    .id_extra = thread_id,
-                    .expand = .both,
-                    .min_size_content = .{ .w = 1, .h = 1 },
-                    .corners = style.corner_radius,
-                    .border = style.border_thin,
-                    .color_border = .{ .color = style.borderColor() },
-                });
-            },
-            .fit_backdrop => {
-                {
-                    var bg = dvui.box(@src(), .{ .dir = .vertical }, .{
-                        .id_extra = thread_id ^ 0xBD,
-                        .expand = .both,
-                        .gravity_x = 0.5,
-                        .min_size_content = .{ .w = 1, .h = 1 },
-                        .max_size_content = .{ .w = layout.card_w - 12, .h = cover_h },
-                        .background = true,
-                        .corners = style.corner_radius,
-                        .border = style.border_thin,
-                        .color_border = .{ .color = style.borderColor() },
-                        .color_fill = .{ .color = style.letterbox_fill },
-                    });
-                    bg.deinit();
-                }
-                _ = dvui.image(@src(), .{
-                    .source = source,
-                    .shrink = .ratio,
-                    .uv = .{ .w = 1, .h = 1 },
-                }, .{
-                    .id_extra = thread_id ^ 0xFE,
-                    .expand = .ratio,
-                    .gravity_x = 0.5,
-                    .gravity_y = 0.5,
-                    .min_size_content = .{ .w = natural.w, .h = natural.h },
-                });
-            },
-            .zoom_height => |uv| {
-                {
-                    var bg = dvui.box(@src(), .{ .dir = .vertical }, .{
-                        .id_extra = thread_id ^ 0xBD,
-                        .expand = .both,
-                        .gravity_x = 0.5,
-                        .min_size_content = .{ .w = 1, .h = 1 },
-                        .max_size_content = .{ .w = layout.card_w - 12, .h = cover_h },
-                        .background = true,
-                        .corners = style.corner_radius,
-                        .border = style.border_thin,
-                        .color_border = .{ .color = style.borderColor() },
-                        .color_fill = .{ .color = style.letterbox_fill },
-                    });
-                    bg.deinit();
-                }
-                _ = dvui.image(@src(), .{
-                    .source = source,
-                    .shrink = .ratio,
-                    .uv = uv,
-                }, .{
-                    .id_extra = thread_id ^ 0x77,
-                    .expand = .ratio,
-                    .gravity_x = 0.5,
-                    .gravity_y = 0.5,
-                    .min_size_content = .{ .w = natural.w, .h = natural.h * uv.h },
-                });
-            },
+        const uv = coverCropUv(source_aspect, target_aspect);
+        // Dark backing: shows as bars where the cropped cover does not fill the area.
+        {
+            var bg = dvui.box(@src(), .{ .dir = .vertical }, .{
+                .id_extra = thread_id ^ 0xBD,
+                .expand = .both,
+                .min_size_content = .{ .w = 1, .h = 1 },
+                .background = true,
+                .corners = style.corner_radius,
+                .border = style.border_thin,
+                .color_border = .{ .color = style.borderColor() },
+                .color_fill = .{ .color = style.letterbox_fill },
+            });
+            bg.deinit();
         }
+        // The cropped region, fitted inside the area keeping its aspect ratio.
+        _ = dvui.image(@src(), .{
+            .source = source,
+            .shrink = .ratio,
+            .uv = uv,
+        }, .{
+            .id_extra = thread_id ^ 0xFE,
+            .expand = .ratio,
+            .gravity_x = 0.5,
+            .gravity_y = 0.5,
+            .min_size_content = .{ .w = natural.w * uv.w, .h = natural.h * uv.h },
+        });
+        coverPreview(ov.data().borderRectScale().r, source, thread_id);
     } else {
         var slot = dvui.box(@src(), .{ .dir = .vertical }, .{
             .id_extra = thread_id,

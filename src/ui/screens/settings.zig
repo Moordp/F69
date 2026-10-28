@@ -752,10 +752,42 @@ fn renderListCoverSection(frame: *Frame) void {
     );
 }
 
+/// Shape of the cover area on grid-view cards.
+fn renderGridCoverSection(frame: *Frame) void {
+    const state = frame.state;
+    dvui.label(@src(), "Grid view covers", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        defer row.deinit();
+        dvui.label(@src(), "Cover shape:", .{}, .{ .gravity_y = 0.5 });
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
+        var labels: [state_mod.GRID_COVER_SHAPES.len][]const u8 = undefined;
+        inline for (state_mod.GRID_COVER_SHAPES, 0..) |sh, i| labels[i] = sh.label;
+        var picked: usize = state.grid_cover_shape;
+        if (style.dropdown(@src(), &labels, .{ .choice = &picked }, .{}, .{
+            .min_size_content = .{ .w = 220, .h = 28 },
+            .gravity_y = 0.5,
+        })) {
+            state.grid_cover_shape = @intCast(picked);
+        }
+    }
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 10 } });
+    components.settingsHelpText(
+        "Every card has the same cover size. Covers are cropped toward that shape, " ++
+            "but never by more than a quarter — the rest is shown with dark bars, so " ++
+            "less is cut off. A narrower shape (2 : 1) makes taller cards and shows more " ++
+            "of each cover; 3 : 1 makes shorter cards, so more fit on screen. Hover a " ++
+            "cover to see it whole.",
+    );
+}
+
 /// Library tab — portable paths, library statistics, mod section.
 fn renderSettingsLibrary(frame: *Frame) void {
     renderListCoverSection(frame);
     settingsSectionDivider(14);
+    renderGridCoverSection(frame);
+    settingsSectionDivider(15);
     dvui.label(@src(), "Paths", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     var row_id: u32 = 0;

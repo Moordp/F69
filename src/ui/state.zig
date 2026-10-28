@@ -139,6 +139,15 @@ pub const SortColumn = enum { name, rating, weighted, votes, last_updated, sync_
 pub const SortDir = enum { asc, desc };
 pub const LoginStatus = enum { unknown, logged_out, logged_in, logging_in, err };
 pub const View = enum { grid, list, kanban };
+
+/// Card cover shapes for the grid view (width : height of the cover area).
+pub const GridCoverShape = struct { label: []const u8, ratio: f32 };
+pub const GRID_COVER_SHAPES = [_]GridCoverShape{
+    .{ .label = "2 : 1", .ratio = 2.0 },
+    .{ .label = "2.5 : 1", .ratio = 2.5 },
+    .{ .label = "3 : 1 (wide)", .ratio = 3.0 },
+};
+pub const DEFAULT_GRID_COVER_SHAPE: u8 = 2;
 pub const Tab = enum { overview, changelog, downloads, tools, notes, guides, journal };
 
 /// Filter tabs for the Mods page. Each filters the master list of
@@ -850,6 +859,9 @@ pub const State = struct {
     /// Library list-view dvui.grid: resizable per-column widths (the grid
     /// mutates these on drag) + the grid's own scroll info (VirtualScroller).
     /// Columns: Name, Engine, Rating, Version, Updated.
+    /// Grid-view card cover shape: index into `GRID_COVER_SHAPES`. Persisted in
+    /// `lib_prefs`.
+    grid_cover_shape: u8 = DEFAULT_GRID_COVER_SHAPE,
     /// List-view cover shape: true = show the whole cover inside the slot
     /// (side bars), false = crop it to fill the slot. Persisted in `lib_prefs`.
     list_cover_fit: bool = true,

@@ -2,6 +2,26 @@
 
 All notable, user-facing changes. Dates are YYYY-MM-DD.
 
+## [0.15.6] - 2026-10-28
+
+### Changed
+- **Grid covers are cropped less.** Every card has the same fixed cover size.
+  A cover is cropped toward that shape by at most a quarter; the rest is shown
+  with dark bars. On a typical F95 library this keeps at least 75% of the image
+  for about 9 in 10 covers (it used to keep about 67% on average, and wide
+  banners lost far more). Very wide banners are still cropped at the sides,
+  centered.
+- **New setting: grid cover shape** (Settings → Library → *Grid view covers*):
+  2 : 1, 2.5 : 1 or 3 : 1 (default). A narrower shape makes taller cards that
+  show more of each cover.
+- **Hover a cover in the grid** to see it whole at a larger size.
+
+### Fixed
+- **Grid columns had different widths.** The last column could be narrower than
+  the rest, because the column sizes were worked out from a guessed sidebar
+  width. They now use the real width of the grid area, so all cards in a row
+  are the same size.
+
 ## [0.15.5] - 2026-10-28
 
 ### Changed
