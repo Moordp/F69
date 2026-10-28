@@ -772,12 +772,28 @@ fn renderGridCoverSection(frame: *Frame) void {
             state.grid_cover_shape = @intCast(picked);
         }
     }
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        defer row.deinit();
+        dvui.label(@src(), "Crop covers:", .{}, .{ .gravity_y = 0.5 });
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
+        var crop_labels: [state_mod.GRID_COVER_CROPS.len][]const u8 = undefined;
+        inline for (state_mod.GRID_COVER_CROPS, 0..) |c, i| crop_labels[i] = c.label;
+        var crop_picked: usize = state.grid_cover_crop;
+        if (style.dropdown(@src(), &crop_labels, .{ .choice = &crop_picked }, .{}, .{
+            .min_size_content = .{ .w = 220, .h = 28 },
+            .gravity_y = 0.5,
+        })) {
+            state.grid_cover_crop = @intCast(crop_picked);
+        }
+    }
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 10 } });
     components.settingsHelpText(
         "Every card has the same cover size. Covers are cropped toward that shape, " ++
-            "but never by more than a quarter — the rest is shown with dark bars, so " ++
-            "less is cut off. A narrower shape (2 : 1) makes taller cards and shows more " ++
-            "of each cover; 3 : 1 makes shorter cards, so more fit on screen.",
+            "but never by more than the Crop limit — the rest is shown with dark bars. " ++
+            "A narrower shape (2 : 1) makes taller cards and leaves smaller bars; " ++
+            "3 : 1 makes shorter cards, so more fit on screen.",
     );
 }
 

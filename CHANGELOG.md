@@ -2,6 +2,17 @@
 
 All notable, user-facing changes. Dates are YYYY-MM-DD.
 
+## [0.15.8] - 2026-10-28
+
+### Changed
+- **Grid covers are cropped much less.** The default crop limit dropped from
+  25% to 10%: a cover keeps at least 90% of its image (it was 75%), and more
+  of it is shown with dark bars instead. New setting: Settings → Library →
+  *Grid view covers* → **Crop covers** — None (whole cover), A little (up to
+  10%, default) or Some (up to 25%, the 0.15.6 look). The cover shape setting
+  (2 : 1 / 2.5 : 1 / 3 : 1) still controls the card shape; 2 : 1 makes the bars
+  smaller.
+
 ## [0.15.7] - 2026-10-28
 
 ### Changed

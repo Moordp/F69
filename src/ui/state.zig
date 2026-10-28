@@ -148,6 +148,16 @@ pub const GRID_COVER_SHAPES = [_]GridCoverShape{
     .{ .label = "3 : 1 (wide)", .ratio = 3.0 },
 };
 pub const DEFAULT_GRID_COVER_SHAPE: u8 = 2;
+
+/// How much of a cover a grid card may crop away before it shows dark bars
+/// instead (fraction of the cover's width or height).
+pub const GridCoverCrop = struct { label: []const u8, limit: f32 };
+pub const GRID_COVER_CROPS = [_]GridCoverCrop{
+    .{ .label = "None (whole cover)", .limit = 0.0 },
+    .{ .label = "A little (up to 10%)", .limit = 0.10 },
+    .{ .label = "Some (up to 25%)", .limit = 0.25 },
+};
+pub const DEFAULT_GRID_COVER_CROP: u8 = 1;
 pub const Tab = enum { overview, changelog, downloads, tools, notes, guides, journal };
 
 /// Filter tabs for the Mods page. Each filters the master list of
@@ -862,6 +872,8 @@ pub const State = struct {
     /// Grid-view card cover shape: index into `GRID_COVER_SHAPES`. Persisted in
     /// `lib_prefs`.
     grid_cover_shape: u8 = DEFAULT_GRID_COVER_SHAPE,
+    /// Grid-view max crop: index into `GRID_COVER_CROPS`. Persisted in `lib_prefs`.
+    grid_cover_crop: u8 = DEFAULT_GRID_COVER_CROP,
     /// List-view cover shape: true = show the whole cover inside the slot
     /// (side bars), false = crop it to fill the slot. Persisted in `lib_prefs`.
     list_cover_fit: bool = true,

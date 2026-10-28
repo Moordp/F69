@@ -469,7 +469,7 @@ fn renderVirtualizedList(frame: *Frame, games: []const library.Game, query: []co
     const state = frame.state;
     actions.dbgResetCoverMisses(); // DIAG: count cover-cache misses this frame
 
-    const layout = if (state.view == .grid) gridLayout(state.lib_scroll_info.viewport.w, state_mod.GRID_COVER_SHAPES[state.grid_cover_shape].ratio) else GridLayout{
+    const layout = if (state.view == .grid) gridLayout(state.lib_scroll_info.viewport.w, state_mod.GRID_COVER_SHAPES[state.grid_cover_shape].ratio, coverCropLimit(state)) else GridLayout{
         .cols = 1,
         .card_w = 0,
         .card_h = 0,
@@ -1141,13 +1141,19 @@ const GridLayout = struct {
     card_w: f32,
     card_h: f32,
     cover_h: f32,
+    /// Most of a cover a card may crop away (see `coverCropUv`).
+    max_crop: f32 = 0.10,
 };
+
+fn coverCropLimit(state: *const State) f32 {
+    return state_mod.GRID_COVER_CROPS[state.grid_cover_crop].limit;
+}
 
 /// `measured_w` is the grid scroll area's real width from the previous frame
 /// (`viewport.w`, already net of the scrollbar). Sizing from it keeps the row
 /// of cards exactly as wide as the area, so no card gets squeezed. Before the
 /// first layout it is 0 and the window-width estimate is used.
-fn gridLayout(measured_w: f32, cover_ratio: f32) GridLayout {
+fn gridLayout(measured_w: f32, cover_ratio: f32, max_crop: f32) GridLayout {
     const estimate = dvui.windowRect().w - NON_GRID_WIDTH - GRID_SCROLLBAR_W;
     const usable = @max(if (measured_w > 1) measured_w else estimate, MIN_CARD_W + CARD_CHROME_W);
 
@@ -1162,7 +1168,7 @@ fn gridLayout(measured_w: f32, cover_ratio: f32) GridLayout {
     if (card_w > MAX_CARD_W) card_w = MAX_CARD_W;
     const cover_h = @round((card_w - COVER_AREA_PAD_W) / cover_ratio);
     const card_h = cover_h + CARD_TEXT_CHROME_H;
-    return .{ .cols = cols, .card_w = card_w, .card_h = card_h, .cover_h = cover_h };
+    return .{ .cols = cols, .card_w = card_w, .card_h = card_h, .cover_h = cover_h, .max_crop = max_crop };
 }
 
 fn renderGridWindow(
@@ -1201,10 +1207,10 @@ const KANBAN_COL_W: f32 = 244.0;
 
 /// Card layout used inside a kanban column — full-width cards stacked
 /// vertically (reuses renderCard, so the cover/title/meta match grid view).
-fn kanbanCardLayout() GridLayout {
+fn kanbanCardLayout(max_crop: f32) GridLayout {
     const card_w: f32 = KANBAN_COL_W - 24.0; // column padding + scrollbar gutter
     const cover_h = card_w * COVER_H_PER_W;
-    return .{ .cols = 1, .card_w = card_w, .card_h = cover_h + CARD_TEXT_CHROME_H, .cover_h = cover_h };
+    return .{ .cols = 1, .card_w = card_w, .card_h = cover_h + CARD_TEXT_CHROME_H, .cover_h = cover_h, .max_crop = max_crop };
 }
 
 /// Kanban groups by the *player's* progress (CompletionStatus), not the
@@ -1225,7 +1231,7 @@ fn renderKanban(frame: *Frame, games: []const library.Game, filtered: []const u3
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .vertical });
     defer row.deinit();
 
-    const layout = kanbanCardLayout();
+    const layout = kanbanCardLayout(coverCropLimit(frame.state));
     for (KANBAN_ORDER) |st| {
         renderKanbanColumn(frame, games, filtered, st, layout);
     }
@@ -2145,54 +2151,64 @@ fn truncEllipsis(buf: []u8, s: []const u8, max: usize) []const u8 {
     return buf[0 .. cut + 3];
 }
 
-/// Most of a cover's width (or height) a card may crop away. Past this the
-/// cover is shown smaller with dark bars instead, so a cover is never cut hard.
-/// 25% keeps at least 75% of the image for ~90% of an F95 library; see the
-/// 0.15.6 changelog entry.
-const MAX_COVER_CROP: f32 = 0.25;
-
 /// Crop rectangle (uv, 0..1) for showing a `source_aspect` image in a
 /// `target_aspect` area: crop toward the target shape, but by no more than
-/// `MAX_COVER_CROP`. The cropped region is then fitted inside the area (bars
+/// `max_crop` (a fraction of the width or height; the user setting, default
+/// 10%). The cropped region is then fitted inside the area (bars
 /// fill any difference). Wider covers are cropped at the sides, centered;
 /// taller ones top/bottom, biased to the top where faces and titles usually are.
-fn coverCropUv(source_aspect: f32, target_aspect: f32) dvui.Rect {
+fn coverCropUv(source_aspect: f32, target_aspect: f32, max_crop: f32) dvui.Rect {
     if (source_aspect <= 0 or target_aspect <= 0) return .{ .w = 1, .h = 1 };
     if (source_aspect >= target_aspect) {
-        const keep = @max(target_aspect / source_aspect, 1.0 - MAX_COVER_CROP);
+        const keep = @max(target_aspect / source_aspect, 1.0 - max_crop);
         return .{ .x = (1.0 - keep) * 0.5, .y = 0, .w = keep, .h = 1 };
     }
-    const keep = @max(source_aspect / target_aspect, 1.0 - MAX_COVER_CROP);
+    const keep = @max(source_aspect / target_aspect, 1.0 - max_crop);
     return .{ .x = 0, .y = (1.0 - keep) * 0.2, .w = 1, .h = keep };
 }
 
 test "coverCropUv: crops toward the target but never past the limit" {
     const t: f32 = 3.0;
     // Slightly wider than the target (3.3:1): cropped exactly to 3:1, no bars.
-    const near = coverCropUv(3.3, t);
+    const near = coverCropUv(3.3, t, 0.25);
     try std.testing.expectApproxEqAbs(t, 3.3 * near.w / near.h, 1e-3);
     // Very wide banner (5.7:1): crop limited to 25%, centered, full height.
-    const wide = coverCropUv(5.7, t);
+    const wide = coverCropUv(5.7, t, 0.25);
     try std.testing.expectApproxEqAbs(@as(f32, 0.75), wide.w, 1e-5);
     try std.testing.expectApproxEqAbs(@as(f32, 1), wide.h, 1e-5);
     try std.testing.expectApproxEqAbs(wide.x * 2 + wide.w, @as(f32, 1), 1e-5);
     // 16:9 in a 3:1 area: taller than the target, crop limited to 25% of the
     // height, biased to the top.
-    const tall = coverCropUv(1.78, t);
+    const tall = coverCropUv(1.78, t, 0.25);
     try std.testing.expectApproxEqAbs(@as(f32, 1), tall.w, 1e-5);
     try std.testing.expectApproxEqAbs(@as(f32, 0.75), tall.h, 1e-5);
     try std.testing.expect(tall.y + tall.h <= 1.0 + 1e-5);
     try std.testing.expect(tall.y < (1.0 - tall.h) * 0.5);
     // Portrait: same limit.
-    const port = coverCropUv(0.7, t);
+    const port = coverCropUv(0.7, t, 0.25);
     try std.testing.expectApproxEqAbs(@as(f32, 0.75), port.h, 1e-5);
     // Same shape as the target: no crop.
-    const same = coverCropUv(t, t);
+    const same = coverCropUv(t, t, 0.25);
     try std.testing.expectApproxEqAbs(@as(f32, 1), same.w, 1e-5);
     try std.testing.expectApproxEqAbs(@as(f32, 1), same.h, 1e-5);
     // Bad input: no crop.
-    const bad = coverCropUv(0, t);
+    const bad = coverCropUv(0, t, 0.25);
     try std.testing.expectApproxEqAbs(@as(f32, 1), bad.w * bad.h, 1e-5);
+}
+
+test "coverCropUv: the limit setting controls how much is cropped" {
+    const t: f32 = 3.0;
+    // 5.7:1 banner at 10%: 90% of the width kept.
+    const little = coverCropUv(5.7, t, 0.10);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.90), little.w, 1e-5);
+    // 0%: the whole cover, never cropped (bars fill the rest).
+    const none_wide = coverCropUv(5.7, t, 0.0);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), none_wide.w * none_wide.h, 1e-5);
+    const none_tall = coverCropUv(1.78, t, 0.0);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), none_tall.w * none_tall.h, 1e-5);
+    // A cover only slightly off the target is still cropped exactly to it.
+    const near = coverCropUv(3.1, t, 0.10);
+    try std.testing.expectApproxEqAbs(t, 3.1 * near.w / near.h, 1e-3);
 }
 
 fn renderCardCover(bytes_opt: ?[]const u8, thread_id: u64, engine: library.Engine, status: library.DevStatus, layout: GridLayout) void {
@@ -2215,7 +2231,7 @@ fn renderCardCover(bytes_opt: ?[]const u8, thread_id: u64, engine: library.Engin
         const target_aspect = (layout.card_w - 12) / cover_h;
         const source_aspect = if (natural.h > 0) natural.w / natural.h else 16.0 / 9.0;
 
-        const uv = coverCropUv(source_aspect, target_aspect);
+        const uv = coverCropUv(source_aspect, target_aspect, layout.max_crop);
         // Dark backing: shows as bars where the cropped cover does not fill the area.
         {
             var bg = dvui.box(@src(), .{ .dir = .vertical }, .{

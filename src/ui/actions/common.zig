@@ -533,7 +533,7 @@ pub fn persistAutoCheckIfDirty(state: *State, path: []const u8, io: std.Io) void
 pub fn serializeLibPrefs(state: *const State, buf: []u8) []const u8 {
     const f = &state.filters;
     const rating_i: i64 = if (f.min_rating) |r| @intFromFloat(r * 100) else -1;
-    return std.fmt.bufPrint(buf, "{d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d}", .{
+    return std.fmt.bufPrint(buf, "{d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d}", .{
         @intFromEnum(state.view),
         @intFromEnum(state.sort_column),
         @intFromEnum(state.sort_dir),
@@ -546,6 +546,7 @@ pub fn serializeLibPrefs(state: *const State, buf: []u8) []const u8 {
         @as(u64, f.censored.bits.mask),
         @intFromBool(state.list_cover_fit),
         state.grid_cover_shape,
+        state.grid_cover_crop,
     }) catch buf[0..0];
 }
 
@@ -586,6 +587,9 @@ pub fn applyLibPrefs(state: *State, line: []const u8) void {
     if (nextInt(&it, u8)) |v| state.list_cover_fit = v != 0;
     if (nextInt(&it, u8)) |v| {
         if (v < state_mod.GRID_COVER_SHAPES.len) state.grid_cover_shape = v;
+    }
+    if (nextInt(&it, u8)) |v| {
+        if (v < state_mod.GRID_COVER_CROPS.len) state.grid_cover_crop = v;
     }
 }
 
@@ -1209,6 +1213,7 @@ test "lib prefs: list_cover_fit round-trips and old lines keep the default" {
     var st: State = .{};
     st.list_cover_fit = false;
     st.grid_cover_shape = 0;
+    st.grid_cover_crop = 0;
     var buf: [160]u8 = undefined;
     const line = serializeLibPrefs(&st, &buf);
 
@@ -1217,11 +1222,13 @@ test "lib prefs: list_cover_fit round-trips and old lines keep the default" {
     applyLibPrefs(&back, line);
     try std.testing.expect(!back.list_cover_fit);
     try std.testing.expectEqual(@as(u8, 0), back.grid_cover_shape);
+    try std.testing.expectEqual(@as(u8, 0), back.grid_cover_crop);
 
     // An out-of-range shape index is ignored.
     var bad: State = .{};
-    applyLibPrefs(&bad, "0 0 0 0 0 -1 0 0 0 0 1 99");
+    applyLibPrefs(&bad, "0 0 0 0 0 -1 0 0 0 0 1 99 99");
     try std.testing.expectEqual(state_mod.DEFAULT_GRID_COVER_SHAPE, bad.grid_cover_shape);
+    try std.testing.expectEqual(state_mod.DEFAULT_GRID_COVER_CROP, bad.grid_cover_crop);
 
     // A line saved before the field existed (10 tokens) leaves the default.
     var old: State = .{};
