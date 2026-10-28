@@ -2,6 +2,19 @@
 
 All notable, user-facing changes. Dates are YYYY-MM-DD.
 
+## [0.15.13] - 2026-10-28
+
+### Changed
+- **Download link classifier tuned on a real library (51,991 links).** It now
+  knows Krakenfiles, WDHO, Uploadnow, Files.fm, Yourfilestore, Bunkr and more
+  Mixdrop domains; reads "Win64", Episode / Chapter / Book / Volume labels and
+  "Update only" rows; marks dead hosts (Anonfile, Racaty) and F95's blanked
+  host placeholders (`deadhost`, `cancerads`); and no longer treats links to
+  other F95 threads as game files. Stored links are re-read on the fly, so no
+  re-sync is needed.
+- Screenshot links are no longer stored in the download catalogue.
+- New `docs/download-link-structures.md` describes the link layouts found.
+
 ## [0.15.12] - 2026-10-28
 
 ### Fixed

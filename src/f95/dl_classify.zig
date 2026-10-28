@@ -25,6 +25,15 @@ pub const Host = enum {
     onedrive,
     dropbox,
     one_fichier,
+    krakenfiles,
+    wdho,
+    uploadnow,
+    filesfm,
+    yourfilestore,
+    bunkr,
+    /// Hosts that no longer exist (Anonfile, Racaty): kept in the catalogue
+    /// so they can be shown as dead instead of silently dropped.
+    dead,
     f95_attachment,
     f95_thread,
     /// F95's own `/dl/…` wrapper — the real host is only known after the
@@ -53,6 +62,13 @@ pub const Host = enum {
             .onedrive => "OneDrive",
             .dropbox => "Dropbox",
             .one_fichier => "1fichier",
+            .krakenfiles => "Krakenfiles",
+            .wdho => "WDHO",
+            .uploadnow => "Uploadnow",
+            .filesfm => "Files.fm",
+            .yourfilestore => "Yourfilestore",
+            .bunkr => "Bunkr",
+            .dead => "Dead host",
             .f95_attachment => "F95 attachment",
             .f95_thread => "F95 thread",
             .f95_wrapped => "F95 link",
@@ -64,7 +80,7 @@ pub const Host = enum {
     /// True for hosts that serve a downloadable file (not an F95 page).
     pub fn isFileHost(self: Host) bool {
         return switch (self) {
-            .f95_thread, .f95_wrapped, .other, .unknown => false,
+            .f95_thread, .f95_wrapped, .other, .unknown, .dead => false,
             else => true,
         };
     }
@@ -104,6 +120,10 @@ const DOMAINS = [_]DomainRule{
     .{ .suffix = "mixdrop.to", .host = .mixdrop },
     .{ .suffix = "mixdrop.ps", .host = .mixdrop },
     .{ .suffix = "mixdrop.is", .host = .mixdrop },
+    .{ .suffix = "mixdrop.top", .host = .mixdrop },
+    .{ .suffix = "mixdrop.ch", .host = .mixdrop },
+    .{ .suffix = "mixdrop.bz", .host = .mixdrop },
+    .{ .suffix = "mxdrop.to", .host = .mixdrop },
     .{ .suffix = "vikingfile.com", .host = .vikingfile },
     .{ .suffix = "akirabox.com", .host = .akirabox },
     .{ .suffix = "akirabox.to", .host = .akirabox },
@@ -119,6 +139,18 @@ const DOMAINS = [_]DomainRule{
     .{ .suffix = "onedrive.live.com", .host = .onedrive },
     .{ .suffix = "dropbox.com", .host = .dropbox },
     .{ .suffix = "1fichier.com", .host = .one_fichier },
+    .{ .suffix = "krakenfiles.com", .host = .krakenfiles },
+    .{ .suffix = "wdho.ru", .host = .wdho },
+    .{ .suffix = "uploadnow.io", .host = .uploadnow },
+    .{ .suffix = "files.fm", .host = .filesfm },
+    .{ .suffix = "yourfilestore.com", .host = .yourfilestore },
+    .{ .suffix = "bunkr.ac", .host = .bunkr },
+    .{ .suffix = "bunkrrr.org", .host = .bunkr },
+    .{ .suffix = "bunkr.si", .host = .bunkr },
+    .{ .suffix = "anonfile.com", .host = .dead },
+    .{ .suffix = "anonfiles.com", .host = .dead },
+    .{ .suffix = "racaty.net", .host = .dead },
+    .{ .suffix = "racaty.io", .host = .dead },
 };
 
 /// Host part of an http(s) URL, lowercased into `buf`. Null when the URL
@@ -157,7 +189,9 @@ fn isF95Domain(domain: []const u8) bool {
 pub fn parseHref(href: []const u8) Parsed {
     var buf: [256]u8 = undefined;
     const domain = hostOf(href, &buf) orelse return .{ .host = .unknown, .wrapper = .none };
-    if (domain[0] == '*') return .{ .host = .unknown, .wrapper = .hidden };
+    // F95 swaps blacklisted hosts for placeholders: `deadhost` (gone) and
+    // `cancerads` (ad-injecting), as well as blanking with asterisks.
+    if (domain[0] == '*' or std.mem.eql(u8, domain, "deadhost") or std.mem.eql(u8, domain, "cancerads")) return .{ .host = .unknown, .wrapper = .hidden };
 
     if (std.mem.eql(u8, domain, "attachments.f95zone.to")) {
         return .{ .host = .f95_attachment, .wrapper = .none };
@@ -210,6 +244,15 @@ pub fn hostFromText(text: []const u8) ?Host {
         .{ .word = "mediafire", .host = .mediafire },
         .{ .word = "uploadhaven", .host = .uploadhaven },
         .{ .word = "drive", .host = .google_drive },
+        .{ .word = "krakenfile", .host = .krakenfiles },
+        .{ .word = "wdho", .host = .wdho },
+        .{ .word = "uploadnow", .host = .uploadnow },
+        .{ .word = "filesfm", .host = .filesfm },
+        .{ .word = "files.fm", .host = .filesfm },
+        .{ .word = "yourfilestore", .host = .yourfilestore },
+        .{ .word = "bunkr", .host = .bunkr },
+        .{ .word = "anonfile", .host = .dead },
+        .{ .word = "racaty", .host = .dead },
     };
     for (names) |n| {
         if (std.ascii.findIgnoreCase(text, n.word) != null) return n.host;
@@ -229,7 +272,7 @@ pub fn looksLikeDownload(href: []const u8) bool {
     };
 }
 
-fn isImageUrl(url: []const u8) bool {
+pub fn isImageUrl(url: []const u8) bool {
     const q = std.mem.indexOfAny(u8, url, "?#") orelse url.len;
     const path = url[0..q];
     const exts = [_][]const u8{ ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".avif" };
@@ -272,6 +315,8 @@ pub const Entry = struct {
     kind: Kind,
     /// "compressed" / "unofficial" / "remake" style variants.
     variant: bool,
+    /// Patch from the previous version, not the whole game.
+    update_only: bool,
 };
 
 /// Longest heading/label line still treated as a label.
@@ -289,8 +334,21 @@ fn containsWord(hay: []const u8, word: []const u8) bool {
     return false;
 }
 
+/// `word` immediately followed by digits ("Win64", "Win32"), as a whole word.
+fn containsWordDigits(hay: []const u8, word: []const u8) bool {
+    var from: usize = 0;
+    while (std.ascii.findIgnoreCasePos(hay, from, word)) |at| {
+        from = at + 1;
+        if (at > 0 and std.ascii.isAlphanumeric(hay[at - 1])) continue;
+        const end = at + word.len;
+        if (end < hay.len and std.ascii.isDigit(hay[end])) return true;
+    }
+    return false;
+}
+
 fn platformOf(text: []const u8) Platform {
     var p: Platform = .{};
+    if (containsWordDigits(text, "win")) p.windows = true;
     if (containsWord(text, "win") or containsWord(text, "windows") or containsWord(text, "pc")) p.windows = true;
     if (containsWord(text, "linux")) p.linux = true;
     if (containsWord(text, "mac") or containsWord(text, "macos") or containsWord(text, "osx")) p.mac = true;
@@ -298,12 +356,20 @@ fn platformOf(text: []const u8) Platform {
     return p;
 }
 
+/// 1-based number after "Part", "Episode", "Chapter", "Book" or "Volume".
+/// Episodic games label their downloads that way instead of "Part N".
 fn partOf(text: []const u8) ?u8 {
+    const keys = [_][]const u8{ "part", "episode", "chapter", "book", "volume" };
+    for (keys) |k| if (partAfter(text, k)) |n| return n;
+    return null;
+}
+
+fn partAfter(text: []const u8, key: []const u8) ?u8 {
     var from: usize = 0;
-    while (std.ascii.findIgnoreCasePos(text, from, "part")) |at| {
+    while (std.ascii.findIgnoreCasePos(text, from, key)) |at| {
         from = at + 1;
         if (at > 0 and std.ascii.isAlphanumeric(text[at - 1])) continue;
-        var j = at + 4;
+        var j = at + key.len;
         while (j < text.len and (text[j] == ' ' or text[j] == '.' or text[j] == '#')) : (j += 1) {}
         var n: u32 = 0;
         var digits: usize = 0;
@@ -321,9 +387,17 @@ fn kindOf(text: []const u8) Kind {
     for (translation) |w| if (containsWord(text, w)) return .translation;
     const mods = [_][]const u8{ "mod", "mods", "cheat", "cheats", "patch", "unlocker", "unlock", "gallery" };
     for (mods) |w| if (containsWord(text, w)) return .mod;
-    const extras = [_][]const u8{ "extra", "extras", "save", "saves", "wallpaper", "wallpapers", "walkthrough", "soundtrack", "ost", "map", "artbook", "bonus" };
+    const extras = [_][]const u8{ "extra", "extras", "save", "saves", "wallpaper", "wallpapers", "walkthrough", "soundtrack", "ost", "map", "artbook", "bonus", "others" };
     for (extras) |w| if (containsWord(text, w)) return .extra;
     return .game;
+}
+
+/// "Update only (v1 -> v2)": a patch for owners of the previous version,
+/// not a full download.
+fn updateOnlyOf(text: []const u8) bool {
+    return std.ascii.findIgnoreCase(text, "update only") != null or
+        std.ascii.findIgnoreCase(text, "updated only") != null or
+        std.ascii.findIgnoreCase(text, "update-only") != null;
 }
 
 fn variantOf(text: []const u8) bool {
@@ -349,6 +423,7 @@ pub fn classify(href: []const u8, text: []const u8, lead: []const u8, ctx: []con
     var part: ?u8 = partOf(lead);
     var kind: Kind = kindOf(lead);
     var variant = variantOf(lead) or variantOf(text);
+    var update_only = updateOnlyOf(lead) or updateOnlyOf(text);
     if (kind == .game) kind = kindOf(text);
 
     // Attachments that aren't archives are almost never the game itself.
@@ -364,7 +439,12 @@ pub fn classify(href: []const u8, text: []const u8, lead: []const u8, ctx: []con
         if (part == null) part = partOf(line);
         if (kind == .game) kind = kindOf(line);
         if (!variant) variant = variantOf(line);
+        if (!update_only) update_only = updateOnlyOf(line);
     }
+
+    // A link to another F95 thread is never a file: it points at a
+    // companion thread (compressed build, port, mod, walkthrough).
+    if (parsed.host == .f95_thread and kind == .game) kind = .extra;
 
     return .{
         .host = parsed.host,
@@ -373,6 +453,7 @@ pub fn classify(href: []const u8, text: []const u8, lead: []const u8, ctx: []con
         .part = part,
         .kind = kind,
         .variant = variant,
+        .update_only = update_only,
     };
 }
 
@@ -499,4 +580,41 @@ test "classify: link text names the platform; extras do not inherit it" {
     try testing.expect(a.platform.android and !a.platform.windows);
     const x = classify("https://mega.nz/x", "Wallpapers", "Extras:", "Win(Split):");
     try testing.expect(!x.platform.any());
+}
+
+test "classify: file hosts seen in real threads" {
+    try testing.expectEqual(Host.krakenfiles, parseHref("https://krakenfiles.com/view/abc/file.html").host);
+    try testing.expectEqual(Host.wdho, parseHref("https://wdho.ru/abc").host);
+    try testing.expectEqual(Host.mixdrop, parseHref("https://mxdrop.to/f/abc").host);
+    try testing.expectEqual(Host.mixdrop, parseHref("https://mixdrop.top/f/abc").host);
+    try testing.expectEqual(Host.dead, parseHref("https://anonfiles.com/abc").host);
+    // A look-alike of a real host is not that host.
+    try testing.expectEqual(Host.other, parseHref("https://vik1ngfile.site/f/abc").host);
+}
+
+test "classify: dead hosts hidden behind a blanked domain" {
+    const e = classify("https://deadhost/e7dfa7chvfet", "RACATY", "Win/Linux:", "DOWNLOAD");
+    try testing.expectEqual(Wrapper.hidden, e.wrapper);
+    try testing.expectEqual(Host.dead, e.host);
+    try testing.expect(!e.host.isFileHost());
+    const a = classify("https://*********/x.rar", "ANONFILE", "Win:", "DOWNLOAD");
+    try testing.expectEqual(Host.dead, a.host);
+    const c = classify("https://cancerads/abc", "BUZZHEAVIER", "Win:", "DOWNLOAD");
+    try testing.expectEqual(Wrapper.hidden, c.wrapper);
+    try testing.expectEqual(Host.buzzheavier, c.host);
+}
+
+test "classify: Win64, episodes, update-only, companion threads" {
+    const w = classify("https://gofile.io/d/x", "GOFILE", "Win64:", "DOWNLOAD");
+    try testing.expect(w.platform.windows);
+    const ep = classify("https://vikingfile.com/f/x", "VIKINGFILE", "Episode 16:", "DOWNLOAD");
+    try testing.expectEqual(@as(?u8, 16), ep.part);
+    const ch = classify("https://mega.nz/file/x", "MEGA", "Chapter 03:", "DOWNLOAD");
+    try testing.expectEqual(@as(?u8, 3), ch.part);
+    const up = classify("https://mega.nz/file/x", "MEGA", "Update only (v1.0 -> v1.1):", "DOWNLOAD");
+    try testing.expect(up.update_only);
+    const full = classify("https://mega.nz/file/x", "MEGA", "Win/Linux:", "DOWNLOAD");
+    try testing.expect(!full.update_only);
+    const th = classify("https://f95zone.to/threads/foo.12/", "COMPRESSED", "Others:", "DOWNLOAD");
+    try testing.expectEqual(Kind.extra, th.kind);
 }

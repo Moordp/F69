@@ -1909,10 +1909,17 @@ const DL_REGION_HEADERS = [_][]const u8{
 /// Without a recognisable heading the whole OP is scanned and only links
 /// that look like downloads survive. Caller frees with
 /// `dl_scan.freeRecords`.
+fn notImageLink(href: []const u8) bool {
+    return !dl_classify.isImageUrl(href);
+}
+
 fn extractDlRecords(alloc: std.mem.Allocator, html: []const u8) ![]const domain.DlRecord {
     const op = opBodyRange(html) orelse return &.{};
     const start = locateHeaderRelaxed(op, &DL_REGION_HEADERS);
-    const recs = try dl_scan.scan(alloc, if (start) |s| op[s..] else op);
+    const scanned = try dl_scan.scan(alloc, if (start) |s| op[s..] else op);
+    // Screenshots are linked from the same area; they are never downloads
+    // and were 38% of the stored rows.
+    const recs = try dl_scan.filter(alloc, scanned, notImageLink);
     if (start != null) return recs;
 
     // No heading: keep only links the classifier recognises as downloads.
