@@ -2,6 +2,14 @@
 
 All notable, user-facing changes. Dates are YYYY-MM-DD.
 
+## [0.15.12] - 2026-10-28
+
+### Fixed
+- **Sync could hang forever on one game.** A web request whose connection went
+  silent had no time limit, so "Sync all" stopped on that game and never
+  moved on. Every F95 request now gives up after 45 seconds (retried up to
+  3 times), then the sync continues with the next game.
+
 ## [0.15.11] - 2026-10-28
 
 ### Fixed

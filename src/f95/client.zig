@@ -36,6 +36,10 @@ pub const Client = struct {
     /// re-scanning the CA bundle per request (the per-client alternative)
     /// would be far costlier.
     http_lock: Io.Mutex = .init,
+    /// Longest one request may take, connect to last byte. `std.http.Client`
+    /// has no read timeout, so a connection that goes silent mid-request
+    /// blocked a sync forever (stuck on one game for 8+ minutes).
+    request_timeout_ms: u64 = 45_000,
 
     pub fn init(alloc: std.mem.Allocator, io: Io, rate_limit_ms: u64) Client {
         return .{
@@ -192,7 +196,7 @@ pub const Client = struct {
 
         self.http_lock.lockUncancelable(self.io);
         defer self.http_lock.unlock(self.io);
-        const result = self.http.fetch(.{
+        const result = self.fetchGuarded(.{
             .location = .{ .url = url },
             .response_writer = &aw.writer,
             .headers = .{ .user_agent = .{ .override = USER_AGENT } },
@@ -255,7 +259,7 @@ pub const Client = struct {
 
         self.http_lock.lockUncancelable(self.io);
         defer self.http_lock.unlock(self.io);
-        const result = self.http.fetch(.{
+        const result = self.fetchGuarded(.{
             .location = .{ .url = url },
             .method = .POST,
             .payload = body,
@@ -279,6 +283,43 @@ pub const Client = struct {
         const out = aw.toOwnedSlice() catch return errs.Error.OutOfMemory;
         log.debug("POST ok: {d} bytes from {s}", .{ out.len, url });
         return out;
+    }
+
+    const GuardEvent = union(enum) {
+        fetch: std.http.Client.FetchError!std.http.Client.FetchResult,
+        timer: Io.Cancelable!void,
+    };
+    const GuardError = std.http.Client.FetchError || error{RequestTimedOut};
+
+    fn guardTimer(io: Io, ms: u64) Io.Cancelable!void {
+        return io.sleep(Io.Duration.fromMilliseconds(@intCast(ms)), .real);
+    }
+
+    /// `http.fetch` raced against a timer. Whichever ends first wins; the
+    /// loser is cancelled (cancel interrupts the blocked socket read).
+    /// Caller holds `http_lock`. Without spare concurrency, fetches unguarded.
+    fn fetchGuarded(self: *Client, options: std.http.Client.FetchOptions) GuardError!std.http.Client.FetchResult {
+        var buf: [2]GuardEvent = undefined;
+        var sel = Io.Select(GuardEvent).init(self.io, &buf);
+        sel.concurrent(.fetch, std.http.Client.fetch, .{ &self.http, options }) catch
+            return self.http.fetch(options);
+        sel.concurrent(.timer, guardTimer, .{ self.io, self.request_timeout_ms }) catch {
+            const only = sel.await() catch {
+                sel.cancelDiscard();
+                return error.RequestTimedOut;
+            };
+            sel.cancelDiscard();
+            return only.fetch;
+        };
+        const first = sel.await() catch {
+            sel.cancelDiscard();
+            return error.RequestTimedOut;
+        };
+        sel.cancelDiscard();
+        return switch (first) {
+            .fetch => |r| r,
+            .timer => error.RequestTimedOut,
+        };
     }
 
     fn classifyStatus(code: u16) errs.Error {
@@ -333,6 +374,30 @@ pub fn extractThreadId(url: []const u8) ?[]const u8 {
 
 pub fn canonicalUrl(buf: []u8, thread_id: []const u8) ![]const u8 {
     return try std.fmt.bufPrint(buf, "{s}/threads/thread.{s}/", .{ BASE_URL, thread_id });
+}
+
+test "get: a server that never answers times out instead of hanging" {
+    var threaded = Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // Listening but never accepting: the TCP handshake completes in the
+    // kernel backlog, the request is sent, and no reply ever comes.
+    const addr = try Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var server = try addr.listen(io, .{ .reuse_address = true });
+    defer server.deinit(io);
+    const port = server.socket.address.getPort();
+
+    var c = Client.init(std.testing.allocator, io, 0);
+    defer c.deinit();
+    c.request_timeout_ms = 500;
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/", .{port});
+    const t0 = Io.Clock.Timestamp.now(io, .real).raw.toMilliseconds();
+    try std.testing.expectError(errs.Error.NetworkError, c.get(url));
+    const took = Io.Clock.Timestamp.now(io, .real).raw.toMilliseconds() - t0;
+    try std.testing.expect(took < 5000);
 }
 
 test "extractThreadId" {
