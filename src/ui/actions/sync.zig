@@ -1354,8 +1354,7 @@ fn onSyncDone(frame: *Frame, job: *SyncJob) void {
         // In-place edit (dev_status → orphaned) — invalidate the filter cache.
         state.game_edit_gen +%= 1;
         state.sync_status = .ok;
-        state.sort_applied_column = null;
-        state.sort_applied_dir = null;
+        state.sort_deferred = true;
         var orph_buf: [128]u8 = undefined;
         const m = if (state.sync_queue) |_|
             std.fmt.bufPrint(&orph_buf, "sync-all: {d}/{d} — orphaned (thread gone from F95)", .{ state.sync_queue_started, state.sync_queue_total }) catch "orphaned"
@@ -1476,10 +1475,9 @@ fn onSyncDone(frame: *Frame, job: *SyncJob) void {
     }
 
     state.sync_status = .ok;
-    // Game's rating/vote_count just changed — invalidate sort so a
-    // rating-/votes-sorted view re-orders next frame.
-    state.sort_applied_column = null;
-    state.sort_applied_dir = null;
+    // Game's rating/vote_count just changed — re-sort once no sync is
+    // running (see `State.sort_deferred`), not under the user's pointer.
+    state.sort_deferred = true;
 
     var msgbuf: [96]u8 = undefined;
     const m = if (state.sync_queue) |_|

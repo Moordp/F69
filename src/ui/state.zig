@@ -668,6 +668,10 @@ pub const State = struct {
     /// re-sort (used after `reload_requested`).
     sort_applied_column: ?SortColumn = null,
     sort_applied_dir: ?SortDir = null,
+    /// A sync changed a sort key (rating, votes, …). The re-sort waits until
+    /// no sync is running: re-sorting after every game of a Sync all moved
+    /// games under the pointer, so clicks opened the wrong game.
+    sort_deferred: bool = false,
     filters: Filters = .{},
     search_buf: [64]u8 = @splat(0),
     /// f95_thread_id of the game currently displayed in detail screen.

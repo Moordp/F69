@@ -50,10 +50,13 @@ pub fn libraryScreen(frame: *Frame) !bool {
     actions.refreshInstalledSet(frame);
 
     // Re-sort the snapshot if user changed the sort or we just reloaded.
-    if (state.sort_applied_column != state.sort_column or state.sort_applied_dir != state.sort_dir) {
+    const user_sort_changed = state.sort_applied_column != state.sort_column or state.sort_applied_dir != state.sort_dir;
+    const syncing = state.anyActiveSync() or state.sync_queue != null;
+    if (shouldResort(user_sort_changed, state.sort_deferred, syncing)) {
         sortGames(games, state.sort_column, state.sort_dir);
         state.sort_applied_column = state.sort_column;
         state.sort_applied_dir = state.sort_dir;
+        state.sort_deferred = false;
     }
     // ---- top bar ----
     // Top bar 1/2 — actions only. Layout:
@@ -2355,6 +2358,21 @@ const SortCtx = struct {
 };
 
 const WEIGHTED_PRIOR: f32 = 10.0;
+
+/// A sort the user asked for (or a fresh reload) applies at once. One a sync
+/// asked for (changed ratings) waits until no sync is running: a Sync all
+/// re-sorted every few seconds, moving games under the pointer, so a click
+/// opened a different game than the one the user aimed at.
+fn shouldResort(user_changed: bool, deferred: bool, syncing: bool) bool {
+    return user_changed or (deferred and !syncing);
+}
+
+test "shouldResort: sync-driven re-sorts wait for the sync to end" {
+    try std.testing.expect(shouldResort(true, false, true)); // user changed the sort
+    try std.testing.expect(!shouldResort(false, true, true)); // sync running: hold the order
+    try std.testing.expect(shouldResort(false, true, false)); // sync done: apply once
+    try std.testing.expect(!shouldResort(false, false, false)); // nothing to do
+}
 
 fn sortGames(games: []library.Game, column: state_mod.SortColumn, dir: state_mod.SortDir) void {
     var sum: f32 = 0;

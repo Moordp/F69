@@ -2,6 +2,15 @@
 
 All notable, user-facing changes. Dates are YYYY-MM-DD.
 
+## [0.15.15] - 2026-10-28
+
+### Fixed
+- **Clicking a game opened a different game during "Sync all".** Every synced
+  game re-sorted the whole library, so games moved under the pointer between
+  looking and clicking. The list now keeps its order while a sync is running
+  and re-sorts once when the sync ends. Changing the sort yourself still
+  applies at once.
+
 ## [0.15.14] - 2026-10-28
 
 ### Fixed
