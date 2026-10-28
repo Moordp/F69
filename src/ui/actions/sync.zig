@@ -390,22 +390,6 @@ fn nowMs(io: std.Io) i64 {
     return std.Io.Clock.Timestamp.now(io, .real).raw.toMilliseconds();
 }
 
-/// Should this game be skipped when the user clicks Refresh All /
-/// Check for updates? Match F95Checker's default refresh filter:
-/// completed / abandoned / orphaned games that have been synced at
-/// least once contribute essentially zero new information per refresh,
-/// so spending /fast quota on them is wasteful. Unsynced games (never
-/// scraped) always pass through; the first refresh has to learn their
-/// state from somewhere.
-fn shouldSkipInRefreshAll(g: *const library.Game) bool {
-    // Never-synced rows always run — we still need their first /full.
-    if (g.last_scraped_at == null) return false;
-    return switch (g.dev_status) {
-        .completed, .abandoned, .orphaned => true,
-        else => false,
-    };
-}
-
 fn syncWorker(job: *SyncJob) void {
     // Route to the indexer pipeline when state picked `.indexer` at
     // queue time. The two pipelines fill the same payload slots so
@@ -1537,20 +1521,11 @@ pub fn startSyncAll(frame: *Frame) void {
     var ids: std.ArrayList(u64) = .empty;
     defer ids.deinit(frame.lib.alloc);
 
-    // Filter out terminal-state games so refresh-all isn't dominated by
-    // pinging the indexer about games that effectively never change.
-    // Mirrors F95Checker's default: Completed / Abandoned threads are
-    // skipped, and orphaned (thread gone from F95) makes no sense to
-    // check. Unsynced games always pass through. This is the main
-    // reason F95Checker's "Refresh!" runs in seconds while our naive
-    // "check everything" walked the whole library.
+    // Every game goes in: completed games still get updates, and the
+    // download catalogue needs a page scrape of each one.
     for (frame.games) |*g| {
-        if (shouldSkipInRefreshAll(g)) continue;
         ids.append(frame.lib.alloc, g.f95_thread_id) catch return;
     }
-    log.info("startSyncAll: filtered {d}/{d} games (skipped completed/abandoned/orphaned)", .{
-        ids.items.len, frame.games.len,
-    });
 
     if (ids.items.len == 0) {
         state.sync_status = .ok;

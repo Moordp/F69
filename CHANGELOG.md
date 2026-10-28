@@ -2,6 +2,13 @@
 
 All notable, user-facing changes. Dates are YYYY-MM-DD.
 
+## [0.15.10] - 2026-10-28
+
+### Changed
+- **"Sync all games" now syncs every game.** It used to skip completed,
+  abandoned and orphaned games. Completed games still get updates, and the
+  download catalogue needs a page scrape of each game.
+
 ## [0.15.9] - 2026-10-28
 
 ### Added
