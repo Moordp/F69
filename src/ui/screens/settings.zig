@@ -777,8 +777,7 @@ fn renderGridCoverSection(frame: *Frame) void {
         "Every card has the same cover size. Covers are cropped toward that shape, " ++
             "but never by more than a quarter — the rest is shown with dark bars, so " ++
             "less is cut off. A narrower shape (2 : 1) makes taller cards and shows more " ++
-            "of each cover; 3 : 1 makes shorter cards, so more fit on screen. Hover a " ++
-            "cover to see it whole.",
+            "of each cover; 3 : 1 makes shorter cards, so more fit on screen.",
     );
 }
 

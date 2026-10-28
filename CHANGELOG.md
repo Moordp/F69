@@ -2,6 +2,12 @@
 
 All notable, user-facing changes. Dates are YYYY-MM-DD.
 
+## [0.15.7] - 2026-10-28
+
+### Changed
+- **Removed the hover preview from grid (and kanban) cards.** Hovering a card
+  cover no longer pops up the large image. The list view keeps its preview.
+
 ## [0.15.6] - 2026-10-28
 
 ### Changed

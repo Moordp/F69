@@ -2242,7 +2242,6 @@ fn renderCardCover(bytes_opt: ?[]const u8, thread_id: u64, engine: library.Engin
             .gravity_y = 0.5,
             .min_size_content = .{ .w = natural.w * uv.w, .h = natural.h * uv.h },
         });
-        coverPreview(ov.data().borderRectScale().r, source, thread_id);
     } else {
         var slot = dvui.box(@src(), .{ .dir = .vertical }, .{
             .id_extra = thread_id,
