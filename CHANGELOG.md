@@ -2,6 +2,13 @@
 
 All notable, user-facing changes. Dates are YYYY-MM-DD.
 
+## [0.15.11] - 2026-10-28
+
+### Fixed
+- **Crash and database corruption during a long sync on NTFS/FUSE drives.**
+  The database no longer uses a memory-mapped read window. On NTFS-3g a mapped
+  read failed with SIGBUS mid-sync and left the database file damaged.
+
 ## [0.15.10] - 2026-10-28
 
 ### Changed

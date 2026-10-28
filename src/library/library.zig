@@ -64,9 +64,10 @@ pub const Library = struct {
         // Performance pragmas. WAL gives concurrent reads + faster
         // writes; synchronous=NORMAL still survives application + OS
         // crashes (WAL durability) while skipping fsyncs that FULL
-        // requires; a 64 MB page cache + 256 MB mmap window keep hot
-        // pages out of disk on a library scrolling through hundreds
-        // of games; temp tables stay in RAM. journal_mode persists in
+        // requires; a 64 MB page cache keeps hot pages out of disk on a
+        // library scrolling through hundreds of games; temp tables stay
+        // in RAM. No mmap window: on NTFS-3g (FUSE) a mapped read of the
+        // DB hit SIGBUS mid-sync and left the file corrupt (0.15.10). journal_mode persists in
         // the DB file header, so re-opens inherit it; the rest are
         // per-connection. Audited from the perf review — every
         // listInstalls / listGames call previously paid the default
@@ -74,7 +75,7 @@ pub const Library = struct {
         conn.exec("PRAGMA journal_mode = WAL") catch return errs.Error.SchemaMigrationFailed;
         conn.exec("PRAGMA synchronous = NORMAL") catch return errs.Error.SchemaMigrationFailed;
         conn.exec("PRAGMA cache_size = -65536") catch return errs.Error.SchemaMigrationFailed;
-        conn.exec("PRAGMA mmap_size = 268435456") catch return errs.Error.SchemaMigrationFailed;
+        conn.exec("PRAGMA mmap_size = 0") catch return errs.Error.SchemaMigrationFailed;
         conn.exec("PRAGMA temp_store = MEMORY") catch return errs.Error.SchemaMigrationFailed;
         runMigrations(alloc, &conn, db_path) catch return errs.Error.SchemaMigrationFailed;
         return .{ .alloc = alloc, .conn = conn };
