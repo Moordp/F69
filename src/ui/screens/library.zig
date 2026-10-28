@@ -1364,9 +1364,44 @@ fn rowHit(src: std.builtin.SourceLocation, thread_id: u64) *dvui.BoxWidget {
     });
 }
 
-/// Cover slot of a list row (logical pixels).
-const LIST_THUMB_W: f32 = 96;
-const LIST_THUMB_H: f32 = 54;
+/// Cover slot of a list row (logical pixels). ~3:1, so wide banners (most F95
+/// covers) use most of it.
+const LIST_THUMB_W: f32 = 144;
+const LIST_THUMB_H: f32 = 48;
+/// Largest size of the hover preview.
+const PREVIEW_MAX_W: f32 = 480;
+const PREVIEW_MAX_H: f32 = 360;
+
+/// uv rectangle that crops `img` to the aspect ratio of `w` x `h`, centered.
+fn fillUv(img: dvui.Size, w: f32, h: f32) dvui.Rect {
+    if (img.w <= 0 or img.h <= 0) return .{ .w = 1, .h = 1 };
+    const want = w / h;
+    const have = img.w / img.h;
+    if (have > want) {
+        const uw = want / have;
+        return .{ .x = (1 - uw) / 2, .y = 0, .w = uw, .h = 1 };
+    }
+    const uh = have / want;
+    return .{ .x = 0, .y = (1 - uh) / 2, .w = 1, .h = uh };
+}
+
+/// Hover preview: the whole cover at a larger size, shown after a short delay.
+fn coverPreview(active: dvui.Rect.Physical, src: dvui.ImageSource, thread_id: u64) void {
+    var tt: dvui.FloatingTooltipWidget = undefined;
+    tt.init(@src(), .{ .active_rect = active, .position = .horizontal, .delay = 400_000 }, .{
+        .id_extra = thread_id ^ 0xC07E,
+        .role = .tooltip,
+        .padding = dvui.Rect.all(4),
+    });
+    defer tt.deinit();
+    if (!tt.shown()) return;
+    const size = fitInside(dvui.imageSize(src) catch .{ .w = 0, .h = 0 }, PREVIEW_MAX_W, PREVIEW_MAX_H);
+    _ = dvui.image(@src(), .{ .source = src }, .{
+        .min_size_content = size,
+        .max_size_content = .{ .w = size.w, .h = size.h },
+        .corners = .all(3),
+    });
+}
 
 /// Largest size with `img`'s aspect ratio that fits in `w` x `h`. Falls back to
 /// the full slot when the image size is unknown (zero).
@@ -1467,15 +1502,24 @@ fn renderListTable(frame: *Frame, games: []const library.Game, filtered: []const
                 });
                 if (actions.coverBytes(frame, g.f95_thread_id)) |cb| {
                     const src: dvui.ImageSource = .{ .imageFile = .{ .bytes = cb, .name = "list-cover" } };
-                    const fit = fitInside(dvui.imageSize(src) catch .{ .w = 0, .h = 0 }, LIST_THUMB_W, LIST_THUMB_H);
-                    _ = dvui.image(@src(), .{ .source = src }, .{
+                    const img_size = dvui.imageSize(src) catch dvui.Size{ .w = 0, .h = 0 };
+                    const fill = !state.list_cover_fit;
+                    const shown: dvui.Size = if (fill)
+                        .{ .w = LIST_THUMB_W, .h = LIST_THUMB_H }
+                    else
+                        fitInside(img_size, LIST_THUMB_W, LIST_THUMB_H);
+                    _ = dvui.image(@src(), .{
+                        .source = src,
+                        .uv = if (fill) fillUv(img_size, LIST_THUMB_W, LIST_THUMB_H) else .{ .w = 1, .h = 1 },
+                    }, .{
                         .id_extra = g.f95_thread_id,
                         .gravity_x = 0.5,
                         .gravity_y = 0.5,
-                        .min_size_content = fit,
-                        .max_size_content = .{ .w = fit.w, .h = fit.h },
+                        .min_size_content = shown,
+                        .max_size_content = .{ .w = shown.w, .h = shown.h },
                         .corners = .all(2),
                     });
+                    coverPreview(slot.data().borderRectScale().r, src, g.f95_thread_id);
                 }
                 // Close the slot now so the dot / name / chips are row siblings.
                 slot.deinit();

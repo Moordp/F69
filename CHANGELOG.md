@@ -2,6 +2,20 @@
 
 All notable, user-facing changes. Dates are YYYY-MM-DD.
 
+## [0.15.5] - 2026-10-28
+
+### Changed
+- **List view covers use a wider slot (144×48, about 3:1)** so wide banners —
+  most F95 covers — fill it. Settings → Library → *List view covers* picks the
+  shape: **Fit** (whole cover, empty space at the sides — the default) or
+  **Fill** (crop to the slot).
+- **Hover a cover in the list** to see it whole at a larger size.
+
+### Fixed
+- **The "Check-for-updates source" setting was missing from Settings** (it was
+  hidden in code), so the RSS and new-versions-feed sources from 0.15.2 could
+  not be picked. It is back in Settings → Updates.
+
 ## [0.15.4] - 2026-10-27
 
 ### Changed

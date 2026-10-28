@@ -833,7 +833,7 @@ pub const State = struct {
     /// state (see `serializeLibPrefs`). The persisted snapshot is
     /// compared against a fresh serialization each frame to debounce
     /// disk writes; only the first `_len` bytes are meaningful.
-    lib_prefs_persisted: [128]u8 = @splat(0),
+    lib_prefs_persisted: [160]u8 = @splat(0),
     lib_prefs_persisted_len: usize = 0,
     /// One-shot flag — flips to true after the on-startup auto check
     /// has fired (or been skipped because workers were busy). Stays
@@ -850,6 +850,9 @@ pub const State = struct {
     /// Library list-view dvui.grid: resizable per-column widths (the grid
     /// mutates these on drag) + the grid's own scroll info (VirtualScroller).
     /// Columns: Name, Engine, Rating, Version, Updated.
+    /// List-view cover shape: true = show the whole cover inside the slot
+    /// (side bars), false = crop it to fill the slot. Persisted in `lib_prefs`.
+    list_cover_fit: bool = true,
     lib_col_widths: [7]f32 = .{ 230, 112, 78, 150, 92, 84, 44 },
     lib_grid_scroll: dvui.ScrollInfo = .{},
     /// Kanban view: one independent scroll per status column so each

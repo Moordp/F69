@@ -531,11 +531,10 @@ fn renderAutoConvertSection(frame: *Frame) void {
 fn renderCatUpdates(frame: *Frame) void {
     renderRefreshBackendSection(frame);
     settingsSectionDivider(3);
-    // RSS update-check source is intentionally NOT surfaced in the UI for
-    // now — the code path (rssUpdateCheckWorker + the persisted
-    // `update_check_source` setting) stays wired and defaults to `builtin`,
-    // so nothing changes for users. Re-add `renderUpdateCheckSourceSection`
-    // here to expose the toggle.
+    // Defaults to `builtin`, so nothing changes until the user picks RSS or
+    // the new-versions feed.
+    renderUpdateCheckSourceSection(frame);
+    settingsSectionDivider(13);
     renderAutoCheckSection(frame);
     settingsSectionDivider(2);
     renderAutoUpdateDefaultSection(frame);
@@ -726,8 +725,37 @@ fn renderSettingsAccounts(frame: *Frame) void {
     renderRpdlAccount(frame);
 }
 
+/// How covers are shaped in the library list view.
+fn renderListCoverSection(frame: *Frame) void {
+    const state = frame.state;
+    dvui.label(@src(), "List view covers", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        defer row.deinit();
+        dvui.label(@src(), "Cover shape:", .{}, .{ .gravity_y = 0.5 });
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
+        const labels = &[_][]const u8{ "Fit (whole cover)", "Fill (crop to the slot)" };
+        var picked: usize = if (state.list_cover_fit) 0 else 1;
+        if (style.dropdown(@src(), labels, .{ .choice = &picked }, .{}, .{
+            .min_size_content = .{ .w = 220, .h = 28 },
+            .gravity_y = 0.5,
+        })) {
+            state.list_cover_fit = picked == 0;
+        }
+    }
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 10 } });
+    components.settingsHelpText(
+        "Fit shows the whole cover with empty space at the sides. Fill crops the " ++
+            "cover to fill the slot (the sides get cut off). Hover a cover in the list " ++
+            "to see it whole at a larger size.",
+    );
+}
+
 /// Library tab — portable paths, library statistics, mod section.
 fn renderSettingsLibrary(frame: *Frame) void {
+    renderListCoverSection(frame);
+    settingsSectionDivider(14);
     dvui.label(@src(), "Paths", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     var row_id: u32 = 0;

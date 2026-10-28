@@ -532,7 +532,7 @@ pub fn persistAutoCheckIfDirty(state: *State, path: []const u8, io: std.Io) void
 pub fn serializeLibPrefs(state: *const State, buf: []u8) []const u8 {
     const f = &state.filters;
     const rating_i: i64 = if (f.min_rating) |r| @intFromFloat(r * 100) else -1;
-    return std.fmt.bufPrint(buf, "{d} {d} {d} {d} {d} {d} {d} {d} {d} {d}", .{
+    return std.fmt.bufPrint(buf, "{d} {d} {d} {d} {d} {d} {d} {d} {d} {d} {d}", .{
         @intFromEnum(state.view),
         @intFromEnum(state.sort_column),
         @intFromEnum(state.sort_dir),
@@ -543,6 +543,7 @@ pub fn serializeLibPrefs(state: *const State, buf: []u8) []const u8 {
         @as(u64, f.status.bits.mask),
         @as(u64, f.dev_status.bits.mask),
         @as(u64, f.censored.bits.mask),
+        @intFromBool(state.list_cover_fit),
     }) catch buf[0..0];
 }
 
@@ -580,6 +581,7 @@ pub fn applyLibPrefs(state: *State, line: []const u8) void {
     if (nextInt(&it, u64)) |m| state.filters.status.bits.mask = @truncate(m);
     if (nextInt(&it, u64)) |m| state.filters.dev_status.bits.mask = @truncate(m);
     if (nextInt(&it, u64)) |m| state.filters.censored.bits.mask = @truncate(m);
+    if (nextInt(&it, u8)) |v| state.list_cover_fit = v != 0;
 }
 
 /// Seed the persisted mirror from the current state — call once at
@@ -594,7 +596,7 @@ pub fn seedLibPrefsMirror(state: *State) void {
 /// last-saved snapshot. Called every frame; the serialize+compare is
 /// cheap and short-circuits the disk write when nothing changed.
 pub fn persistLibPrefsIfDirty(state: *State, path: []const u8, io: std.Io) void {
-    var buf: [128]u8 = undefined;
+    var buf: [160]u8 = undefined;
     const cur = serializeLibPrefs(state, &buf);
     const prev = state.lib_prefs_persisted[0..state.lib_prefs_persisted_len];
     if (std.mem.eql(u8, cur, prev)) return;
@@ -1196,4 +1198,21 @@ pub fn freePostInstalled(state: *State, alloc: std.mem.Allocator) void {
         state.download_attempts = null;
     }
     launch_mod.freeRunningGames(state, alloc);
+}
+
+test "lib prefs: list_cover_fit round-trips and old lines keep the default" {
+    var st: State = .{};
+    st.list_cover_fit = false;
+    var buf: [160]u8 = undefined;
+    const line = serializeLibPrefs(&st, &buf);
+
+    var back: State = .{};
+    try std.testing.expect(back.list_cover_fit); // default: fit
+    applyLibPrefs(&back, line);
+    try std.testing.expect(!back.list_cover_fit);
+
+    // A line saved before the field existed (10 tokens) leaves the default.
+    var old: State = .{};
+    applyLibPrefs(&old, "0 0 0 0 0 -1 0 0 0 0");
+    try std.testing.expect(old.list_cover_fit);
 }
