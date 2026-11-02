@@ -84,7 +84,8 @@ pub const EngineKind = enum { aria2_http, aria2_torrent, megacmd, browser };
 pub const Kind = enum { game, mod, extra };
 pub const FailReason = enum { network, host_gone, auth_required, captcha, quota_exceeded, no_peers, checksum_mismatch, bad_archive, disk_full, engine_missing, user_cancelled, install_failed, unknown };
 
-/// One download. Fields after `dl_speed` marked "live" are not stored.
+/// One download. `dl_speed` through `seeders` are live only (not stored);
+/// every other field, including `created_at`/`updated_at`, is stored.
 pub const Job = struct {
     /// Group = multi-part set; a single job has `group_id == id`.
     id: u64,
@@ -124,7 +125,7 @@ pub const Job = struct {
     bytes_done: u64 = 0,
     bytes_total: ?u64 = null,
     bytes_uploaded: u64 = 0,
-    // Live only, not stored.
+    // Live only, not stored: dl_speed .. seeders.
     dl_speed: u64 = 0,
     ul_speed: u64 = 0,
     peers: u32 = 0,
@@ -239,6 +240,20 @@ fn failedFromEngine(job: *const Job, p: Progress, now: i64) Transition {
     return t;
 }
 
+/// Engine lost the job: `removed` cancels it, `daemon_gone` is a retryable
+/// network failure. Null for any other phase.
+fn engineGone(job: *const Job, p: Progress, now: i64) ?Transition {
+    return switch (p.phase) {
+        .removed => to(job, .cancelled, .none),
+        .daemon_gone => blk: {
+            var q = p;
+            q.fail = .network;
+            break :blk failedFromEngine(job, q, now);
+        },
+        else => null,
+    };
+}
+
 /// Pure transition function. Any (step, input) pair not defined returns the
 /// current step unchanged with `.side_effect = .none`.
 pub fn advance(job: *const Job, input: Input) Transition {
@@ -306,7 +321,8 @@ pub fn advance(job: *const Job, input: Input) Transition {
                         t.detail = "";
                     },
                     .failed => return failedFromEngine(job, p, ep.now),
-                    .queued, .paused, .removed, .daemon_gone => return unchanged(job),
+                    .removed, .daemon_gone => return engineGone(job, p, ep.now).?,
+                    .queued, .paused => return unchanged(job),
                 }
                 return t;
             },
@@ -319,6 +335,7 @@ pub fn advance(job: *const Job, input: Input) Transition {
         },
         .paused => switch (input) {
             .user_resume => return to(job, job.resume_step orelse .downloading, .resume_engine),
+            .engine_progress => |ep| if (engineGone(job, ep.p, ep.now)) |t| return t,
             else => {},
         },
         .verifying => switch (input) {
@@ -337,7 +354,10 @@ pub fn advance(job: *const Job, input: Input) Transition {
             else => {},
         },
         .seeding => switch (input) {
-            .engine_progress => |ep| if (ep.p.phase == .transfer_done) return to(job, .done, .none),
+            .engine_progress => |ep| {
+                if (ep.p.phase == .transfer_done) return to(job, .done, .none);
+                if (engineGone(job, ep.p, ep.now)) |t| return t;
+            },
             else => {},
         },
         .done, .failed, .cancelled => {},
@@ -590,4 +610,22 @@ test "retryDelaySeconds" {
     try testing.expectEqual(@as(?u32, 600), retryDelaySeconds(2));
     try testing.expectEqual(@as(?u32, null), retryDelaySeconds(3));
     try testing.expectEqual(@as(?u32, null), retryDelaySeconds(255));
+}
+
+test "advance: engine removed -> cancelled, daemon_gone -> retryable network failure (downloading, paused, seeding)" {
+    for ([_]Step{ .downloading, .paused, .seeding }) |s| {
+        var job = testJob(s);
+        job.attempts = 0;
+        const r = advance(&job, progress(.removed, null, 1000));
+        try testing.expectEqual(Step.cancelled, r.step);
+        try testing.expectEqual(SideEffect.none, r.side_effect);
+
+        const g = advance(&job, progress(.daemon_gone, null, 1000));
+        try testing.expectEqual(Step.failed, g.step);
+        try testing.expectEqual(FailReason.network, g.fail.?);
+        try testing.expectEqual(@as(?i64, 1030), g.next_retry_at);
+
+        job.attempts = 3;
+        try testing.expectEqual(@as(?i64, null), advance(&job, progress(.daemon_gone, null, 1000)).next_retry_at);
+    }
 }
