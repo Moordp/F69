@@ -1923,6 +1923,31 @@ const migrations = [_]Migration{
         \\);
         ,
     },
+    .{
+        .id = 25,
+        .sql =
+        // Downloader v2 jobs + event log. Keep identical to
+        // downloads/store.zig SCHEMA_SQL (this module cannot import it).
+        \\CREATE TABLE IF NOT EXISTS dl_jobs (
+        \\  id INTEGER PRIMARY KEY, group_id INTEGER NOT NULL, kind TEXT NOT NULL,
+        \\  game_thread_id INTEGER NOT NULL DEFAULT 0, mod_id INTEGER,
+        \\  title TEXT NOT NULL DEFAULT '', source_href TEXT NOT NULL, host TEXT NOT NULL DEFAULT '',
+        \\  engine TEXT NOT NULL, platform TEXT, part INTEGER, version TEXT,
+        \\  step TEXT NOT NULL, step_detail TEXT NOT NULL DEFAULT '', resume_step TEXT,
+        \\  fail TEXT, fail_msg TEXT NOT NULL DEFAULT '', attempts INTEGER NOT NULL DEFAULT 0, next_retry_at INTEGER,
+        \\  resolved_url TEXT, resolved_headers TEXT NOT NULL DEFAULT '', resolved_at INTEGER,
+        \\  engine_ref TEXT, dest_dir TEXT NOT NULL, final_path TEXT,
+        \\  expected_sha256 BLOB, bytes_done INTEGER NOT NULL DEFAULT 0, bytes_total INTEGER, bytes_uploaded INTEGER NOT NULL DEFAULT 0,
+        \\  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, finished_at INTEGER
+        \\);
+        \\CREATE INDEX IF NOT EXISTS dl_jobs_game ON dl_jobs(game_thread_id);
+        \\CREATE TABLE IF NOT EXISTS dl_events (
+        \\  id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL, at INTEGER NOT NULL,
+        \\  step TEXT NOT NULL, msg TEXT NOT NULL DEFAULT ''
+        \\);
+        \\CREATE INDEX IF NOT EXISTS dl_events_job ON dl_events(job_id, id);
+        ,
+    },
 };
 
 fn runMigrations(alloc: std.mem.Allocator, conn: *dbu.Conn, db_path: []const u8) !void {
@@ -3020,4 +3045,15 @@ test "library: save-path override round-trips and a metadata sync preserves it" 
 test {
     _ = @import("domain.zig");
     _ = @import("errors.zig");
+}
+
+test "library: migration 25 creates the downloader v2 tables" {
+    var lib = try Library.open(std.testing.allocator, ":memory:");
+    defer lib.close();
+    var row = (try lib.conn.inner.row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('dl_jobs','dl_events','dl_jobs_game','dl_events_job')",
+        .{},
+    )).?;
+    defer row.deinit();
+    try std.testing.expectEqual(@as(i64, 4), row.int(0));
 }

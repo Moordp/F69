@@ -41,6 +41,9 @@ pub const rpdl = @import("rpdl.zig");
 /// Downloader v2 job model and pure state machine.
 pub const model = @import("model.zig");
 
+/// Downloader v2 SQLite store (dl_jobs / dl_events).
+pub const store = @import("store.zig");
+
 // Force `zig test` to discover the per-file `test {}` blocks. Without
 // these references the compiler only pulls in the symbols re-exported
 // above, so nested tests would silently no-op.
@@ -51,4 +54,5 @@ test {
     _ = arc;
     _ = ver;
     _ = model;
+    _ = store;
 }

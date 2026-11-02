@@ -14,4 +14,5 @@ pub const Error = error{
     NetworkError,
     NotFound,
     RpdlInvalidResponse,
+    StoreFailed,
 };

@@ -226,6 +226,7 @@ pub fn build(b: *std.Build) void {
     downloads_mod.addImport("util_atomic_io", util_atomic_io_mod);
     downloads_mod.addImport("util_http", util_http_mod);
     downloads_mod.addImport("util_proc", util_proc_mod);
+    downloads_mod.addImport("util_db", util_db_mod);
     downloads_mod.addImport("util_test_env", util_test_env_mod);
     downloads_mod.addImport("build_options", build_opts_mod);
 

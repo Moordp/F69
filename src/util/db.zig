@@ -19,6 +19,11 @@ pub const Error = error{
     OutOfMemory,
 };
 
+/// Marks a `[]const u8` bind argument as a BLOB instead of TEXT.
+pub fn blob(value: []const u8) zqlite.Blob {
+    return zqlite.blob(value);
+}
+
 pub const OpenFlags = struct {
     create: bool = true,
     readonly: bool = false,
