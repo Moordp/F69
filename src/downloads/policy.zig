@@ -49,7 +49,8 @@ fn perJob(budget: u64, n: u32) u64 {
 }
 
 pub fn plan(s: Settings, a: ActiveCounts) Plan {
-    const share: u64 = @min(s.torrent_share_pct, 100);
+    // 0 would mean unlimited; keep at least 1 % for each class.
+    const share: u64 = std.math.clamp(s.torrent_share_pct, 1, 99);
     const tb = classBudget(s.cap_torrents_kbs, s.cap_total_kbs, share, a.files_downloading > 0);
     const fb = classBudget(s.cap_files_kbs, s.cap_total_kbs, 100 - share, a.torrents_downloading > 0);
     const per_file = perJob(fb, a.files_downloading);
@@ -84,8 +85,8 @@ test "plan: all zero → all unlimited, up = busy cap when downloading else idle
 test "plan: total 1000 KB/s, both classes active, share 50 → per_torrent 500 KB/s ÷ torrents_downloading, per_file 500 KB/s ÷ files, global_down 1000" {
     const p = plan(.{ .cap_total_kbs = 1000 }, .{ .files_downloading = 2, .torrents_downloading = 5, .any_downloading = true });
     try std.testing.expectEqual(@as(u64, 1000 * 1024), p.aria2_global_down);
-    try std.testing.expectEqual(@as(u64, 500 * 1024 / 5), p.per_torrent_down);
-    try std.testing.expectEqual(@as(u64, 500 * 1024 / 2), p.per_file_down);
+    try std.testing.expectEqual(102400, p.per_torrent_down);
+    try std.testing.expectEqual(256000, p.per_file_down);
 }
 
 test "plan: total cap, only torrents active → per_torrent = total ÷ n, per_file 0" {
@@ -123,4 +124,14 @@ test "hasSlot respects both counts" {
     try std.testing.expect(hasSlot(s, b, .aria2_http));
     try std.testing.expect(!hasSlot(s, b, .aria2_torrent));
     try std.testing.expect(!isFileEngine(.aria2_torrent));
+}
+
+test "plan: share 0 and 100 with both classes active keep both budgets non-zero" {
+    const a: ActiveCounts = .{ .files_downloading = 1, .torrents_downloading = 1, .any_downloading = true };
+    for ([_]u8{ 0, 100 }) |pct| {
+        const p = plan(.{ .cap_total_kbs = 1000, .torrent_share_pct = pct }, a);
+        try std.testing.expect(p.per_torrent_down > 0);
+        try std.testing.expect(p.per_file_down > 0);
+        try std.testing.expect(p.per_torrent_down + p.per_file_down <= 1024000);
+    }
 }
