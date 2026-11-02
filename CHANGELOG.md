@@ -2,6 +2,11 @@
 
 All notable, user-facing changes. Dates are YYYY-MM-DD.
 
+## [0.15.16] - 2026-11-03
+
+### Changed
+- Downloader v2 core: jobs live in the database, every step visible, restart-safe; bandwidth policy; old manager removed.
+
 ## [0.15.15] - 2026-10-28
 
 ### Fixed
