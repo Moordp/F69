@@ -221,6 +221,7 @@ pub fn build(b: *std.Build) void {
 
     const downloads_mod = mod(b, "downloads", "src/downloads/downloads.zig", target, optimize);
     downloads_mod.addImport("recipe", recipe_mod);
+    downloads_mod.addImport("f95", f95_mod_);
     downloads_mod.addImport("util_version", util_version_mod);
     downloads_mod.addImport("util_archive", util_archive_mod);
     downloads_mod.addImport("util_atomic_io", util_atomic_io_mod);

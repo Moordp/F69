@@ -39,6 +39,9 @@ pub const engine_aria2 = @import("engine_aria2.zig");
 /// Downloader v2 thread: command queue, snapshot, events, step driver.
 pub const downloader = @import("downloader.zig");
 pub const workers = @import("workers.zig");
+
+/// Link resolver: catalogue href → direct URL / MEGA / needs-browser.
+pub const resolve = @import("resolve.zig");
 pub const Downloader = downloader.Downloader;
 pub const Command = downloader.Command;
 pub const UiEvent = downloader.UiEvent;
@@ -60,4 +63,5 @@ test {
     _ = engine_aria2;
     _ = downloader;
     _ = workers;
+    _ = resolve;
 }
