@@ -213,13 +213,24 @@ pub const Aria2Engine = struct {
     fn pollImpl(p: *anyopaque, ref: []const u8) errs.Error!model.Progress {
         const self = cast(p);
         const d = try self.ensureDaemon();
-        var st = d.tellStatus(ref) catch |e| switch (e) {
-            errs.Error.NotFound => return .{ .phase = .removed },
+        const now = std.Io.Clock.Timestamp.now(self.io, .real).raw.toSeconds();
+        return self.absorb(ref, d.tellStatus(ref), now);
+    }
+
+    /// Turn a tellStatus result into a Progress plus map bookkeeping.
+    /// Takes ownership of an ok Status. A gid aria2 no longer knows is
+    /// reported `removed` and forgotten; other failures mean the daemon
+    /// is unreachable.
+    fn absorb(self: *Aria2Engine, ref: []const u8, result: errs.Error!aria2_rpc.Status, now: i64) errs.Error!model.Progress {
+        var st = result catch |e| switch (e) {
+            errs.Error.NotFound => {
+                self.forget(ref);
+                return .{ .phase = .removed };
+            },
             else => return .{ .phase = .daemon_gone },
         };
         defer st.deinit(self.alloc);
 
-        const now = std.Io.Clock.Timestamp.now(self.io, .real).raw.toSeconds();
         const since = try self.observe(ref, &st, now);
         var prog = mapStatus(&st, since, now);
         if (isTerminal(prog.phase)) self.forget(ref);
@@ -274,15 +285,19 @@ pub const Aria2Engine = struct {
         var buf: [24]u8 = undefined;
         try d.changeGlobalOption("max-overall-download-limit", fmtLimit(&buf, plan.aria2_global_down));
         try d.changeGlobalOption("max-overall-upload-limit", fmtLimit(&buf, plan.aria2_global_up));
+        // Gids aria2 no longer knows are forgotten after the loop; any other
+        // failure (e.g. a rejected limit) propagates so the plan is retried.
+        var dead: std.ArrayList([]const u8) = .empty;
+        defer dead.deinit(self.alloc);
         var it = self.gids.iterator();
         while (it.next()) |kv| {
             const lim = if (kv.value_ptr.is_torrent) plan.per_torrent_down else plan.per_file_down;
             d.changeOption(kv.key_ptr.*, "max-download-limit", fmtLimit(&buf, lim)) catch |e| switch (e) {
-                // Finished or removed gids can no longer take options.
-                errs.Error.NotFound, errs.Error.AriaRpcError => {},
+                errs.Error.NotFound => dead.append(self.alloc, kv.key_ptr.*) catch return errs.Error.OutOfMemory,
                 else => return e,
             };
         }
+        for (dead.items) |k| self.forget(k);
         self.last_plan = plan;
     }
 
@@ -391,4 +406,19 @@ test "tracking: poll adopts unknown refs; terminal phases forget them" {
     try testing.expect(!Aria2Engine.isTerminal(.seeding));
     eng.forget("gid1");
     try testing.expectEqual(@as(u32, 0), eng.gids.count());
+}
+
+test "absorb: NotFound reports removed and forgets the gid" {
+    var eng = Aria2Engine.init(testing.allocator, undefined, undefined);
+    defer eng.deinit();
+    try eng.track("gidX", false);
+    try testing.expectEqual(@as(u32, 1), eng.gids.count());
+    const p = try eng.absorb("gidX", errs.Error.NotFound, 0);
+    try testing.expectEqual(model.Phase.removed, p.phase);
+    try testing.expectEqual(@as(u32, 0), eng.gids.count());
+    // Transport failure: daemon_gone, nothing forgotten.
+    try eng.track("gidY", false);
+    const q = try eng.absorb("gidY", errs.Error.HostUnreachable, 0);
+    try testing.expectEqual(model.Phase.daemon_gone, q.phase);
+    try testing.expectEqual(@as(u32, 1), eng.gids.count());
 }
