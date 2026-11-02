@@ -156,6 +156,30 @@ pub const Aria2Engine = struct {
         gop.value_ptr.* = .{ .is_torrent = is_torrent };
     }
 
+    /// Adopt-on-poll: refs this instance never started (restored after a
+    /// restart) are inserted using the class aria2 reports, then the
+    /// peerless timer is updated. Returns the timer for `mapStatus`.
+    fn observe(self: *Aria2Engine, ref: []const u8, st: *const aria2_rpc.Status, now: i64) errs.Error!?i64 {
+        if (!self.gids.contains(ref)) try self.track(ref, st.is_torrent);
+        const t = self.gids.getPtr(ref).?;
+        t.is_torrent = st.is_torrent;
+        if (st.is_torrent and std.mem.eql(u8, st.status, "active") and peerless(st)) {
+            if (t.peers_zero_since == null) t.peers_zero_since = now;
+        } else {
+            t.peers_zero_since = null;
+        }
+        return t.peers_zero_since;
+    }
+
+    /// Phases after which the gid is dead to us: it is dropped from the map
+    /// so `setLimits` stops fanning out to it. Seeding torrents stay.
+    fn isTerminal(phase: model.Phase) bool {
+        return switch (phase) {
+            .transfer_done, .failed, .removed => true,
+            else => false,
+        };
+    }
+
     fn forget(self: *Aria2Engine, gid: []const u8) void {
         if (self.gids.fetchRemove(gid)) |kv| self.alloc.free(kv.key);
     }
@@ -165,7 +189,10 @@ pub const Aria2Engine = struct {
         const d = try self.ensureDaemon();
         Io.Dir.cwd().createDirPath(self.io, spec.dest_dir) catch |e| {
             log.warn("createDirPath '{s}' failed: {s}", .{ spec.dest_dir, @errorName(e) });
-            return errs.Error.DiskFull;
+            return switch (e) {
+                error.NoSpaceLeft, error.DiskQuota => errs.Error.DiskFull,
+                else => errs.Error.NetworkError,
+            };
         };
         const gid = if (spec.torrent_bytes) |bytes|
             try d.addTorrent(bytes, .{ .dir = spec.dest_dir })
@@ -193,17 +220,9 @@ pub const Aria2Engine = struct {
         defer st.deinit(self.alloc);
 
         const now = std.Io.Clock.Timestamp.now(self.io, .real).raw.toSeconds();
-        var since: ?i64 = null;
-        if (self.gids.getPtr(ref)) |t| {
-            t.is_torrent = st.is_torrent;
-            if (st.is_torrent and std.mem.eql(u8, st.status, "active") and peerless(&st)) {
-                if (t.peers_zero_since == null) t.peers_zero_since = now;
-            } else {
-                t.peers_zero_since = null;
-            }
-            since = t.peers_zero_since;
-        }
+        const since = try self.observe(ref, &st, now);
         var prog = mapStatus(&st, since, now);
+        if (isTerminal(prog.phase)) self.forget(ref);
         // `msg` borrows from `st`, freed on return: keep a copy that lives
         // until the next poll.
         if (prog.msg.len > 0) {
@@ -351,4 +370,25 @@ test "mapErrorCode table" {
     try testing.expectEqual(F.disk_full, Aria2Engine.mapErrorCode(9));
     try testing.expectEqual(F.unknown, Aria2Engine.mapErrorCode(1));
     try testing.expectEqual(F.unknown, Aria2Engine.mapErrorCode(null));
+}
+
+test "tracking: poll adopts unknown refs; terminal phases forget them" {
+    var eng = Aria2Engine.init(testing.allocator, undefined, undefined);
+    defer eng.deinit();
+    var a = "active".*;
+    const st = testStatus(&a, .{ .torrent = true });
+    // Adopted with the class from the wire; timer starts at first peerless poll.
+    try testing.expectEqual(@as(?i64, 50), try eng.observe("gid1", &st, 50));
+    try testing.expect(eng.gids.get("gid1").?.is_torrent);
+    try testing.expectEqual(@as(?i64, 50), try eng.observe("gid1", &st, 60));
+    // Connections appear: timer clears.
+    const live = testStatus(&a, .{ .torrent = true, .conns = 2 });
+    try testing.expectEqual(@as(?i64, null), try eng.observe("gid1", &live, 70));
+    try testing.expectEqual(@as(u32, 1), eng.gids.count());
+    try testing.expect(Aria2Engine.isTerminal(.failed));
+    try testing.expect(Aria2Engine.isTerminal(.removed));
+    try testing.expect(Aria2Engine.isTerminal(.transfer_done));
+    try testing.expect(!Aria2Engine.isTerminal(.seeding));
+    eng.forget("gid1");
+    try testing.expectEqual(@as(u32, 0), eng.gids.count());
 }

@@ -496,8 +496,7 @@ pub const Daemon = struct {
             "{{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"aria2.forceRemove\",\"params\":[\"token:{s}\",\"{s}\"]}}",
             .{ self.secretSlice(), gid },
         ) catch return errs.Error.AriaInvalidResponse;
-        const resp = self.rpcRaw(body) catch |e| return e;
-        self.alloc.free(resp);
+        try self.rpcCheck(body);
     }
 
     /// Pause a single download by GID. Used by the Manager to give
@@ -561,8 +560,7 @@ pub const Daemon = struct {
             "{{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"aria2.changeGlobalOption\",\"params\":[\"token:{s}\",{{\"{s}\":\"{s}\"}}]}}",
             .{ self.secretSlice(), name, value },
         ) catch return errs.Error.AriaInvalidResponse;
-        const resp = self.rpcRaw(body) catch |e| return e;
-        self.alloc.free(resp);
+        try self.rpcCheck(body);
     }
 
     /// Change an option on a single running download (GID) — used to apply a
@@ -574,8 +572,7 @@ pub const Daemon = struct {
             "{{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"aria2.changeOption\",\"params\":[\"token:{s}\",\"{s}\",{{\"{s}\":\"{s}\"}}]}}",
             .{ self.secretSlice(), gid, name, value },
         ) catch return errs.Error.AriaInvalidResponse;
-        const resp = self.rpcRaw(body) catch |e| return e;
-        self.alloc.free(resp);
+        try self.rpcCheck(body);
     }
 
     /// Drop a finished/failed/removed entry from aria2's in-memory
@@ -588,8 +585,7 @@ pub const Daemon = struct {
             "{{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"aria2.removeDownloadResult\",\"params\":[\"token:{s}\",\"{s}\"]}}",
             .{ self.secretSlice(), gid },
         ) catch return errs.Error.AriaInvalidResponse;
-        const resp = self.rpcRaw(body) catch |e| return e;
-        self.alloc.free(resp);
+        try self.rpcCheck(body);
     }
 
     /// Ask aria2 for the on-disk path of the first file that this gid
@@ -887,6 +883,14 @@ pub const Daemon = struct {
         return self.fallback.call(self.alloc, body) catch errs.Error.HostUnreachable;
     }
 
+    /// Send `body` and fail on a JSON-RPC `error` reply (code 1 = unknown
+    /// gid -> NotFound; anything else -> AriaRpcError).
+    fn rpcCheck(self: *Daemon, body: []const u8) errs.Error!void {
+        const resp = try self.rpcRaw(body);
+        defer self.alloc.free(resp);
+        return checkRpcReply(self.alloc, resp);
+    }
+
     /// Free the heap-owned transports + URL. Call after the child is reaped
     /// (WS deinit closes the socket + joins the read thread).
     fn freeTransports(self: *Daemon) void {
@@ -903,6 +907,28 @@ pub const Daemon = struct {
         return self.secret[0..32];
     }
 };
+
+/// Map a JSON-RPC reply body to success or an error tag. Pure.
+fn checkRpcReply(alloc: std.mem.Allocator, resp: []const u8) errs.Error!void {
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, resp, .{}) catch
+        return errs.Error.AriaInvalidResponse;
+    defer parsed.deinit();
+    if (parsed.value != .object) return errs.Error.AriaInvalidResponse;
+    const e_val = parsed.value.object.get("error") orelse return;
+    if (e_val != .object) return errs.Error.AriaRpcError;
+    const code: i64 = if (e_val.object.get("code")) |c| (if (c == .integer) c.integer else 0) else 0;
+    if (code == 1) return errs.Error.NotFound;
+    log.warn("aria2 RPC error: {d}", .{code});
+    return errs.Error.AriaRpcError;
+}
+
+test "checkRpcReply: ok, gid-not-found, other error, garbage" {
+    const a = std.testing.allocator;
+    try checkRpcReply(a, "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"result\":\"OK\"}");
+    try std.testing.expectError(errs.Error.NotFound, checkRpcReply(a, "{\"error\":{\"code\":1,\"message\":\"GID x is not found\"}}"));
+    try std.testing.expectError(errs.Error.AriaRpcError, checkRpcReply(a, "{\"error\":{\"code\":2,\"message\":\"bad\"}}"));
+    try std.testing.expectError(errs.Error.AriaInvalidResponse, checkRpcReply(a, "not json"));
+}
 
 const ErrorObj = struct {
     code: i64,

@@ -17,7 +17,11 @@ pub const StartSpec = struct {
     torrent_bytes: ?[]const u8,
 };
 
-/// Type-erased download engine. `ref` is the engine's own handle for a
+/// Type-erased download engine. Engines are called only from the downloader
+/// thread and do no internal locking. `Progress.msg` returned by `poll`
+/// borrows from the engine and is valid only until the next `poll` of any
+/// ref; callers must copy it before polling again.
+/// `ref` is the engine's own handle for a
 /// transfer (a gid for aria2), returned by `start`.
 pub const Engine = struct {
     ptr: *anyopaque,
@@ -115,7 +119,6 @@ pub const FakeEngine = struct {
         cast(p).last_plan = plan;
     }
 };
-
 
 test "FakeEngine walks its script and records pause/cancel/setLimits" {
     const script = [_]model.Progress{

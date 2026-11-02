@@ -148,6 +148,7 @@ pub const Progress = struct {
     peers: u32 = 0,
     seeders: u32 = 0,
     fail: ?FailReason = null,
+    /// Borrowed from the engine: valid only until the next `poll` of any ref; copy before polling again.
     msg: []const u8 = "",
     final_path: ?[]const u8 = null,
 };
