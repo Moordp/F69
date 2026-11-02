@@ -51,6 +51,15 @@ pub const policy = @import("policy.zig");
 pub const engine = @import("engine.zig");
 pub const engine_aria2 = @import("engine_aria2.zig");
 
+/// Downloader v2 thread: command queue, snapshot, events, step driver.
+pub const downloader = @import("downloader.zig");
+pub const workers = @import("workers.zig");
+pub const Downloader = downloader.Downloader;
+pub const Command = downloader.Command;
+pub const UiEvent = downloader.UiEvent;
+pub const Snapshot = downloader.Snapshot;
+pub const JobView = downloader.JobView;
+
 // Force `zig test` to discover the per-file `test {}` blocks. Without
 // these references the compiler only pulls in the symbols re-exported
 // above, so nested tests would silently no-op.
@@ -65,4 +74,6 @@ test {
     _ = policy;
     _ = engine;
     _ = engine_aria2;
+    _ = downloader;
+    _ = workers;
 }
