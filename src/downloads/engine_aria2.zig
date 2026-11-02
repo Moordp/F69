@@ -15,6 +15,10 @@ const log = std.log.scoped(.aria2_engine);
 /// reported as `finding_peers`.
 const finding_peers_after_s: i64 = 10;
 
+/// Consecutive unreachable polls after which the daemon handle is dropped
+/// so the next `ensureDaemon` spawns a fresh aria2c.
+const daemon_gone_limit: u8 = 3;
+
 pub const DaemonConfig = struct {
     aria2_path: []const u8,
     direct_root: []const u8,
@@ -40,6 +44,9 @@ pub const Aria2Engine = struct {
     last_plan: ?policy.Plan = null,
     /// Last failure message handed out in a `Progress`; valid until the next poll.
     last_msg: ?[]u8 = null,
+    /// Consecutive polls that found the daemon unreachable. Reset by any
+    /// poll that got an answer.
+    gone_polls: u8 = 0,
 
     pub fn init(alloc: std.mem.Allocator, io: Io, cfg: DaemonConfig) Aria2Engine {
         return .{ .alloc = alloc, .io = io, .cfg = cfg };
@@ -225,12 +232,17 @@ pub const Aria2Engine = struct {
     fn absorb(self: *Aria2Engine, ref: []const u8, result: errs.Error!aria2_rpc.Status, now: i64) errs.Error!model.Progress {
         var st = result catch |e| switch (e) {
             errs.Error.NotFound => {
+                self.gone_polls = 0;
                 self.forget(ref);
                 return .{ .phase = .removed };
             },
-            else => return .{ .phase = .daemon_gone },
+            else => {
+                self.noteGone();
+                return .{ .phase = .daemon_gone };
+            },
         };
         defer st.deinit(self.alloc);
+        self.gone_polls = 0;
 
         const since = try self.observe(ref, &st, now);
         var prog = mapStatus(&st, since, now);
@@ -244,6 +256,20 @@ pub const Aria2Engine = struct {
             prog.msg = copy;
         }
         return prog;
+    }
+
+    /// Count one unreachable poll. After `daemon_gone_limit` in a row the
+    /// daemon handle is dropped (its process is stopped by `deinit`), so
+    /// the next `ensureDaemon` respawns aria2c. The plan is cleared so the
+    /// limits are sent again to the new daemon.
+    fn noteGone(self: *Aria2Engine) void {
+        self.gone_polls +|= 1;
+        if (self.gone_polls < daemon_gone_limit) return;
+        log.warn("aria2c unreachable for {d} polls in a row; restarting it on next use", .{self.gone_polls});
+        if (self.daemon) |*d| d.deinit();
+        self.daemon = null;
+        self.last_plan = null;
+        self.gone_polls = 0;
     }
 
     fn pauseImpl(p: *anyopaque, ref: []const u8) errs.Error!void {
@@ -286,6 +312,19 @@ pub const Aria2Engine = struct {
         var buf: [24]u8 = undefined;
         try d.changeGlobalOption("max-overall-download-limit", fmtLimit(&buf, plan.aria2_global_down));
         try d.changeGlobalOption("max-overall-upload-limit", fmtLimit(&buf, plan.aria2_global_up));
+        // Seed targets: only when they changed (a fresh daemon got them on
+        // its command line). aria2 reads `seed-time=0` as "stop seeding at
+        // once", so a 0 cap (meaning "no cap") is never sent.
+        const seed_changed = if (self.last_plan) |lp|
+            lp.seed_ratio != plan.seed_ratio or lp.seed_time_min != plan.seed_time_min
+        else
+            plan.seed_ratio != self.cfg.seed_ratio or plan.seed_time_min != self.cfg.seed_time_min;
+        var ratio_buf: [24]u8 = undefined;
+        const ratio_s = std.fmt.bufPrint(&ratio_buf, "{d:.2}", .{@max(plan.seed_ratio, 1.0)}) catch unreachable;
+        if (seed_changed) {
+            try d.changeGlobalOption("seed-ratio", ratio_s);
+            if (plan.seed_time_min > 0) try d.changeGlobalOption("seed-time", fmtLimit(&buf, plan.seed_time_min));
+        }
         // Gids aria2 no longer knows are forgotten after the loop; any other
         // failure (e.g. a rejected limit) propagates so the plan is retried.
         var dead: std.ArrayList([]const u8) = .empty;
@@ -294,9 +333,19 @@ pub const Aria2Engine = struct {
         while (it.next()) |kv| {
             const lim = if (kv.value_ptr.is_torrent) plan.per_torrent_down else plan.per_file_down;
             d.changeOption(kv.key_ptr.*, "max-download-limit", fmtLimit(&buf, lim)) catch |e| switch (e) {
-                errs.Error.NotFound => dead.append(self.alloc, kv.key_ptr.*) catch return errs.Error.OutOfMemory,
+                errs.Error.NotFound => {
+                    dead.append(self.alloc, kv.key_ptr.*) catch return errs.Error.OutOfMemory;
+                    continue;
+                },
                 else => return e,
             };
+            if (seed_changed and kv.value_ptr.is_torrent) {
+                // Best effort: a torrent that already finished may refuse.
+                d.changeOption(kv.key_ptr.*, "seed-ratio", ratio_s) catch |e|
+                    log.warn("seed-ratio for {s} not changed: {s}", .{ kv.key_ptr.*, @errorName(e) });
+                if (plan.seed_time_min > 0) d.changeOption(kv.key_ptr.*, "seed-time", fmtLimit(&buf, plan.seed_time_min)) catch |e|
+                    log.warn("seed-time for {s} not changed: {s}", .{ kv.key_ptr.*, @errorName(e) });
+            }
         }
         for (dead.items) |k| self.forget(k);
         self.last_plan = plan;
@@ -426,4 +475,23 @@ test "absorb: NotFound reports removed and forgets the gid" {
     const q = try eng.absorb("gidY", errs.Error.HostUnreachable, 0);
     try testing.expectEqual(model.Phase.daemon_gone, q.phase);
     try testing.expectEqual(@as(u32, 1), eng.gids.count());
+}
+
+test "absorb: 3 unreachable polls in a row drop the daemon handle; an answer resets the count" {
+    var eng = Aria2Engine.init(testing.allocator, undefined, undefined);
+    defer eng.deinit();
+    eng.last_plan = .{ .aria2_global_down = 0, .aria2_global_up = 0, .per_torrent_down = 0, .per_file_down = 0, .mega_down = 0 };
+    _ = try eng.absorb("g", errs.Error.HostUnreachable, 0);
+    _ = try eng.absorb("g", errs.Error.HostUnreachable, 0);
+    try testing.expectEqual(@as(u8, 2), eng.gone_polls);
+    // The daemon answered (unknown gid): the streak ends.
+    _ = try eng.absorb("g", errs.Error.NotFound, 0);
+    try testing.expectEqual(@as(u8, 0), eng.gone_polls);
+    try testing.expect(eng.last_plan != null);
+    for (0..3) |_| _ = try eng.absorb("g", errs.Error.HostUnreachable, 0);
+    // Third in a row: handle dropped (null here already), plan cleared so
+    // the respawned daemon gets the limits again, counter reset.
+    try testing.expectEqual(@as(u8, 0), eng.gone_polls);
+    try testing.expect(eng.daemon == null);
+    try testing.expect(eng.last_plan == null);
 }

@@ -95,6 +95,11 @@ pub const Command = union(enum) {
     open_again: u64,
     install_ack: u64,
     install_failed: struct { job_id: u64, msg: []const u8 },
+    /// Install again from what is on disk: a `done` job or one that failed
+    /// at install goes back through extracting (an existing folder is
+    /// registered as is) and raises `install_ready`; a seeding job raises
+    /// `install_ready` at once. Other steps are ignored.
+    retry_install: u64,
     reload_settings: policy.Settings,
     shutdown,
 };
@@ -499,11 +504,30 @@ pub const Downloader = struct {
                 self.apply(r, .{ .step = .done, .attempts = r.job.attempts }, now);
             },
             .paste_link, .pick_file, .accept_match, .open_again => log.warn("{s} not implemented yet (stage 3); dropped", .{@tagName(q.cmd)}),
-            .install_ack => |id| self.userInput(id, .install_ack, now),
+            .install_ack => |id| if (self.find(id)) |r| {
+                self.transition(r, .install_ack, now, null);
+                // A re-install of a finished torrent has no transfer left
+                // to seed: it goes back to done, not seeding.
+                if (r.job.step == .seeding and r.job.engine_ref == null)
+                    self.apply(r, .{ .step = .done, .attempts = r.job.attempts }, now);
+            },
+            .retry_install => |id| if (self.find(id)) |r| self.retryInstall(r, now),
             .install_failed => |f| if (self.find(f.job_id)) |r| self.transition(r, .{ .install_err = f.msg }, now, null),
             .reload_settings => |s| self.reloadSettings(s),
             .shutdown => self.running.store(false, .release),
         }
+    }
+
+    fn retryInstall(self: *Downloader, r: *Rec, now: i64) void {
+        const j = &r.job;
+        if (j.step == .seeding) return self.raiseInstall(r);
+        const again = j.step == .done or (j.step == .failed and j.fail == .install_failed);
+        if (!again) {
+            log.warn("job {d}: retry_install ignored in step {s}", .{ j.id, @tagName(j.step) });
+            return;
+        }
+        self.apply(r, .{ .step = .extracting, .attempts = j.attempts }, now);
+        self.startExtract(r, now);
     }
 
     fn userInput(self: *Downloader, id: u64, input: model.Input, now: i64) void {
@@ -1321,7 +1345,7 @@ fn dupeList(a: std.mem.Allocator, list: []const []const u8) ![]const []const u8 
 }
 
 /// Deep copy of every string in `j` (same convention as `store.readJob`).
-fn cloneJob(a: std.mem.Allocator, j: model.Job) !model.Job {
+pub fn cloneJob(a: std.mem.Allocator, j: model.Job) !model.Job {
     var c = j;
     c.title = "";
     c.source_href = "";
@@ -1966,4 +1990,61 @@ test "downloader: reconcile finds the single finished file in dest_dir when fina
     fx.dl.reconcile();
     try testing.expectEqual(model.Step.installing, fx.rec(id).job.step);
     try testing.expect(std.mem.endsWith(u8, fx.rec(id).job.final_path.?, "game.bin"));
+}
+
+test "downloader: retry_install re-raises install_ready for a done job and for an install failure; a torrent re-install ends done" {
+    var fx = try Fx.create(.{});
+    defer fx.destroy();
+    try fx.env.writeFile("payload/game.bin", "hello");
+    const file = try fx.env.path("payload/game.bin");
+    defer testing.allocator.free(file);
+    const script = [_]model.Progress{.{ .phase = .transfer_done, .bytes_done = 5, .bytes_total = 5, .final_path = file }};
+    fx.fake.script = &script;
+
+    fx.enqueue("https://example.invalid/game.bin");
+    fx.dl.stepOnce(1000);
+    fx.dl.stepOnce(1001);
+    const id = fx.dl.recs.items[0].job.id;
+    try testing.expectEqual(model.Step.installing, fx.rec(id).job.step);
+    Downloader.freeEvents(testing.allocator, fx.dl.drainEvents(testing.allocator));
+
+    // Install fails → failed{install_failed}; retry_install raises it again.
+    fx.dl.send(.{ .install_failed = .{ .job_id = id, .msg = "disk said no" } });
+    fx.dl.stepOnce(1002);
+    try testing.expectEqual(model.Step.failed, fx.rec(id).job.step);
+    try testing.expectEqual(model.FailReason.install_failed, fx.rec(id).job.fail.?);
+    fx.dl.send(.{ .retry_install = id });
+    fx.dl.stepOnce(1003);
+    try testing.expectEqual(model.Step.installing, fx.rec(id).job.step);
+    {
+        const evs = fx.dl.drainEvents(testing.allocator);
+        defer Downloader.freeEvents(testing.allocator, evs);
+        try testing.expectEqual(@as(usize, 1), evs.len);
+        try testing.expectEqual(id, evs[0].install_ready.job_id);
+    }
+    fx.dl.send(.{ .install_ack = id });
+    fx.dl.stepOnce(1004);
+    try testing.expectEqual(model.Step.done, fx.rec(id).job.step);
+
+    // A done job: same again. Pretend it was a torrent with no live ref:
+    // the ack must land on done, not on a seeding step nothing polls.
+    fx.rec(id).job.engine = .aria2_torrent;
+    if (fx.rec(id).job.engine_ref) |ref| testing.allocator.free(ref);
+    fx.rec(id).job.engine_ref = null;
+    fx.dl.send(.{ .retry_install = id });
+    fx.dl.stepOnce(1005);
+    try testing.expectEqual(model.Step.installing, fx.rec(id).job.step);
+    Downloader.freeEvents(testing.allocator, fx.dl.drainEvents(testing.allocator));
+    fx.dl.send(.{ .install_ack = id });
+    fx.dl.stepOnce(1006);
+    try testing.expectEqual(model.Step.done, fx.rec(id).job.step);
+
+    // Any other step ignores it.
+    fx.enqueue("https://example.invalid/other.bin");
+    fx.dl.stepOnce(1007);
+    const id2 = fx.dl.recs.items[1].job.id;
+    const before = fx.rec(id2).job.step;
+    fx.dl.send(.{ .retry_install = id2 });
+    fx.dl.stepOnce(1008);
+    try testing.expect(fx.rec(id2).job.step != .installing or before == .installing);
 }

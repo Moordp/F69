@@ -30,6 +30,10 @@ pub const Plan = struct {
     per_torrent_down: u64,
     per_file_down: u64,
     mega_down: u64,
+    /// aria2 seed target (copied from `Settings`; applied when it changes).
+    seed_ratio: f32 = 3.0,
+    /// aria2 seed-time cap in minutes; 0 = no cap.
+    seed_time_min: u32 = 0,
 };
 
 /// Budget for one class in bytes/s (0 = unlimited). `class_kbs` is the
@@ -60,6 +64,8 @@ pub fn plan(s: Settings, a: ActiveCounts) Plan {
         .per_torrent_down = perJob(tb, a.torrents_downloading),
         .per_file_down = per_file,
         .mega_down = per_file,
+        .seed_ratio = s.seed_ratio,
+        .seed_time_min = s.seed_time_min,
     };
 }
 
@@ -111,6 +117,12 @@ test "plan: mega_down == per_file_down" {
     const p = plan(.{ .cap_total_kbs = 900 }, .{ .files_downloading = 3, .torrents_downloading = 1, .any_downloading = true });
     try std.testing.expect(p.per_file_down > 0);
     try std.testing.expectEqual(p.per_file_down, p.mega_down);
+}
+
+test "plan copies seed ratio and seed time from settings" {
+    const p = plan(.{ .seed_ratio = 1.5, .seed_time_min = 90 }, .{ .files_downloading = 0, .torrents_downloading = 0, .any_downloading = false });
+    try std.testing.expectEqual(@as(f32, 1.5), p.seed_ratio);
+    try std.testing.expectEqual(@as(u32, 90), p.seed_time_min);
 }
 
 test "hasSlot respects both counts" {
