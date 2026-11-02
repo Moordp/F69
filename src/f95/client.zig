@@ -125,10 +125,16 @@ pub const Client = struct {
     }
 
     fn getWithAccept(self: *Client, url: []const u8, accept: ?[]const u8) errs.Error![]u8 {
+        return self.getWithAcceptOpts(url, accept, true);
+    }
+
+    /// `forum` = attach the session cookie and wait for the rate limit
+    /// (the rate limit is skipped for CDN URLs either way).
+    fn getWithAcceptOpts(self: *Client, url: []const u8, accept: ?[]const u8, forum: bool) errs.Error![]u8 {
         log.debug("GET {s}", .{url});
         var attempt: u32 = 0;
         while (true) : (attempt += 1) {
-            const result = self.getOnce(url, accept) catch |e| switch (e) {
+            const result = self.getOnce(url, accept, forum) catch |e| switch (e) {
                 errs.Error.ServerError => {
                     if (attempt + 1 >= 3) {
                         log.warn("GET 5xx after {d} attempts, giving up: {s}", .{ attempt + 1, url });
@@ -160,23 +166,17 @@ pub const Client = struct {
         }
     }
 
-    fn getOnce(self: *Client, url: []const u8, accept: ?[]const u8) errs.Error![]u8 {
+    fn getOnce(self: *Client, url: []const u8, accept: ?[]const u8, forum: bool) errs.Error![]u8 {
         // Only throttle forum-domain requests. Image fetches go to
         // `attachments.f95zone.to`, a Cloudflare-fronted asset host
         // that doesn't share the forum's rate budget — serializing
         // them at 1.5 s/image turned a 10-screenshot sync into a
         // 17-second wait for no reason.
-        if (!isCdnUrl(url)) self.waitRateLimit();
+        if (forum and !isCdnUrl(url)) self.waitRateLimit();
 
         // Snapshot the cookie under its lock so a concurrent `setCookie`
         // can't free the slice mid-fetch. The dupe is freed below.
-        const cookie_snapshot: ?[]u8 = blk: {
-            self.cookie_lock.lockUncancelable(self.io);
-            defer self.cookie_lock.unlock(self.io);
-            const c = self.cookie orelse break :blk null;
-            const dup = self.alloc.dupe(u8, c) catch return errs.Error.OutOfMemory;
-            break :blk dup;
-        };
+        const cookie_snapshot: ?[]u8 = if (forum) self.cookieSnapshot() catch return errs.Error.OutOfMemory else null;
         defer if (cookie_snapshot) |c| self.alloc.free(c);
 
         var aw: Io.Writer.Allocating = .init(self.alloc);
@@ -231,26 +231,58 @@ pub const Client = struct {
     /// response body on 2xx; classifies non-2xx the same way as `get`.
     /// Caller frees the body.
     pub fn postForm(self: *Client, url: []const u8, body: []const u8) errs.Error![]u8 {
+        const reply = try self.postRaw(url, body, &.{}, true);
+        if (reply.status != 200) {
+            self.alloc.free(reply.body);
+            log.warn("POST status {d}: {s}", .{ reply.status, url });
+            return classifyStatus(reply.status);
+        }
+        log.debug("POST ok: {d} bytes from {s}", .{ reply.body.len, url });
+        return reply.body;
+    }
+
+    /// Status code plus body (owned by `Client.alloc`).
+    pub const Reply = struct { status: u16, body: []u8 };
+
+    /// Like `postForm`, plus `extra_headers` ("Name: value" lines, at most
+    /// `MAX_EXTRA_HEADERS`; an `Accept` line replaces the default). The
+    /// reply comes back for every status, so the caller reads it (F95's
+    /// masked-link endpoint answers JSON or an HTML captcha page). The
+    /// session cookie goes only to f95zone.to hosts. Caller frees `body`
+    /// with `Client.alloc`.
+    pub fn postFormWith(self: *Client, url: []const u8, body: []const u8, extra_headers: []const []const u8) errs.Error!Reply {
+        return self.postRaw(url, body, extra_headers, isF95Url(url));
+    }
+
+    pub const MAX_EXTRA_HEADERS = 6;
+
+    fn postRaw(self: *Client, url: []const u8, body: []const u8, extra: []const []const u8, send_cookie: bool) errs.Error!Reply {
+        if (extra.len > MAX_EXTRA_HEADERS) return errs.Error.HttpStatusError;
         if (!isCdnUrl(url)) self.waitRateLimit();
 
-        const cookie_snapshot: ?[]u8 = blk: {
-            self.cookie_lock.lockUncancelable(self.io);
-            defer self.cookie_lock.unlock(self.io);
-            const c = self.cookie orelse break :blk null;
-            const dup = self.alloc.dupe(u8, c) catch return errs.Error.OutOfMemory;
-            break :blk dup;
-        };
+        const cookie_snapshot: ?[]u8 = if (send_cookie) self.cookieSnapshot() catch return errs.Error.OutOfMemory else null;
         defer if (cookie_snapshot) |c| self.alloc.free(c);
 
         var aw: Io.Writer.Allocating = .init(self.alloc);
         errdefer aw.deinit();
 
-        var hdr_buf: [3]std.http.Header = undefined;
+        var hdr_buf: [3 + MAX_EXTRA_HEADERS]std.http.Header = undefined;
         var hdr_n: usize = 0;
         hdr_buf[hdr_n] = .{ .name = "content-type", .value = "application/x-www-form-urlencoded" };
         hdr_n += 1;
-        hdr_buf[hdr_n] = .{ .name = "accept", .value = "application/json, text/plain, */*" };
-        hdr_n += 1;
+        var has_accept = false;
+        for (extra) |line| {
+            const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+            const name = std.mem.trim(u8, line[0..colon], " ");
+            if (name.len == 0) continue;
+            if (std.ascii.eqlIgnoreCase(name, "accept")) has_accept = true;
+            hdr_buf[hdr_n] = .{ .name = name, .value = std.mem.trim(u8, line[colon + 1 ..], " ") };
+            hdr_n += 1;
+        }
+        if (!has_accept) {
+            hdr_buf[hdr_n] = .{ .name = "accept", .value = "application/json, text/plain, */*" };
+            hdr_n += 1;
+        }
         if (cookie_snapshot) |c| {
             hdr_buf[hdr_n] = .{ .name = "cookie", .value = c };
             hdr_n += 1;
@@ -275,14 +307,47 @@ pub const Client = struct {
             return errs.Error.NetworkError;
         };
 
-        const code: u16 = @intFromEnum(result.status);
-        if (result.status != .ok) {
-            log.warn("POST status {d}: {s}", .{ code, url });
-            return classifyStatus(code);
-        }
         const out = aw.toOwnedSlice() catch return errs.Error.OutOfMemory;
-        log.debug("POST ok: {d} bytes from {s}", .{ out.len, url });
-        return out;
+        return .{ .status = @intFromEnum(result.status), .body = out };
+    }
+
+    /// Owned copy of the cookie taken under its lock, or null.
+    fn cookieSnapshot(self: *Client) error{OutOfMemory}!?[]u8 {
+        self.cookie_lock.lockUncancelable(self.io);
+        defer self.cookie_lock.unlock(self.io);
+        const c = self.cookie orelse return null;
+        return try self.alloc.dupe(u8, c);
+    }
+
+    /// `Cookie: <cookie>` formatted into `buf` under the cookie lock, for
+    /// callers that hand the header to another program (aria2 fetching an
+    /// F95 attachment). Null when signed out or `buf` is too small. Never
+    /// log the result.
+    pub fn cookieHeader(self: *Client, buf: []u8) ?[]const u8 {
+        self.cookie_lock.lockUncancelable(self.io);
+        defer self.cookie_lock.unlock(self.io);
+        const c = self.cookie orelse return null;
+        return std.fmt.bufPrint(buf, "Cookie: {s}", .{c}) catch null;
+    }
+
+    /// GET for the download resolver: the session cookie goes only to
+    /// f95zone.to hosts, and only forum URLs wait for the rate limit, so a
+    /// file host never sees the F95 session. Same retries and status
+    /// mapping as `get`. Caller frees the body.
+    pub fn getScoped(self: *Client, url: []const u8) errs.Error![]u8 {
+        return self.getWithAcceptOpts(url, null, isF95Url(url));
+    }
+
+    /// True when the URL's host is f95zone.to or one of its subdomains.
+    pub fn isF95Url(url: []const u8) bool {
+        const after = if (std.mem.indexOf(u8, url, "://")) |i| url[i + 3 ..] else return false;
+        var end: usize = 0;
+        while (end < after.len and after[end] != '/' and after[end] != ':' and after[end] != '?' and after[end] != '#') : (end += 1) {}
+        const host = after[0..end];
+        // Userinfo ("user@host") would hide the real host: refuse it.
+        if (std.mem.indexOfScalar(u8, host, '@') != null) return false;
+        return std.ascii.eqlIgnoreCase(host, "f95zone.to") or
+            (host.len > ".f95zone.to".len and std.ascii.endsWithIgnoreCase(host, ".f95zone.to"));
     }
 
     const GuardEvent = union(enum) {
@@ -409,6 +474,30 @@ test "extractThreadId" {
 test "canonicalUrl" {
     var buf: [128]u8 = undefined;
     try std.testing.expectEqualStrings("https://f95zone.to/threads/thread.12345/", try canonicalUrl(&buf, "12345"));
+}
+
+test "client: isF95Url only for f95zone.to and its subdomains" {
+    try std.testing.expect(Client.isF95Url("https://f95zone.to/masked/x"));
+    try std.testing.expect(Client.isF95Url("https://attachments.f95zone.to/a.zip"));
+    try std.testing.expect(Client.isF95Url("HTTPS://F95ZONE.TO:443/x"));
+    try std.testing.expect(!Client.isF95Url("https://pixeldrain.com/api/file/a"));
+    try std.testing.expect(!Client.isF95Url("https://evilf95zone.to/x"));
+    try std.testing.expect(!Client.isF95Url("https://f95zone.to.evil.com/x"));
+    try std.testing.expect(!Client.isF95Url("https://f95zone.to@evil.com/x"));
+    try std.testing.expect(!Client.isF95Url("f95zone.to/x"));
+}
+
+test "client: cookieHeader formats under the lock, null when signed out or too small" {
+    var threaded = Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var c = Client.init(std.testing.allocator, threaded.io(), 0);
+    defer c.deinit();
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqual(@as(?[]const u8, null), c.cookieHeader(&buf));
+    try c.setCookie("xf_user=1");
+    try std.testing.expectEqualStrings("Cookie: xf_user=1", c.cookieHeader(&buf).?);
+    var tiny: [4]u8 = undefined;
+    try std.testing.expectEqual(@as(?[]const u8, null), c.cookieHeader(&tiny));
 }
 
 test "fuzz: url parsers survive arbitrary input" {

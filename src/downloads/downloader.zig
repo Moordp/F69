@@ -18,6 +18,9 @@ const engine_mod = @import("engine.zig");
 const verify = @import("verify.zig");
 const archive = @import("archive.zig");
 const workers = @import("workers.zig");
+const resolve = @import("resolve.zig");
+const errs = @import("errors.zig");
+const dl_classify = @import("f95").dl_classify;
 
 const Engine = engine_mod.Engine;
 const sep = std.fs.path.sep_str;
@@ -37,6 +40,21 @@ const FOLDER_EXISTS = "Folder already exists — registering";
 const MOD_ARCHIVE = "Mod archive — installed by the mod manager";
 /// Written into an extract destination while f69 extracts into it.
 const EXTRACT_MARKER = ".f69-extracting";
+const BROWSER_STAGE2 = "This host needs the browser flow (coming in 0.15.18)";
+/// A resolved link older than this is resolved again on retry (spec §3.6).
+const RESOLVE_CACHE_S: i64 = 3600;
+/// At most one "sign in to F95" prompt per this many seconds.
+const SIGN_IN_EVENT_S: i64 = 60;
+
+/// `EnqueueUrl.host` for a pasted link. Resolved only when it points at a
+/// known file host or an F95 masked link (`needsResolve`).
+pub const HOST_RAW = "raw";
+/// `EnqueueUrl.host` for an F95 donor DDL link: already direct, carries
+/// its own cookie header; never resolved.
+pub const HOST_DONOR = "donor";
+
+/// The resolver's HTTP. Null in `Downloader.init` = links are used as is.
+pub const ResolverCtx = struct { http: resolve.Http };
 
 pub const EnqueueUrl = struct {
     url: []const u8,
@@ -216,12 +234,42 @@ const PostWorker = struct {
     }
 };
 
+/// A resolve run. Owns its href; the `Http` context outlives the
+/// downloader (main.zig declares it first). The result is freed by whoever
+/// takes it, or by `destroy` when nobody did.
+const ResolveWorker = struct {
+    const Out = errs.Error!resolve.Result;
+    w: workers.Worker(Out) = .{},
+    alloc: std.mem.Allocator,
+    http: resolve.Http,
+    href: []u8,
+
+    fn run(rw: *ResolveWorker) Out {
+        // Only the href is classified here: host and wrapper come from it;
+        // the text-based host guess for hidden links must not send a
+        // blanked href to a host resolver.
+        const entry = dl_classify.classify(rw.href, "", "", "");
+        return resolve.resolve(rw.alloc, rw.http, rw.href, entry, 0);
+    }
+
+    fn destroy(rw: *ResolveWorker) void {
+        rw.w.join();
+        if (rw.w.take()) |out| {
+            var res = out catch null;
+            if (res) |*r| r.deinit(rw.alloc);
+        }
+        rw.alloc.free(rw.href);
+        rw.alloc.destroy(rw);
+    }
+};
+
 /// One job as the downloader holds it.
 pub const Rec = struct {
     job: model.Job,
     /// Owned copy for the first start of an `enqueue_torrent` job.
     torrent_bytes: ?[]u8 = null,
     worker: ?*PostWorker = null,
+    resolve_worker: ?*ResolveWorker = null,
     /// step/detail/fail/etc. changed since the last `store.update`.
     dirty: bool = false,
     bytes_dirty: bool = false,
@@ -237,6 +285,7 @@ pub const Downloader = struct {
     engines: Engines,
     roots: Roots,
     settings: policy.Settings,
+    resolver: ?ResolverCtx,
     /// Owns `settings` strings after a `reload_settings`; null while they
     /// are the caller's (from `init`).
     settings_arena: ?std.heap.ArenaAllocator = null,
@@ -245,7 +294,10 @@ pub const Downloader = struct {
     recs: std.ArrayList(*Rec) = .empty,
     /// Workers whose job was removed while they ran; freed once done.
     orphans: std.ArrayList(*PostWorker) = .empty,
+    resolve_orphans: std.ArrayList(*ResolveWorker) = .empty,
     loaded: bool = false,
+    /// When the last `sign_in_needed = .f95` event went out.
+    sign_in_at: ?i64 = null,
 
     cmd_lock: std.Io.Mutex = .init,
     cmds: std.ArrayList(Queued) = .empty,
@@ -283,6 +335,7 @@ pub const Downloader = struct {
         engines: Engines,
         roots: Roots,
         settings: policy.Settings,
+        resolver: ?ResolverCtx,
     ) Downloader {
         return .{
             .alloc = alloc,
@@ -291,6 +344,7 @@ pub const Downloader = struct {
             .engines = engines,
             .roots = roots,
             .settings = settings,
+            .resolver = resolver,
             .snap_arenas = .{ .init(alloc), .init(alloc) },
         };
     }
@@ -303,6 +357,8 @@ pub const Downloader = struct {
         self.recs.deinit(self.alloc);
         for (self.orphans.items) |pw| pw.destroy();
         self.orphans.deinit(self.alloc);
+        for (self.resolve_orphans.items) |rw| rw.destroy();
+        self.resolve_orphans.deinit(self.alloc);
         for (self.cmds.items) |*q| q.arena.deinit();
         self.cmds.deinit(self.alloc);
         for (self.events.items) |e| freeEvent(self.alloc, e);
@@ -433,6 +489,7 @@ pub const Downloader = struct {
         self.schedule(now);
         self.pollEngines(now);
         self.reapWorkers(now);
+        self.reapResolves(now);
         self.tickRetries(now);
         self.schedule(now);
         self.persist(now);
@@ -485,7 +542,7 @@ pub const Downloader = struct {
         switch (q.cmd) {
             .enqueue_url => |e| self.enqueueUrl(e, now),
             .enqueue_torrent => |e| self.enqueueTorrent(e, now),
-            .enqueue_catalogue => |e| log.warn("enqueue_catalogue not implemented yet (stage 2); dropped {s}", .{e.href}),
+            .enqueue_catalogue => |e| self.enqueueCatalogue(e, now),
             .pause => |id| self.userInput(id, .user_pause, now),
             .unpause => |id| self.userInput(id, .user_resume, now),
             .cancel => |id| self.userInput(id, .user_cancel, now),
@@ -582,7 +639,7 @@ pub const Downloader = struct {
             .created_at = now,
             .updated_at = now,
         };
-        _ = self.addJob(&job, null, now);
+        _ = self.addJob(&job, null, now, "enqueued");
     }
 
     fn enqueueTorrent(self: *Downloader, e: EnqueueTorrent, now: i64) void {
@@ -602,11 +659,52 @@ pub const Downloader = struct {
             .created_at = now,
             .updated_at = now,
         };
-        _ = self.addJob(&job, e.torrent_bytes, now);
+        _ = self.addJob(&job, e.torrent_bytes, now, "enqueued");
+    }
+
+    /// Queue a link from the game's catalogue (spec §3.8). The downloader
+    /// reads the catalogue row itself, so the UI only sends the href.
+    fn enqueueCatalogue(self: *Downloader, e: EnqueueCatalogue, now: i64) void {
+        for (self.recs.items) |r| {
+            if (!r.job.step.isTerminal() and std.mem.eql(u8, r.job.source_href, e.href)) return self.toast("Already queued");
+        }
+        const rows = self.store.listCatalogue(self.alloc, e.game_thread_id) catch
+            return self.toast("Could not read the game's download links (database error)");
+        defer store_mod.Store.freeCatalogue(self.alloc, rows);
+        const row = for (rows) |c| {
+            if (std.mem.eql(u8, c.href, e.href)) break c;
+        } else return self.toast("Link not in the catalogue — sync the game first");
+
+        const entry = dl_classify.classify(row.href, row.text, row.lead, row.ctx);
+        var plat_buf: [32]u8 = undefined;
+        const plat = platformLabel(&plat_buf, entry.platform);
+        var title_buf: [512]u8 = undefined;
+        const title = catalogueTitle(&title_buf, e.title, entry.part, plat);
+        const job: model.Job = .{
+            .id = 0,
+            .group_id = e.group_with orelse 0,
+            .kind = switch (entry.kind) {
+                .game => .game,
+                .mod => .mod,
+                .extra, .translation => .extra,
+            },
+            .game_thread_id = e.game_thread_id,
+            .title = title,
+            .source_href = e.href,
+            .host = entry.host.label(),
+            .engine = resolve.engineFor(entry, e.href),
+            .platform = plat,
+            .part = entry.part,
+            .step = .queued,
+            .dest_dir = "",
+            .created_at = now,
+            .updated_at = now,
+        };
+        _ = self.addJob(&job, null, now, "enqueued from thread");
     }
 
     /// Insert (to get the id), set `dest_dir`, keep an owned copy in memory.
-    fn addJob(self: *Downloader, tmpl: *const model.Job, torrent: ?[]const u8, now: i64) ?*Rec {
+    fn addJob(self: *Downloader, tmpl: *const model.Job, torrent: ?[]const u8, now: i64, event_msg: []const u8) ?*Rec {
         const id = self.store.insert(tmpl) catch {
             self.toast("Could not queue the download (database error)");
             return null;
@@ -633,7 +731,7 @@ pub const Downloader = struct {
             return self.addFailed(id);
         };
         self.store.update(&r.job) catch log.err("job {d}: dest_dir not stored", .{id});
-        self.store.addEvent(id, now, .queued, "enqueued") catch |e|
+        self.store.addEvent(id, now, .queued, event_msg) catch |e|
             log.warn("job {d}: event not stored: {s}", .{ id, @errorName(e) });
         self.touched = true;
         return r;
@@ -713,10 +811,127 @@ pub const Downloader = struct {
         }
     }
 
-    /// Resolver hook. Stage 1: the link is used as is. Task 8 replaces this
-    /// with the resolver worker.
+    /// The job just entered `resolving`. Without a resolver, or for a link
+    /// that is already direct, the link is used as is. A link resolved less
+    /// than an hour ago is reused (spec §3.6). Otherwise a worker resolves
+    /// it; `reapResolves` reads the result.
     fn startResolve(self: *Downloader, r: *Rec, now: i64) void {
-        self.transition(r, .{ .resolved = .{ .engine = r.job.engine } }, now, null);
+        const identity: model.Input = .{ .resolved = .{ .engine = r.job.engine } };
+        const rc = self.resolver orelse return self.transition(r, identity, now, null);
+        if (!needsResolve(&r.job)) return self.transition(r, identity, now, null);
+        if (r.job.resolved_url != null) {
+            if (r.job.resolved_at) |at| {
+                if (now - at < RESOLVE_CACHE_S) return self.transition(r, identity, now, null);
+            }
+        }
+        const rw = self.alloc.create(ResolveWorker) catch
+            return self.resolveFailed(r, error.OutOfMemory, now);
+        rw.* = .{ .alloc = self.alloc, .http = rc.http, .href = self.alloc.dupe(u8, r.job.source_href) catch {
+            self.alloc.destroy(rw);
+            return self.resolveFailed(r, error.OutOfMemory, now);
+        } };
+        rw.w.spawn(ResolveWorker.run, .{rw}) catch |e| {
+            log.err("job {d}: resolve worker spawn failed: {s}", .{ r.job.id, @errorName(e) });
+            self.alloc.free(rw.href);
+            self.alloc.destroy(rw);
+            return self.resolveFailed(r, error.NetworkError, now);
+        };
+        if (r.resolve_worker) |old| self.orphanResolve(old);
+        r.resolve_worker = rw;
+    }
+
+    fn orphanResolve(self: *Downloader, rw: *ResolveWorker) void {
+        self.resolve_orphans.append(self.alloc, rw) catch rw.destroy();
+    }
+
+    /// Resolver error (network, out of memory): a retryable network
+    /// failure, on the same back-off as an engine's.
+    fn resolveFailed(self: *Downloader, r: *Rec, e: errs.Error, now: i64) void {
+        var buf: [96]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Could not resolve the link: {s}", .{@errorName(e)}) catch "Could not resolve the link";
+        var t: model.Transition = .{ .step = .failed, .fail = .network, .detail = msg, .attempts = r.job.attempts };
+        if (model.retryDelaySeconds(r.job.attempts)) |d| t.next_retry_at = now + @as(i64, d);
+        self.apply(r, t, now);
+    }
+
+    fn reapResolves(self: *Downloader, now: i64) void {
+        for (self.recs.items) |r| {
+            const rw = r.resolve_worker orelse continue;
+            const out = rw.w.take() orelse continue;
+            r.resolve_worker = null;
+            rw.destroy();
+            var res = out catch |e| {
+                if (r.job.step == .resolving) self.resolveFailed(r, e, now);
+                continue;
+            };
+            defer res.deinit(self.alloc);
+            // Cancelled (or removed and re-added) while the worker ran.
+            if (r.job.step != .resolving) continue;
+            self.applyResolved(r, &res, now);
+        }
+        var i: usize = 0;
+        while (i < self.resolve_orphans.items.len) {
+            const rw = self.resolve_orphans.items[i];
+            if (rw.w.phase.load(.acquire) == @backingInt(workers.Phase.done)) {
+                rw.destroy();
+                _ = self.resolve_orphans.swapRemove(i);
+            } else i += 1;
+        }
+    }
+
+    fn applyResolved(self: *Downloader, r: *Rec, res: *resolve.Result, now: i64) void {
+        const j = &r.job;
+        switch (res.*) {
+            .direct => |d| {
+                self.setResolved(r, d.url, d.headers, d.engine, now) catch return self.resolveFailed(r, error.OutOfMemory, now);
+                if (d.size) |n| {
+                    if (j.bytes_total == null) j.bytes_total = n;
+                }
+                self.transition(r, .{ .resolved = .{ .engine = j.engine } }, now, null);
+            },
+            .mega => |link| {
+                self.setResolved(r, link, &.{}, .megacmd, now) catch return self.resolveFailed(r, error.OutOfMemory, now);
+                self.transition(r, .{ .resolved = .{ .engine = .megacmd } }, now, null);
+            },
+            .torrent_url => |url| {
+                self.setResolved(r, url, &.{}, .aria2_torrent, now) catch return self.resolveFailed(r, error.OutOfMemory, now);
+                self.transition(r, .{ .resolved = .{ .engine = .aria2_torrent } }, now, null);
+            },
+            .needs_browser, .captcha => self.transition(r, .needs_browser, now, null),
+            .dead => |msg| self.transition(r, .{ .dead = msg }, now, null),
+            .auth_required => {
+                self.transition(r, .auth_required, now, "Sign in to F95Zone, then Retry");
+                const due = if (self.sign_in_at) |at| now - at >= SIGN_IN_EVENT_S else true;
+                if (due) {
+                    self.sign_in_at = now;
+                    self.pushEvent(.{ .sign_in_needed = .f95 });
+                }
+            },
+        }
+    }
+
+    /// Store the resolver's answer on the job. A changed engine moves the
+    /// job's (still empty) download folder under the new engine's name.
+    fn setResolved(self: *Downloader, r: *Rec, url: []const u8, headers: []const []const u8, engine: model.EngineKind, now: i64) !void {
+        const j = &r.job;
+        const new_url = try self.alloc.dupe(u8, url);
+        errdefer self.alloc.free(new_url);
+        const new_headers = try dupeList(self.alloc, headers);
+        errdefer freeList(self.alloc, new_headers);
+        if (engine != j.engine) {
+            const dir = try std.fmt.allocPrint(self.alloc, "{s}" ++ sep ++ "{s}" ++ sep ++ "{d}" ++ sep, .{
+                self.roots.downloads_root, @tagName(engine), j.id,
+            });
+            freeStr(self.alloc, j.dest_dir);
+            j.dest_dir = dir;
+            j.engine = engine;
+        }
+        if (j.resolved_url) |old| freeStr(self.alloc, old);
+        j.resolved_url = new_url;
+        freeList(self.alloc, j.resolved_headers);
+        j.resolved_headers = new_headers;
+        j.resolved_at = now;
+        r.dirty = true;
     }
 
     fn engineFor(self: *Downloader, kind: model.EngineKind) ?Engine {
@@ -730,14 +945,14 @@ pub const Downloader = struct {
     fn missingEngine(self: *Downloader, r: *Rec, now: i64) void {
         const t: model.Transition = switch (r.job.engine) {
             .megacmd => .{ .step = .failed, .fail = .engine_missing, .detail = "MEGAcmd is not installed", .attempts = r.job.attempts },
-            else => .{ .step = .failed, .fail = .unknown, .detail = "This host needs the browser flow (coming in 0.15.18)", .attempts = r.job.attempts },
+            else => .{ .step = .failed, .fail = .unknown, .detail = BROWSER_STAGE2, .attempts = r.job.attempts },
         };
         self.apply(r, t, now);
     }
 
     fn startEngine(self: *Downloader, r: *Rec, now: i64) void {
         const eng = self.engineFor(r.job.engine) orelse return self.missingEngine(r, now);
-        if (r.job.engine == .aria2_torrent and r.torrent_bytes == null and !isFetchableTorrentHref(r.job.source_href)) {
+        if (r.job.engine == .aria2_torrent and r.torrent_bytes == null and !isFetchableTorrentHref(r.job.resolved_url orelse r.job.source_href)) {
             // Stage-1 limit: the .torrent body is kept in memory only.
             return self.apply(r, .{
                 .step = .failed,
@@ -912,7 +1127,17 @@ pub const Downloader = struct {
                 r.job.bytes_uploaded = 0;
                 r.dirty = true;
             },
-            .open_browser => self.pushEvent(.{ .open_url = r.job.source_href }),
+            .open_browser => {
+                // Stage 2 has no browser engine: the job cannot wait for
+                // a browser download that nothing would pick up.
+                if (self.engines.browser == null) return self.apply(r, .{
+                    .step = .failed,
+                    .fail = .unknown,
+                    .detail = BROWSER_STAGE2,
+                    .attempts = r.job.attempts,
+                }, now);
+                self.pushEvent(.{ .open_url = r.job.source_href });
+            },
         }
     }
 
@@ -1240,11 +1465,58 @@ pub const Downloader = struct {
 
     fn freeRec(self: *Downloader, r: *Rec) void {
         if (r.worker) |pw| self.orphan(pw);
+        if (r.resolve_worker) |rw| self.orphanResolve(rw);
         freeJobStrings(self.alloc, &r.job);
         if (r.torrent_bytes) |b| self.alloc.free(b);
         self.alloc.destroy(r);
     }
 };
+
+/// True when the job's link must go through the resolver: every catalogue
+/// job (its host is a `dl_classify.Host` label), and a pasted (`HOST_RAW`)
+/// link that points at a known file host or is an F95 masked link. Donor,
+/// recipe (ddl/mirror) and torrent jobs are direct. Derived from stored
+/// fields so it holds after a restart.
+fn needsResolve(j: *const model.Job) bool {
+    if (std.mem.eql(u8, j.host, HOST_RAW)) {
+        const p = dl_classify.parseHref(j.source_href);
+        return p.wrapper == .masked or p.host.isFileHost();
+    }
+    for (std.enums.values(dl_classify.Host)) |h| {
+        if (std.mem.eql(u8, j.host, h.label())) return true;
+    }
+    return false;
+}
+
+/// "Win", "Linux", "Mac", "Android" for the set flags joined by "/";
+/// null when none is set.
+fn platformLabel(buf: []u8, p: dl_classify.Platform) ?[]const u8 {
+    var n: usize = 0;
+    const names = [_]struct { on: bool, name: []const u8 }{
+        .{ .on = p.windows, .name = "Win" },
+        .{ .on = p.linux, .name = "Linux" },
+        .{ .on = p.mac, .name = "Mac" },
+        .{ .on = p.android, .name = "Android" },
+    };
+    for (names) |it| {
+        if (!it.on) continue;
+        const sep_len: usize = if (n > 0) 1 else 0;
+        if (n + sep_len + it.name.len > buf.len) break;
+        if (sep_len == 1) buf[n] = '/';
+        n += sep_len;
+        @memcpy(buf[n..][0..it.name.len], it.name);
+        n += it.name.len;
+    }
+    return if (n == 0) null else buf[0..n];
+}
+
+/// `<game> · Part N`, else `<game> · <platform>`, else `<game>`. A title
+/// too long for `buf` keeps just the game name.
+fn catalogueTitle(buf: []u8, game: []const u8, part: ?u8, plat: ?[]const u8) []const u8 {
+    if (part) |n| return std.fmt.bufPrint(buf, "{s} · Part {d}", .{ game, n }) catch game;
+    if (plat) |p| return std.fmt.bufPrint(buf, "{s} · {s}", .{ game, p }) catch game;
+    return game;
+}
 
 /// Replace path separators and dot-only names so a version string is one
 /// safe path segment. Empty / null → "unversioned".
@@ -1346,6 +1618,12 @@ fn dupeList(a: std.mem.Allocator, list: []const []const u8) ![]const []const u8 
         n += 1;
     }
     return out;
+}
+
+fn freeList(a: std.mem.Allocator, list: []const []const u8) void {
+    if (list.len == 0) return;
+    for (list) |s| freeStr(a, s);
+    a.free(list);
 }
 
 /// Deep copy of every string in `j` (same convention as `store.readJob`).
@@ -1481,6 +1759,10 @@ const Fx = struct {
     data_root: []u8,
 
     fn create(settings: policy.Settings) !*Fx {
+        return createWith(settings, null);
+    }
+
+    fn createWith(settings: policy.Settings, resolver: ?ResolverCtx) !*Fx {
         const a = testing.allocator;
         const fx = try a.create(Fx);
         errdefer a.destroy(fx);
@@ -1496,6 +1778,7 @@ const Fx = struct {
             .{ .aria2 = fx.fake.engine() },
             .{ .downloads_root = fx.dl_root, .library_root = fx.lib_root, .data_root = fx.data_root },
             settings,
+            resolver,
         );
         return fx;
     }
@@ -2071,4 +2354,288 @@ test "downloader: a paused job is not counted as active in the snapshot totals" 
     const snap = fx.dl.snapshot();
     defer fx.dl.releaseSnapshot();
     try testing.expectEqual(@as(u32, 0), snap.totals.active);
+}
+
+// ---------------------------------------------------------------- resolver tests
+
+/// Canned `resolve.Http` (same idea as resolve.zig's test stub). Called on
+/// the resolve worker thread, so the hit counter is atomic.
+const ResolveStub = struct {
+    const Route = struct { prefix: []const u8, status: u16 = 200, body: []const u8 };
+    routes: []const Route,
+    cookie: ?[]const u8 = null,
+    hits: std.atomic.Value(u32) = .init(0),
+    /// While true, every call waits (to catch a job mid-resolve).
+    hold: std.atomic.Value(bool) = .init(false),
+
+    fn ctx(self: *ResolveStub) ResolverCtx {
+        return .{ .http = .{ .ctx = self, .get = get, .postForm = post, .cookieHeader = cookieHeader } };
+    }
+    fn cast(p: *anyopaque) *ResolveStub {
+        return @ptrCast(@alignCast(p));
+    }
+    fn find(self: *ResolveStub, url: []const u8) ?Route {
+        for (self.routes) |r| if (std.mem.startsWith(u8, url, r.prefix)) return r;
+        return null;
+    }
+    fn get(p: *anyopaque, alloc: std.mem.Allocator, url: []const u8) errs.Error![]u8 {
+        const self = cast(p);
+        _ = self.hits.fetchAdd(1, .monotonic);
+        while (self.hold.load(.acquire)) std.Thread.yield() catch {};
+        const r = self.find(url) orelse return errs.Error.NotFound;
+        return alloc.dupe(u8, r.body) catch errs.Error.OutOfMemory;
+    }
+    fn post(p: *anyopaque, alloc: std.mem.Allocator, url: []const u8, _: []const u8, _: []const []const u8) errs.Error!resolve.Http.Reply {
+        const self = cast(p);
+        _ = self.hits.fetchAdd(1, .monotonic);
+        while (self.hold.load(.acquire)) std.Thread.yield() catch {};
+        const r = self.find(url) orelse return errs.Error.NotFound;
+        return .{ .status = r.status, .body = alloc.dupe(u8, r.body) catch return errs.Error.OutOfMemory };
+    }
+    fn cookieHeader(p: *anyopaque) ?[]const u8 {
+        return cast(p).cookie;
+    }
+};
+
+const PD_INFO: ResolveStub.Route = .{ .prefix = "https://pixeldrain.com/api/file/abc/info", .body = "{\"name\":\"Game.zip\",\"size\":12345}" };
+
+/// Tick until no job has a resolve worker (the stub answers at once; the
+/// worker is still a real thread). Gives up after 5 s.
+fn settle(fx: *Fx, now: i64) !void {
+    fx.dl.stepOnce(now);
+    var waited_ms: u32 = 0;
+    while (blk: {
+        for (fx.dl.recs.items) |r| if (r.resolve_worker != null) break :blk true;
+        break :blk false;
+    }) {
+        if (waited_ms >= 5000) return error.ResolveWorkerTimeout;
+        fx.env.io.sleep(std.Io.Duration.fromMilliseconds(5), .real) catch {};
+        waited_ms += 5;
+        fx.dl.stepOnce(now);
+    }
+}
+
+/// `download_sources` belongs to the library schema; the in-memory store
+/// only has the dl tables, so the test creates it.
+fn seedCatalogue(fx: *Fx, tid: u64, ord: i64, href: []const u8, text: []const u8, lead: []const u8) !void {
+    try fx.dl.store.conn.exec(
+        \\CREATE TABLE IF NOT EXISTS download_sources (
+        \\  game_thread_id INTEGER NOT NULL, ord INTEGER NOT NULL, href TEXT NOT NULL,
+        \\  text TEXT NOT NULL DEFAULT '', lead TEXT NOT NULL DEFAULT '', ctx TEXT NOT NULL DEFAULT '',
+        \\  PRIMARY KEY (game_thread_id, ord))
+    );
+    try fx.dl.store.conn.inner.exec(
+        "INSERT INTO download_sources(game_thread_id, ord, href, text, lead, ctx) VALUES (?, ?, ?, ?, ?, ?)",
+        .{ @as(i64, @intCast(tid)), ord, href, text, lead, "" },
+    );
+}
+
+fn enqueueRaw(fx: *Fx, url: []const u8, host: []const u8) void {
+    fx.dl.send(.{ .enqueue_url = .{ .url = url, .kind = .game, .game_thread_id = 77, .title = "Game", .host = host } });
+}
+
+fn countEvents(evs: []const UiEvent, tag: std.meta.Tag(UiEvent)) usize {
+    var n: usize = 0;
+    for (evs) |e| {
+        if (e == tag) n += 1;
+    }
+    return n;
+}
+
+test "downloader: enqueue_catalogue twice → one job + toast" {
+    var fx = try Fx.create(.{});
+    defer fx.destroy();
+    try seedCatalogue(fx, 9, 0, "https://pixeldrain.com/u/abc", "Pixeldrain", "Win");
+    try seedCatalogue(fx, 9, 1, "https://pixeldrain.com/u/def", "Pixeldrain", "Part 2");
+
+    fx.dl.send(.{ .enqueue_catalogue = .{ .game_thread_id = 9, .href = "https://pixeldrain.com/u/abc", .title = "My Game" } });
+    fx.dl.stepOnce(1000);
+    fx.dl.send(.{ .enqueue_catalogue = .{ .game_thread_id = 9, .href = "https://pixeldrain.com/u/abc", .title = "My Game" } });
+    fx.dl.send(.{ .enqueue_catalogue = .{ .game_thread_id = 9, .href = "https://pixeldrain.com/u/def", .title = "My Game", .group_with = 1 } });
+    fx.dl.stepOnce(1001);
+
+    try testing.expectEqual(@as(usize, 2), fx.dl.recs.items.len);
+    const j = fx.dl.recs.items[0].job;
+    try testing.expectEqualStrings("My Game · Win", j.title);
+    try testing.expectEqualStrings("Win", j.platform.?);
+    try testing.expectEqualStrings("Pixeldrain", j.host);
+    try testing.expectEqual(model.Kind.game, j.kind);
+    try testing.expectEqual(model.EngineKind.aria2_http, j.engine);
+    try testing.expectEqual(j.id, j.group_id);
+    const p2 = fx.dl.recs.items[1].job;
+    try testing.expectEqualStrings("My Game · Part 2", p2.title);
+    try testing.expectEqual(@as(?u8, 2), p2.part);
+    try testing.expectEqual(j.id, p2.group_id);
+
+    const evs = fx.dl.drainEvents(testing.allocator);
+    defer Downloader.freeEvents(testing.allocator, evs);
+    try testing.expectEqual(@as(usize, 1), evs.len);
+    try testing.expectEqualStrings("Already queued", evs[0].toast);
+
+    const logged = try fx.dl.store.listEvents(testing.allocator, j.id);
+    defer store_mod.Store.freeEvents(testing.allocator, logged);
+    try testing.expectEqualStrings("enqueued from thread", logged[0].msg);
+}
+
+test "downloader: enqueue_catalogue for an href not in the catalogue → toast, no job" {
+    var fx = try Fx.create(.{});
+    defer fx.destroy();
+    try seedCatalogue(fx, 9, 0, "https://pixeldrain.com/u/abc", "Pixeldrain", "");
+    fx.dl.send(.{ .enqueue_catalogue = .{ .game_thread_id = 9, .href = "https://pixeldrain.com/u/zzz", .title = "G" } });
+    fx.dl.send(.{ .enqueue_catalogue = .{ .game_thread_id = 10, .href = "https://pixeldrain.com/u/abc", .title = "G" } });
+    fx.dl.stepOnce(1000);
+    try testing.expectEqual(@as(usize, 0), fx.dl.recs.items.len);
+    const evs = fx.dl.drainEvents(testing.allocator);
+    defer Downloader.freeEvents(testing.allocator, evs);
+    try testing.expectEqual(@as(usize, 2), evs.len);
+    for (evs) |e| try testing.expectEqualStrings("Link not in the catalogue — sync the game first", e.toast);
+}
+
+test "downloader: catalogue job resolves through the stub and starts the engine" {
+    var stub: ResolveStub = .{ .routes = &.{PD_INFO} };
+    var fx = try Fx.createWith(.{}, stub.ctx());
+    defer fx.destroy();
+    try seedCatalogue(fx, 9, 0, "https://pixeldrain.com/u/abc", "Pixeldrain", "");
+    fx.dl.send(.{ .enqueue_catalogue = .{ .game_thread_id = 9, .href = "https://pixeldrain.com/u/abc", .title = "G" } });
+    try settle(fx, 1000);
+
+    const j = fx.dl.recs.items[0].job;
+    try testing.expectEqual(model.Step.downloading, j.step);
+    try testing.expectEqual(@as(usize, 1), fx.fake.started);
+    try testing.expectEqualStrings("Pixeldrain", j.host);
+    try testing.expect(std.mem.endsWith(u8, j.resolved_url.?, "?download"));
+    try testing.expectEqual(@as(?i64, 1000), j.resolved_at);
+    try testing.expectEqual(@as(u32, 1), stub.hits.load(.monotonic));
+
+    const rows = try fx.dl.store.loadAll(testing.allocator);
+    defer store_mod.Store.freeJobs(testing.allocator, rows);
+    try testing.expectEqualStrings(j.resolved_url.?, rows[0].resolved_url.?);
+}
+
+test "downloader: needs_browser without a browser engine → failed with the stage-2 message" {
+    var stub: ResolveStub = .{ .routes = &.{} };
+    var fx = try Fx.createWith(.{}, stub.ctx());
+    defer fx.destroy();
+    try seedCatalogue(fx, 9, 0, "https://workupload.com/file/xyz", "Workupload", "");
+    fx.dl.send(.{ .enqueue_catalogue = .{ .game_thread_id = 9, .href = "https://workupload.com/file/xyz", .title = "G" } });
+    try settle(fx, 1000);
+
+    const j = fx.dl.recs.items[0].job;
+    try testing.expectEqual(model.Step.failed, j.step);
+    try testing.expectEqual(model.FailReason.unknown, j.fail.?);
+    try testing.expectEqualStrings(BROWSER_STAGE2, j.step_detail);
+    try testing.expectEqual(@as(?i64, null), j.next_retry_at);
+    try testing.expectEqual(@as(usize, 0), fx.fake.started);
+    const evs = fx.dl.drainEvents(testing.allocator);
+    defer Downloader.freeEvents(testing.allocator, evs);
+    try testing.expectEqual(@as(usize, 0), countEvents(evs, .open_url));
+}
+
+test "downloader: auth_required → failed{auth_required} + sign_in_needed event, no auto-retry" {
+    var stub: ResolveStub = .{ .routes = &.{.{ .prefix = "https://f95zone.to/masked/", .status = 403, .body = "no" }} };
+    var fx = try Fx.createWith(.{}, stub.ctx());
+    defer fx.destroy();
+    enqueueRaw(fx, "https://f95zone.to/masked/pixeldrain.com/abc/x", HOST_RAW);
+    try settle(fx, 1000);
+
+    const id = fx.dl.recs.items[0].job.id;
+    try testing.expectEqual(model.Step.failed, fx.rec(id).job.step);
+    try testing.expectEqual(model.FailReason.auth_required, fx.rec(id).job.fail.?);
+    try testing.expectEqual(@as(?i64, null), fx.rec(id).job.next_retry_at);
+    {
+        const evs = fx.dl.drainEvents(testing.allocator);
+        defer Downloader.freeEvents(testing.allocator, evs);
+        try testing.expectEqual(@as(usize, 1), countEvents(evs, .sign_in_needed));
+    }
+
+    // No automatic retry, however long we wait.
+    fx.dl.stepOnce(1000 + 10_000);
+    try testing.expectEqual(model.Step.failed, fx.rec(id).job.step);
+    try testing.expectEqual(@as(u32, 1), stub.hits.load(.monotonic));
+
+    // A second job failing within 60 s does not prompt again.
+    enqueueRaw(fx, "https://f95zone.to/masked/pixeldrain.com/def/y", HOST_RAW);
+    try settle(fx, 1000 + 10_000 + 30);
+    try testing.expectEqual(model.FailReason.auth_required, fx.dl.recs.items[1].job.fail.?);
+    enqueueRaw(fx, "https://f95zone.to/masked/pixeldrain.com/ghi/z", HOST_RAW);
+    try settle(fx, 1000 + 10_000 + 30);
+    const evs = fx.dl.drainEvents(testing.allocator);
+    defer Downloader.freeEvents(testing.allocator, evs);
+    try testing.expectEqual(@as(usize, 1), countEvents(evs, .sign_in_needed));
+}
+
+test "downloader: re-resolve only when resolved_at older than 1 h on retry" {
+    var stub: ResolveStub = .{ .routes = &.{PD_INFO} };
+    var fx = try Fx.createWith(.{}, stub.ctx());
+    defer fx.destroy();
+    enqueueRaw(fx, "https://pixeldrain.com/u/abc", HOST_RAW);
+    try settle(fx, 1000);
+    const r = fx.dl.recs.items[0];
+    try testing.expectEqual(model.Step.downloading, r.job.step);
+    try testing.expectEqual(@as(u32, 1), stub.hits.load(.monotonic));
+
+    // Fresh link (100 s old): the retry reuses it.
+    r.job.step = .failed;
+    r.job.fail = .unknown;
+    r.job.resolved_at = 5000 - 100;
+    fx.dl.send(.{ .retry = r.job.id });
+    try settle(fx, 5000);
+    try testing.expectEqual(model.Step.downloading, r.job.step);
+    try testing.expectEqual(@as(u32, 1), stub.hits.load(.monotonic));
+    try testing.expectEqual(@as(?i64, 5000 - 100), r.job.resolved_at);
+
+    // Stale link (4000 s old): resolved again.
+    r.job.step = .failed;
+    r.job.fail = .unknown;
+    r.job.resolved_at = 9000 - 4000;
+    fx.dl.send(.{ .retry = r.job.id });
+    try settle(fx, 9000);
+    try testing.expectEqual(model.Step.downloading, r.job.step);
+    try testing.expectEqual(@as(u32, 2), stub.hits.load(.monotonic));
+    try testing.expectEqual(@as(?i64, 9000), r.job.resolved_at);
+}
+
+test "downloader: raw enqueue_url to a known host resolves; donor/raw plain URLs do not" {
+    var stub: ResolveStub = .{ .routes = &.{PD_INFO} };
+    var fx = try Fx.createWith(.{}, stub.ctx());
+    defer fx.destroy();
+    enqueueRaw(fx, "https://pixeldrain.com/u/abc", HOST_RAW);
+    enqueueRaw(fx, "https://example.invalid/a.bin", HOST_RAW);
+    enqueueRaw(fx, "https://pixeldrain.com/u/zzz", HOST_DONOR);
+    try settle(fx, 1000);
+
+    try testing.expectEqual(@as(u32, 1), stub.hits.load(.monotonic));
+    for (fx.dl.recs.items) |r| try testing.expectEqual(model.Step.downloading, r.job.step);
+    try testing.expect(std.mem.endsWith(u8, fx.dl.recs.items[0].job.resolved_url.?, "/api/file/abc?download"));
+    try testing.expectEqual(@as(?[]const u8, null), fx.dl.recs.items[1].job.resolved_url);
+    try testing.expectEqual(@as(?[]const u8, null), fx.dl.recs.items[2].job.resolved_url);
+}
+
+test "downloader: resolve worker errors fail as network with a retry; cancel/remove while resolving drop the result" {
+    var stub: ResolveStub = .{ .routes = &.{} };
+    var fx = try Fx.createWith(.{}, stub.ctx());
+    defer fx.destroy();
+    // Masked POST with no route → NotFound error from the stub.
+    enqueueRaw(fx, "https://f95zone.to/masked/pixeldrain.com/abc/x", HOST_RAW);
+    try settle(fx, 1000);
+    const j = fx.dl.recs.items[0].job;
+    try testing.expectEqual(model.Step.failed, j.step);
+    try testing.expectEqual(model.FailReason.network, j.fail.?);
+    try testing.expectEqual(@as(?i64, 1030), j.next_retry_at);
+
+    enqueueRaw(fx, "https://f95zone.to/masked/pixeldrain.com/def/y", HOST_RAW);
+    enqueueRaw(fx, "https://f95zone.to/masked/pixeldrain.com/ghi/z", HOST_RAW);
+    stub.hold.store(true, .release);
+    fx.dl.stepOnce(1001);
+    const a = fx.dl.recs.items[1];
+    const b_id = fx.dl.recs.items[2].job.id;
+    try testing.expectEqual(model.Step.resolving, a.job.step);
+    fx.dl.send(.{ .cancel = a.job.id });
+    fx.dl.send(.{ .remove = b_id });
+    fx.dl.stepOnce(1002);
+    try testing.expectEqual(@as(usize, 1), fx.dl.resolve_orphans.items.len);
+    stub.hold.store(false, .release);
+    try settle(fx, 1003);
+    try testing.expectEqual(model.Step.cancelled, a.job.step);
+    try testing.expectEqual(@as(?*Rec, null), fx.dl.find(b_id));
 }

@@ -44,7 +44,7 @@ fn isTorrent(j: *const Job) bool {
 /// Donor DDL jobs: plain HTTP with no seeding obligation, so Cancel and
 /// Remove are always offered.
 fn isDonor(j: *const Job) bool {
-    return std.mem.eql(u8, j.host, "donor");
+    return std.mem.eql(u8, j.host, downloads.downloader.HOST_DONOR);
 }
 
 /// The snapshot copied into the dvui per-frame arena (no lock held while
@@ -147,7 +147,7 @@ pub fn downloadsScreen(frame: *Frame) !bool {
         if (style.button(@src(), "Download", .{}, .{ .style = .highlight })) {
             const url = std.mem.trim(u8, state.dlUrlSlice(), " \t\n\r");
             if (url.len > 0) {
-                frame.dl.send(.{ .enqueue_url = .{ .url = url, .kind = .game, .game_thread_id = 0, .title = url, .host = "raw" } });
+                frame.dl.send(.{ .enqueue_url = .{ .url = url, .kind = .game, .game_thread_id = 0, .title = url, .host = downloads.downloader.HOST_RAW } });
                 @memset(&state.dl_url_buf, 0);
             }
         }

@@ -427,6 +427,9 @@ pub fn main(init: std.process.Init) !void {
     // thread is joined before the engine goes away.
     defer aria2_engine.deinit();
 
+    // The resolver's HTTP goes through the shared F95 client (declared
+    // above, so it outlives the downloader and its resolve workers).
+    var dl_http: downloads.http_f95.F95Http = .{ .client = &f95_client };
     var dl = downloads.Downloader.init(
         gpa,
         init.io,
@@ -434,6 +437,7 @@ pub fn main(init: std.process.Init) !void {
         .{ .aria2 = aria2_engine.engine() },
         .{ .downloads_root = downloads_root, .library_root = library_root, .data_root = data_root },
         dl_settings,
+        .{ .http = dl_http.http() },
     );
     // `deinit` stops the thread (no-op if the UI already did) and closes
     // the store.

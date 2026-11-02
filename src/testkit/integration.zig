@@ -1841,6 +1841,7 @@ test "flow: a missing aria2 binary fails a download enqueue cleanly" {
         .{ .aria2 = aria2.engine() },
         .{ .downloads_root = dl_root, .library_root = env.root, .data_root = env.root },
         .{},
+        null,
     );
     defer dl.deinit();
 

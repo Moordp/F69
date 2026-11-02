@@ -428,7 +428,7 @@ fn onDonorDownloadDone(frame: *Frame, job: *DonorDownloadJob) void {
         .game_thread_id = p.thread_id,
         .title = p.game_name,
         .version = p.game_version,
-        .host = "donor",
+        .host = downloads.downloader.HOST_DONOR,
         .headers = headers,
     } });
     state.setDownloadMsg("donor DDL: queued — see Downloads");

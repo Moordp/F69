@@ -42,6 +42,7 @@ pub const workers = @import("workers.zig");
 
 /// Link resolver: catalogue href → direct URL / MEGA / needs-browser.
 pub const resolve = @import("resolve.zig");
+pub const http_f95 = @import("http_f95.zig");
 pub const Downloader = downloader.Downloader;
 pub const Command = downloader.Command;
 pub const UiEvent = downloader.UiEvent;
@@ -64,4 +65,5 @@ test {
     _ = downloader;
     _ = workers;
     _ = resolve;
+    _ = @import("http_f95.zig");
 }

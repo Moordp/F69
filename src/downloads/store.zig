@@ -46,6 +46,9 @@ const COLS =
 
 pub const Event = struct { at: i64, step: model.Step, msg: []const u8 };
 
+/// One `download_sources` row, as `dl_classify.classify` takes it.
+pub const CatalogueRow = struct { href: []const u8, text: []const u8, lead: []const u8, ctx: []const u8 };
+
 fn i64Of(v: u64) i64 {
     return @intCast(@min(v, std.math.maxInt(i64)));
 }
@@ -212,6 +215,44 @@ pub const Store = struct {
     pub fn freeEvents(alloc: std.mem.Allocator, events: []Event) void {
         for (events) |e| alloc.free(e.msg);
         alloc.free(events);
+    }
+
+    /// A game's catalogued download links (`download_sources`, written by
+    /// the library's scrape) in page order. The table lives in the library
+    /// schema, so on a store opened without it this fails with
+    /// `StoreFailed`. Free with `freeCatalogue`.
+    pub fn listCatalogue(self: *Store, alloc: std.mem.Allocator, game_thread_id: u64) errs.Error![]CatalogueRow {
+        var rows = self.conn.inner.rows(
+            "SELECT href, text, lead, ctx FROM download_sources WHERE game_thread_id = ? ORDER BY ord",
+            .{i64Of(game_thread_id)},
+        ) catch return self.fail();
+        defer rows.deinit();
+        var out: std.ArrayList(CatalogueRow) = .empty;
+        errdefer {
+            for (out.items) |row| freeCatalogueRow(alloc, row);
+            out.deinit(alloc);
+        }
+        while (rows.next()) |r| {
+            var row: CatalogueRow = .{ .href = "", .text = "", .lead = "", .ctx = "" };
+            errdefer freeCatalogueRow(alloc, row);
+            row.href = alloc.dupe(u8, r.text(0)) catch return errs.Error.OutOfMemory;
+            row.text = alloc.dupe(u8, r.text(1)) catch return errs.Error.OutOfMemory;
+            row.lead = alloc.dupe(u8, r.text(2)) catch return errs.Error.OutOfMemory;
+            row.ctx = alloc.dupe(u8, r.text(3)) catch return errs.Error.OutOfMemory;
+            out.append(alloc, row) catch return errs.Error.OutOfMemory;
+        }
+        if (rows.err) |_| return self.fail();
+        return out.toOwnedSlice(alloc) catch errs.Error.OutOfMemory;
+    }
+
+    pub fn freeCatalogue(alloc: std.mem.Allocator, rows: []CatalogueRow) void {
+        for (rows) |r| freeCatalogueRow(alloc, r);
+        alloc.free(rows);
+    }
+
+    fn freeCatalogueRow(alloc: std.mem.Allocator, r: CatalogueRow) void {
+        // Empty fields are zero-length (no allocation); free skips them.
+        for ([_][]const u8{ r.href, r.text, r.lead, r.ctx }) |s| alloc.free(s);
     }
 
     /// Delete the oldest terminal (done/failed/cancelled) jobs, and their

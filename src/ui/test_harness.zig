@@ -110,6 +110,7 @@ pub const Harness = struct {
             .{ .aria2 = self.dl_fake.engine() },
             .{ .downloads_root = downloads_root, .library_root = library_root, .data_root = try a.dupe(u8, root) },
             .{},
+            null,
         );
         errdefer self.dl.deinit();
         self.recipe_repo = recipe.Repo.init(gpa, io, recipes_dir);
