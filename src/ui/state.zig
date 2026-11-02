@@ -9,6 +9,21 @@ const buf_mod = @import("buf.zig");
 const owned = @import("owned.zig");
 const import_job_mod = @import("import_job.zig");
 const folder_import_job_mod = @import("folder_import_job.zig");
+pub const catalogue_view = @import("catalogue_view.zig");
+
+/// The Downloads tab's multi-part offer: after Part `from - 1` (href in
+/// `first_href_buf`) was queued, parts `from..to` can follow in one click.
+pub const PartOffer = struct {
+    tid: u64,
+    first_href_buf: [1024]u8 = undefined,
+    first_href_len: u16 = 0,
+    from: u8,
+    to: u8,
+
+    pub fn firstHref(self: *const PartOffer) []const u8 {
+        return self.first_href_buf[0..self.first_href_len];
+    }
+};
 pub const MessageBuf = buf_mod.MessageBuf;
 
 pub const Screen = enum {
@@ -734,6 +749,18 @@ pub const State = struct {
     thumb_cache_bytes: [THUMB_CACHE_CAP]?[]u8 = @splat(null),
     /// Active tab inside the detail screen.
     detail_tab: Tab = .overview,
+    /// The Downloads tab's classified link catalogue for
+    /// `detail_catalogue_tid`. Built on first render of the tab for a
+    /// game (one small DB read), dropped when that game re-syncs, freed
+    /// on quit (`actions.freeDetailCatalogue`).
+    detail_catalogue: ?catalogue_view.Catalogue = null,
+    detail_catalogue_tid: u64 = 0,
+    /// "Queue parts a–b" offer after a Part N link was queued. Cleared
+    /// on tab or game change.
+    detail_part_offer: ?PartOffer = null,
+    /// Y of the detail tab strip inside the page scroll area (last
+    /// frame), so "Download…" can scroll the tabs into view.
+    detail_tabs_y: f32 = 0,
     /// Active tab inside the Mods page. Filters which lists render
     /// below the page header. Reset to `.installed` on game-change so
     /// new game opens to the "what's currently running" view.
@@ -1949,6 +1976,7 @@ pub const State = struct {
     pub fn resetDetailViewState(self: *State) void {
         self.detail_tab = .overview;
         self.detail_scroll = .{};
+        self.detail_part_offer = null;
         self.confirm_delete = false;
         self.set_url_for = null;
         self.convert_help_open = false;

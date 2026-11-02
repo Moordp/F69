@@ -1234,6 +1234,8 @@ fn invalidateCachesForJob(frame: *Frame, job: *SyncJob) void {
     if (state.thumb_cache_thread == p.thread_id) {
         freeThumbCache(state, frame.lib.alloc);
     }
+    // The sync rewrote this game's download_sources rows.
+    downloads_mod.invalidateCatalogue(state, p.thread_id);
 }
 
 /// Free every payload-owned heap allocation. Called from both

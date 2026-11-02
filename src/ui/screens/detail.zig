@@ -19,6 +19,9 @@ const components = @import("../components.zig");
 const comp = @import("ui_comp");
 const tokens = @import("ui_tokens");
 
+const catalogue_view = @import("../catalogue_view.zig");
+const dl_classify = @import("f95").dl_classify;
+
 const Frame = types.Frame;
 const helpTextColor = components.helpTextColor;
 
@@ -211,11 +214,14 @@ pub fn detailScreen(frame: *Frame) !bool {
 
     _ = dvui.separator(@src(), .{ .expand = .horizontal });
 
+    const tab_before = state.detail_tab;
     {
         var tabs = dvui.box(@src(), .{ .dir = .horizontal }, .{
             .padding = .{ .x = 12, .y = 8, .w = 12, .h = 4 },
         });
         defer tabs.deinit();
+        // Where the tab strip sits in the page scroll (for "Download…").
+        state.detail_tabs_y = tabs.data().rect.y;
 
         if (components.tabButton("Overview", state.detail_tab == .overview)) state.detail_tab = .overview;
         if (components.tabButton("Changelog", state.detail_tab == .changelog)) state.detail_tab = .changelog;
@@ -227,6 +233,7 @@ pub fn detailScreen(frame: *Frame) !bool {
         if (components.tabButton("Journal", state.detail_tab == .journal)) state.detail_tab = .journal;
         if (components.tabButton("Guides", state.detail_tab == .guides)) state.detail_tab = .guides;
     }
+    if (state.detail_tab != tab_before) state.detail_part_offer = null;
     _ = dvui.separator(@src(), .{ .expand = .horizontal });
 
     {
@@ -1811,7 +1818,7 @@ fn metaSep(src: std.builtin.SourceLocation) void {
 
 fn renderChangelogTab(frame: *Frame, game: *const library.Game) void {
     if (game.changelog_md) |text| {
-        renderStructuredText(frame, text, game.f95_thread_id);
+        renderStructuredText(frame, text, game.f95_thread_id, null);
     } else {
         dvui.label(@src(), "No changelog scraped yet. Sync this game to populate.", .{}, .{});
     }
@@ -1850,15 +1857,15 @@ fn renderWrappedText(text: ?[]const u8, placeholder: []const u8) void {
     }
 }
 
-fn renderStructuredText(frame: *Frame, text: []const u8, base_id: u64) void {
+fn renderStructuredText(frame: *Frame, text: []const u8, base_id: u64, links: ?*const DlLinks) void {
     if (!std.unicode.utf8ValidateSlice(text)) {
         dvui.label(@src(), "(text contains invalid UTF-8 — re-sync to refresh)", .{}, .{});
         return;
     }
-    renderStructuredLines(frame, text, base_id, 0);
+    renderStructuredLines(frame, text, base_id, 0, links);
 }
 
-fn renderStructuredLines(frame: *Frame, text: []const u8, base_id: u64, depth: u32) void {
+fn renderStructuredLines(frame: *Frame, text: []const u8, base_id: u64, depth: u32, links: ?*const DlLinks) void {
     var i: usize = 0;
     var iter_idx: usize = 0;
     while (i <= text.len) {
@@ -1893,7 +1900,7 @@ fn renderStructuredLines(frame: *Frame, text: []const u8, base_id: u64, depth: u
                     .padding = .{ .x = 16, .y = 4, .w = 0, .h = 4 },
                 });
                 defer inner.deinit();
-                renderStructuredLines(frame, body, line_id, depth + 1);
+                renderStructuredLines(frame, body, line_id, depth + 1, links);
             }
             continue;
         }
@@ -1919,15 +1926,15 @@ fn renderStructuredLines(frame: *Frame, text: []const u8, base_id: u64, depth: u
                 .id_extra = line_id,
                 .min_size_content = .{ .w = 14, .h = 1 },
             });
-            renderInlineLineWithLinks(frame, trimmed[BULLET.len..], line_id);
+            renderInlineLineWithLinks(frame, trimmed[BULLET.len..], line_id, links);
             continue;
         }
 
-        renderInlineLineWithLinks(frame, trimmed, line_id);
+        renderInlineLineWithLinks(frame, trimmed, line_id, links);
     }
 }
 
-fn renderInlineLineWithLinks(frame: *Frame, line: []const u8, id: u64) void {
+fn renderInlineLineWithLinks(frame: *Frame, line: []const u8, id: u64, links: ?*const DlLinks) void {
     // Same cache-layout invalidation trick as `renderWrappedText`:
     // mix the line-content hash into the widget id so a line whose
     // text changed (re-sync delivers different downloads / changelog
@@ -1935,7 +1942,9 @@ fn renderInlineLineWithLinks(frame: *Frame, line: []const u8, id: u64) void {
     // `id` alone is position-based — a line at the same position with
     // different content would trip dvui's `bytes_seen` assert and
     // panic in TextLayoutWidget.addTextDone.
-    const widget_id: u64 = id ^ std.hash.Wyhash.hash(0, line);
+    // Catalogue chips change with job state (Queued → Downloading …), so
+    // their text is mixed into the id as well.
+    const widget_id: u64 = id ^ std.hash.Wyhash.hash(0, line) ^ (if (links) |l| l.lineStateHash(line) else 0);
     // cache_layout: line content is keyed by `widget_id` (position
     // hash xor content hash) and only changes when scraped text
     // changes. The structured-text walker rebuilds one textLayout
@@ -1982,10 +1991,30 @@ fn renderInlineLineWithLinks(frame: *Frame, line: []const u8, id: u64) void {
             };
             const label_text = line[label_start..close_at];
             const shown = if (label_text.len == 0) url else label_text;
-            if (tl.addTextClick(shown, .{ .color_text = .{ .color = link_color } })) |_| {
-                actions.openExternalUrl(frame, url);
-            }
             cursor = close_at + close_marker.len;
+            var chip_buf: [96]u8 = undefined;
+            const view: LinkView = if (links) |l| l.view(url, &chip_buf) else .plain;
+            switch (view) {
+                .plain => if (tl.addTextClick(shown, .{ .color_text = .{ .color = link_color } })) |_| {
+                    actions.openExternalUrl(frame, url);
+                },
+                .dead => |chip| {
+                    tl.addText(shown, .{ .color_text = .{ .color = style.labelDim() } });
+                    addLinkChip(tl, chip, .dead);
+                },
+                .ready => |chip| {
+                    if (tl.addTextClick(shown, .{ .color_text = .{ .color = link_color }, .font = bold_font })) |_| {
+                        actions.enqueueCatalogue(frame, links.?.game, url);
+                    }
+                    addLinkChip(tl, chip, .ready);
+                },
+                .running => |chip| {
+                    if (tl.addTextClick(shown, .{ .color_text = .{ .color = link_color }, .font = bold_font })) |_| {
+                        frame.state.screen = .downloads;
+                    }
+                    addLinkChip(tl, chip, .running);
+                },
+            }
         } else {
             const open = bold_at.?;
             const body_start = open + "[B]".len;
@@ -2001,12 +2030,160 @@ fn renderInlineLineWithLinks(frame: *Frame, line: []const u8, id: u64) void {
     }
 }
 
-fn renderDownloadsTab(frame: *Frame, game: *const library.Game) void {
-    if (game.downloads_md) |text| {
-        renderStructuredText(frame, text, game.f95_thread_id);
-        return;
+/// What the Downloads tab draws for one `[LINK=url]`.
+const LinkView = union(enum) {
+    /// Not a catalogue file link: opens the browser.
+    plain,
+    /// File link, nothing running: click queues it. Payload = chip text.
+    ready: []const u8,
+    /// A non-terminal job came from this link: click opens Downloads.
+    running: []const u8,
+    /// Dead host: grey, no click.
+    dead: []const u8,
+};
+
+/// Per-render context for the Downloads tab's links: the catalogue and
+/// the running jobs' hrefs (copied out of one snapshot read).
+const DlLinks = struct {
+    cat: *const catalogue_view.Catalogue,
+    running: []const actions.RunningHref,
+    game: *const library.Game,
+
+    fn runningStep(self: *const DlLinks, href: []const u8) ?downloads.model.Step {
+        for (self.running) |r| if (std.mem.eql(u8, r.href, href)) return r.step;
+        return null;
     }
-    dvui.label(@src(), "No download links scraped yet. Sync this game to populate.", .{}, .{});
+
+    fn view(self: *const DlLinks, url: []const u8, buf: []u8) LinkView {
+        const item = self.cat.lookup(url) orelse return .plain;
+        if (!catalogue_view.isActionable(item.entry)) return .plain;
+        const step = self.runningStep(url);
+        const chip = catalogue_view.tagLabel(item.entry, url, step, buf);
+        if (dl_classify.targetOf(item.entry) == .dead) return .{ .dead = chip };
+        return if (step != null) .{ .running = chip } else .{ .ready = chip };
+    }
+
+    /// Hash of every link view on `line` (0 when it has none).
+    fn lineStateHash(self: *const DlLinks, line: []const u8) u64 {
+        var h = std.hash.Wyhash.init(0x7a6);
+        var cursor: usize = 0;
+        while (std.mem.indexOfPos(u8, line, cursor, "[LINK=")) |open| {
+            const url_start = open + "[LINK=".len;
+            const url_end = std.mem.indexOfScalarPos(u8, line, url_start, ']') orelse break;
+            var buf: [96]u8 = undefined;
+            const v = self.view(line[url_start..url_end], &buf);
+            h.update(@tagName(v));
+            switch (v) {
+                .plain => {},
+                .ready, .running, .dead => |chip| h.update(chip),
+            }
+            cursor = url_end + 1;
+        }
+        return h.final();
+    }
+};
+
+const ChipKind = enum { ready, running, dead };
+
+/// A tag chip inline in a text layout: the text drawn on a filled band.
+fn addLinkChip(tl: *dvui.TextLayoutWidget, chip: []const u8, kind: ChipKind) void {
+    const t = tokens.active;
+    const fill = switch (kind) {
+        .ready => t.acc_wash,
+        .running => t.acc_dim,
+        .dead => t.bg3,
+    };
+    const ink = switch (kind) {
+        .ready => t.acc,
+        .running => t.ink,
+        .dead => t.ink3,
+    };
+    const body = dvui.Font.theme(.body);
+    const small = body.withSize(body.size * 0.85);
+    tl.addText(" ", .{});
+    var buf: [104]u8 = undefined;
+    const padded = std.fmt.bufPrint(&buf, "\u{00a0}{s}\u{00a0}", .{chip}) catch chip;
+    tl.addText(padded, .{
+        .font = small,
+        .color_text = .{ .color = tokens.toDvui(ink, dvui.Color) },
+        .color_fill = .{ .color = tokens.toDvui(fill, dvui.Color) },
+    });
+}
+
+fn renderDownloadsTab(frame: *Frame, game: *const library.Game) void {
+    renderRpdlStrip(frame, game);
+    renderPartOffer(frame, game);
+
+    const text = game.downloads_md orelse {
+        dvui.label(@src(), "No download links scraped yet. Sync this game to populate.", .{}, .{});
+        return;
+    };
+    // One DB read per game open; the snapshot is read once per frame and
+    // copied into the frame arena (released before any widget is built).
+    const cat = actions.ensureCatalogue(frame, game.f95_thread_id) orelse {
+        renderStructuredText(frame, text, game.f95_thread_id, null);
+        return;
+    };
+    const links: DlLinks = .{
+        .cat = cat,
+        .running = actions.runningHrefs(frame, dvui.currentWindow().arena()),
+        .game = game,
+    };
+    renderStructuredText(frame, text, game.f95_thread_id, &links);
+}
+
+/// "RPDL torrent  [Download via RPDL]" — shown when an RPDL token is set.
+/// Runs the existing search + fetch worker; no preview of the match yet.
+fn renderRpdlStrip(frame: *Frame, game: *const library.Game) void {
+    const state = frame.state;
+    const token = state.rpdl_token orelse return;
+    if (token.len == 0) return;
+    const busy = state.pending_rpdl_download != null;
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
+        .expand = .horizontal,
+        .padding = .{ .x = 10, .y = 6, .w = 10, .h = 6 },
+        .margin = .{ .x = 0, .y = 0, .w = 0, .h = 8 },
+        .background = true,
+        .border = style.border_thin,
+        .corners = style.corner_radius,
+        .color_fill = .{ .color = style.cardFill() },
+        .color_border = .{ .color = style.borderColor() },
+    });
+    defer row.deinit();
+    dvui.labelNoFmt(@src(), "RPDL torrent", .{}, .{ .gravity_y = 0.5 });
+    _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+    const gray: dvui.Color = .{ .r = 0x80, .g = 0x80, .b = 0x80 };
+    const label: []const u8 = if (busy) "Searching\u{2026}" else "Download via RPDL";
+    const opts: dvui.Options = if (busy)
+        .{ .tag = "detail-rpdl-download", .color_text = .{ .color = gray } }
+    else
+        .{ .tag = "detail-rpdl-download", .style = .highlight };
+    if (components.iconButton(@src(), label, entypo.download, opts)) {
+        if (!busy) actions.startRpdlDownload(frame, game);
+    }
+}
+
+/// "Queue parts a–b" after a Part N link was queued.
+fn renderPartOffer(frame: *Frame, game: *const library.Game) void {
+    const state = frame.state;
+    const offer = state.detail_part_offer orelse return;
+    if (offer.tid != game.f95_thread_id) return;
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
+        .expand = .horizontal,
+        .margin = .{ .x = 0, .y = 0, .w = 0, .h = 8 },
+    });
+    defer row.deinit();
+    var buf: [48]u8 = undefined;
+    const label = if (offer.from == offer.to)
+        std.fmt.bufPrint(&buf, "Queue part {d}", .{offer.from}) catch "Queue the other parts"
+    else
+        std.fmt.bufPrint(&buf, "Queue parts {d}\u{2013}{d}", .{ offer.from, offer.to }) catch "Queue the other parts";
+    if (components.iconButton(@src(), label, entypo.download, .{ .tag = "detail-part-offer", .style = .highlight })) {
+        actions.acceptPartOffer(frame, game);
+    }
+    if (components.iconButton(@src(), "Dismiss", entypo.cross, .{ .tag = "detail-part-offer-dismiss" })) {
+        state.detail_part_offer = null;
+    }
 }
 
 // ============================================================
@@ -2433,6 +2610,13 @@ fn doCompatFixForActiveInstall(frame: *Frame, game: *const library.Game) void {
     state.setLaunchMsg(msg);
 }
 
+/// Switch to the Downloads tab and scroll the tab strip into view.
+fn openDownloadsTab(state: *state_mod.State) void {
+    if (state.detail_tab != .downloads) state.detail_part_offer = null;
+    state.detail_tab = .downloads;
+    state.detail_scroll.viewport.y = @max(0, state.detail_tabs_y);
+}
+
 fn renderDetailDownloadButton(frame: *Frame, game: *const library.Game) void {
     const state = frame.state;
     const rpdl_busy = state.pending_rpdl_download != null;
@@ -2453,27 +2637,18 @@ fn renderDetailDownloadButton(frame: *Frame, game: *const library.Game) void {
     defer bar.deinit();
 
     // --- Primary button ---
-    // Priority order (matches the spec):
-    //   - not signed into F95 → "Sign in" link to settings/accounts
-    //   - known non-donor → disabled "Not a donor"
-    //   - donor (or unknown) → "Download" via donor DDL as default
-    if (!have_f95) {
-        if (components.iconButton(@src(), "Download (sign in first)", entypo.download, dim_opts)) {
-            state.screen = .settings;
-            state.settings_tab = .accounts;
-        }
-    } else if (known_not_donor) {
-        // Disabled — click does nothing. Tooltip explains via label.
-        _ = components.iconButton(@src(), "Donor required", entypo.download, dim_opts);
-    } else {
+    // "Download…" opens the Downloads tab (thread links with tags, RPDL
+    // strip). Donor DDL / RPDL / Install from file stay in the menu.
+    {
         const primary_label: []const u8 = blk: {
             if (donor_busy) break :blk "Requesting…";
             if (rpdl_busy) break :blk "Searching…";
-            break :blk "Download";
+            break :blk "Download\u{2026}";
         };
-        const primary_opts: dvui.Options = if (busy) dim_opts else .{};
+        var primary_opts: dvui.Options = if (busy) dim_opts else .{};
+        primary_opts.tag = "detail-download";
         if (components.iconButton(@src(), primary_label, entypo.download, primary_opts)) {
-            if (!busy) actions.startDonorDownload(frame, game);
+            openDownloadsTab(state);
         }
     }
 

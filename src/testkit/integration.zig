@@ -1938,6 +1938,127 @@ test "downloads v2: enqueue via command shows in the Downloads screen and instal
     tlog("dl-v2: OK", .{});
 }
 
+fn hasToast(h: *ui.Harness, text: []const u8) bool {
+    for (h.state.toasts[0..h.state.toast_count]) |*t| {
+        if (std.mem.eql(u8, t.msg(), text)) return true;
+    }
+    return false;
+}
+
+test "detail downloads tab: file link shows chip and click enqueues a catalogue job; second click toasts" {
+    tlog("START: dl-catalogue", .{});
+    const gpa = std.testing.allocator;
+    const downloads = @import("downloads");
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(8) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var env = try TestEnv.init(gpa, "dl-catalogue");
+    defer env.deinit();
+    var t = try dvui.testing.init(.{ .allocator = gpa, .io = io, .window_size = .{ .w = 1280, .h = 800 } });
+    defer t.deinit();
+    ui.registerBundledFonts(t.window);
+    var h = try ui.Harness.init(gpa, io, t.window, env.root);
+    defer h.deinit();
+
+    const tid: u64 = 6161;
+    const href = "https://pixeldrain.com/u/abc";
+    _ = try h.lib.insertIfMissing(&.{
+        .f95_thread_id = tid,
+        .name = "Catalogue Game",
+        .downloads_md = "## Download\n• Win: [LINK=" ++ href ++ "]Pixeldrain[/LINK]\n",
+    });
+    try h.lib.replaceDownloadSources(tid, &.{.{ .href = href, .text = "Pixeldrain", .lead = "Win", .ctx = "Download" }}, 1000);
+    try h.reloadGames();
+
+    var fr = h.frame();
+    dlv2_frame = &fr;
+    defer dlv2_frame = null;
+
+    // 1. "Download…" on the detail page opens the Downloads tab, which
+    //    builds the catalogue once and renders the link with its chip.
+    h.state.selected_thread = tid;
+    h.state.screen = .detail;
+    _ = try dvui.testing.step(dlv2Render);
+    _ = try dvui.testing.step(dlv2Render);
+    try dvui.testing.expectVisible("detail-download");
+    try dvui.testing.moveTo("detail-download");
+    try dvui.testing.click(.left);
+    _ = try dvui.testing.step(dlv2Render);
+    _ = try dvui.testing.step(dlv2Render);
+    try std.testing.expect(h.state.detail_tab == .downloads);
+    try std.testing.expectEqual(tid, h.state.detail_catalogue_tid);
+    const cat = &(h.state.detail_catalogue orelse return error.TestUnexpectedResult);
+    const item = cat.lookup(href) orelse return error.TestUnexpectedResult;
+    var chip_buf: [96]u8 = undefined;
+    try std.testing.expectEqualStrings("Win · direct", ui.catalogue_view.tagLabel(item.entry, href, null, &chip_buf));
+
+    // 2. Click (the action the link's click runs) → one catalogue job.
+    const game = &h.games[0];
+    ui.enqueueCatalogue(&fr, game, href);
+    try std.testing.expect(hasToast(h, "Queued · see Downloads"));
+    h.dl.stepOnce(1000);
+    try std.testing.expectEqual(@as(usize, 1), h.dl.recs.items.len);
+    const j = h.dl.recs.items[0].job;
+    try std.testing.expectEqualStrings("Pixeldrain", j.host);
+    try std.testing.expectEqualStrings(href, j.source_href);
+    try std.testing.expectEqual(downloads.model.EngineKind.aria2_http, j.engine);
+
+    // 3. The tab re-renders with the running chip (new widget identity, no
+    //    layout-cache panic).
+    _ = try dvui.testing.step(dlv2Render);
+    _ = try dvui.testing.step(dlv2Render);
+
+    // 4. A second click: the downloader refuses the duplicate and says so.
+    ui.enqueueCatalogue(&fr, game, href);
+    h.dl.stepOnce(1001);
+    ui.drainDownloaderEvents(&fr);
+    try std.testing.expectEqual(@as(usize, 1), h.dl.recs.items.len);
+    try std.testing.expect(hasToast(h, "Already queued"));
+    tlog("dl-catalogue: OK", .{});
+}
+
+test "detail downloads tab: queuing Part 1 offers the next parts, grouped with it" {
+    tlog("START: dl-catalogue-parts", .{});
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(8) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var env = try TestEnv.init(gpa, "dl-catalogue-parts");
+    defer env.deinit();
+    var t = try dvui.testing.init(.{ .allocator = gpa, .io = io, .window_size = .{ .w = 1280, .h = 800 } });
+    defer t.deinit();
+    var h = try ui.Harness.init(gpa, io, t.window, env.root);
+    defer h.deinit();
+
+    const tid: u64 = 6262;
+    _ = try h.lib.insertIfMissing(&.{ .f95_thread_id = tid, .name = "Parts Game" });
+    try h.lib.replaceDownloadSources(tid, &.{
+        .{ .href = "https://pixeldrain.com/u/p1", .text = "Pixeldrain", .lead = "Win Part 1", .ctx = "" },
+        .{ .href = "https://pixeldrain.com/u/p2", .text = "Pixeldrain", .lead = "Win Part 2", .ctx = "" },
+        .{ .href = "https://pixeldrain.com/u/p3", .text = "Pixeldrain", .lead = "Win Part 3", .ctx = "" },
+    }, 1000);
+    try h.reloadGames();
+    var fr = h.frame();
+    _ = ui.ensureCatalogue(&fr, tid) orelse return error.TestUnexpectedResult;
+
+    const game = &h.games[0];
+    ui.enqueueCatalogue(&fr, game, "https://pixeldrain.com/u/p1");
+    try std.testing.expect(hasToast(h, "Queued part 1 · also queue parts 2–3?"));
+    const offer = h.state.detail_part_offer orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u8, 2), offer.from);
+    try std.testing.expectEqual(@as(u8, 3), offer.to);
+    h.dl.stepOnce(1000);
+
+    ui.acceptPartOffer(&fr, game);
+    try std.testing.expect(h.state.detail_part_offer == null);
+    h.dl.stepOnce(1001);
+    try std.testing.expectEqual(@as(usize, 3), h.dl.recs.items.len);
+    const first = h.dl.recs.items[0].job;
+    for (h.dl.recs.items) |r| try std.testing.expectEqual(first.id, r.job.group_id);
+    try std.testing.expectEqual(@as(?u8, 3), h.dl.recs.items[2].job.part);
+    tlog("dl-catalogue-parts: OK", .{});
+}
+
 test "downloads v2: a failed install worker fails the job instead of acking it" {
     // The install-row write failure (fix round 1, item 2) takes the same
     // drain branch, but it can only be provoked through a DB error, which

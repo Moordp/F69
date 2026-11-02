@@ -45,7 +45,7 @@ pub const Harness = struct {
     f95_client: f95.Client,
     f95_service: f95.Service,
     indexer_client: f95_indexer.Client,
-    /// Downloader v2 on an in-memory store with a scripted engine. Never
+    /// Downloader v2 on the library's DB file with a scripted engine. Never
     /// started: tests drive it with `dl.stepOnce(now)`.
     dl: downloads.Downloader,
     dl_fake: downloads.engine.FakeEngine,
@@ -106,7 +106,9 @@ pub const Harness = struct {
         self.dl = downloads.Downloader.init(
             gpa,
             io,
-            try downloads.store.Store.openMemory(gpa),
+            // Same DB file as the library, as in main.zig: the downloader
+            // reads `download_sources` for `enqueue_catalogue`.
+            try downloads.store.Store.open(gpa, db_path),
             .{ .aria2 = self.dl_fake.engine() },
             .{ .downloads_root = downloads_root, .library_root = library_root, .data_root = try a.dupe(u8, root) },
             .{},
@@ -267,6 +269,7 @@ pub const Harness = struct {
         actions.freeTagsMaster(lib_alloc, &self.state);
         if (self.state.sync_queue) |q| lib_alloc.free(q);
         if (self.state.rpdl_token) |t| lib_alloc.free(t);
+        actions.freeDetailCatalogue(&self.state);
 
         if (self.games.len > 0) self.lib.freeGames(self.games);
         self.mod_jobs.deinit();

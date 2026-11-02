@@ -39,6 +39,7 @@ test {
     _ = actions;
     _ = types;
     _ = state_mod;
+    _ = @import("catalogue_view.zig");
 }
 
 pub const State = state_mod.State;
@@ -64,6 +65,11 @@ pub const doFolderScan = actions.doFolderScan;
 pub const findLinuxLauncher = actions.findLinuxLauncher;
 pub const findWindowsLauncher = actions.findWindowsLauncher;
 pub const findLauncher = actions.findLauncher;
+pub const catalogue_view = @import("catalogue_view.zig");
+pub const enqueueCatalogue = actions.enqueueCatalogue;
+pub const acceptPartOffer = actions.acceptPartOffer;
+pub const ensureCatalogue = actions.ensureCatalogue;
+pub const drainDownloaderEvents = actions.drainDownloaderEvents;
 pub const doLogout = actions.doLogout;
 pub const commitFolderImport = actions.commitFolderImport;
 pub const doOpenLogsFolder = actions.doOpenLogsFolder;
@@ -296,6 +302,7 @@ pub fn runMainLoop(
         actions.freeTagsMaster(lib.alloc, &state);
         if (state.sync_queue) |q| lib.alloc.free(q);
         if (state.rpdl_token) |t| lib.alloc.free(t);
+        actions.freeDetailCatalogue(&state);
         if (state.tag_colors) |*m| library.Library.freeTagColors(m);
     }
 

@@ -20,6 +20,7 @@ const types = @import("../types.zig");
 const common = @import("common.zig");
 const installer_act = @import("installer.zig");
 const flows = @import("downloads.zig");
+const state_mod = @import("../state.zig");
 
 const Frame = types.Frame;
 const JobView = downloads.JobView;
@@ -96,6 +97,143 @@ fn enqueueUrl(frame: *Frame, game: *const library.Game, url: []const u8, sha: ?[
         .expected_sha256 = sha,
         .host = host,
     } });
+}
+
+// ----- Detail → Downloads tab (catalogue links) -----
+
+const catalogue_view = @import("../catalogue_view.zig");
+const State = types.State;
+const log = std.log.scoped(.ui_dl);
+
+/// Make `state.detail_catalogue` hold `tid`'s catalogue. Reads the DB only
+/// when the cached one is for another game (or was invalidated). A read
+/// failure leaves it null and is not retried until the game changes.
+pub fn ensureCatalogue(frame: *Frame, tid: u64) ?*const catalogue_view.Catalogue {
+    const state = frame.state;
+    if (state.detail_catalogue_tid != tid) {
+        freeDetailCatalogue(state);
+        state.detail_part_offer = null;
+        state.detail_catalogue_tid = tid;
+        state.detail_catalogue = catalogue_view.build(frame.lib.alloc, frame.lib, tid) catch |e| blk: {
+            log.warn("download catalogue for {d}: {s}", .{ tid, @errorName(e) });
+            break :blk null;
+        };
+    }
+    if (state.detail_catalogue) |*c| return c;
+    return null;
+}
+
+/// Drop the cached catalogue of `tid` (its sync just rewrote the rows).
+pub fn invalidateCatalogue(state: *State, tid: u64) void {
+    if (state.detail_catalogue_tid != tid) return;
+    freeDetailCatalogue(state);
+    state.detail_catalogue_tid = 0;
+    if (state.detail_part_offer) |o| if (o.tid == tid) {
+        state.detail_part_offer = null;
+    };
+}
+
+pub fn freeDetailCatalogue(state: *State) void {
+    if (state.detail_catalogue) |*c| c.deinit();
+    state.detail_catalogue = null;
+}
+
+/// A non-terminal job's source link and step, copied out of the snapshot.
+pub const RunningHref = struct { href: []const u8, step: downloads.model.Step };
+
+/// Every non-terminal job's source href + step, copied into `a` (the
+/// frame arena). One snapshot read, released before returning.
+pub fn runningHrefs(frame: *Frame, a: std.mem.Allocator) []const RunningHref {
+    const snap = frame.dl.snapshot();
+    defer frame.dl.releaseSnapshot();
+    var out: std.ArrayList(RunningHref) = .empty;
+    for (snap.jobs) |v| {
+        const j = &v.job;
+        if (j.step.isTerminal() or j.source_href.len == 0) continue;
+        const href = a.dupe(u8, j.source_href) catch break;
+        out.append(a, .{ .href = href, .step = j.step }) catch break;
+    }
+    return out.items;
+}
+
+/// The id of a job queued from `href` (non-terminal first, else the
+/// newest), or null.
+fn jobIdForHref(frame: *Frame, href: []const u8) ?u64 {
+    const snap = frame.dl.snapshot();
+    defer frame.dl.releaseSnapshot();
+    var any: ?u64 = null;
+    for (snap.jobs) |v| {
+        if (!std.mem.eql(u8, v.job.source_href, href)) continue;
+        if (!v.job.step.isTerminal()) return v.job.id;
+        if (any == null or v.job.id > any.?) any = v.job.id;
+    }
+    return any;
+}
+
+/// Queue one catalogue link of `game`. The downloader re-reads the row and
+/// toasts on a duplicate ("Already queued") or a missing row. When the
+/// link is Part N of a set and later parts exist, offers to queue them.
+pub fn enqueueCatalogue(frame: *Frame, game: *const library.Game, href: []const u8) void {
+    const state = frame.state;
+    const tid = game.f95_thread_id;
+    frame.dl.send(.{ .enqueue_catalogue = .{
+        .game_thread_id = tid,
+        .href = href,
+        .title = game.name,
+        .group_with = null,
+    } });
+
+    state.detail_part_offer = null;
+    const cat: ?*const catalogue_view.Catalogue = if (state.detail_catalogue_tid == tid)
+        (if (state.detail_catalogue) |*c| c else null)
+    else
+        null;
+    if (cat) |c| if (c.lookup(href)) |item| if (catalogue_view.nextParts(c, item)) |range| {
+        if (href.len <= 1024) {
+            var offer: state_mod.PartOffer = .{ .tid = tid, .from = range.from, .to = range.to };
+            @memcpy(offer.first_href_buf[0..href.len], href);
+            offer.first_href_len = @intCast(href.len);
+            state.detail_part_offer = offer;
+            var buf: [96]u8 = undefined;
+            const msg = if (range.from == range.to)
+                std.fmt.bufPrint(&buf, "Queued part {d} · also queue part {d}?", .{ item.entry.part.?, range.from })
+            else
+                std.fmt.bufPrint(&buf, "Queued part {d} · also queue parts {d}–{d}?", .{ item.entry.part.?, range.from, range.to });
+            state.setDownloadMsg(msg catch "Queued · see Downloads");
+            return;
+        }
+    };
+    state.setDownloadMsg("Queued · see Downloads");
+}
+
+/// Accept the "Queue parts a–b" offer: one `enqueue_catalogue` per part,
+/// grouped with the first part's job when the downloader already has it.
+pub fn acceptPartOffer(frame: *Frame, game: *const library.Game) void {
+    const state = frame.state;
+    const offer = state.detail_part_offer orelse return;
+    state.detail_part_offer = null;
+    if (offer.tid != game.f95_thread_id) return;
+    const cat: *const catalogue_view.Catalogue = if (state.detail_catalogue_tid == offer.tid)
+        (if (state.detail_catalogue) |*c| c else return)
+    else
+        return;
+    const first = cat.lookup(offer.firstHref()) orelse return;
+    // Snapshot read (and release) before any send.
+    const group = jobIdForHref(frame, offer.firstHref());
+    var sent: u32 = 0;
+    var k: u16 = offer.from;
+    while (k <= offer.to) : (k += 1) {
+        const it = catalogue_view.findPart(cat, first, @intCast(k)) orelse continue;
+        frame.dl.send(.{ .enqueue_catalogue = .{
+            .game_thread_id = offer.tid,
+            .href = cat.row(it).href,
+            .title = game.name,
+            .group_with = group,
+        } });
+        sent += 1;
+    }
+    var buf: [64]u8 = undefined;
+    state.setDownloadMsg(std.fmt.bufPrint(&buf, "Queued {d} more part(s) · see Downloads", .{sent}) catch "Queued · see Downloads");
 }
 
 /// Retry a failed download (the downloader requeues it with the same

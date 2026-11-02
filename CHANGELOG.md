@@ -2,6 +2,11 @@
 
 All notable, user-facing changes. Dates are YYYY-MM-DD.
 
+## [0.15.17] - 2026-11-03
+
+### Added
+- Download links on a game's Downloads tab now start downloads in f69 (direct hosts, F95 masked links, MEGA via MEGAcmd when installed, others open the browser later); tags show what each link is; RPDL button on the tab.
+
 ## [0.15.16] - 2026-11-03
 
 ### Changed
