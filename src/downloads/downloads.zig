@@ -38,6 +38,9 @@ pub const hexDecode = ver.hexDecode;
 // direct URL fed to the daemon — no vtable indirection.
 pub const rpdl = @import("rpdl.zig");
 
+/// Downloader v2 job model and pure state machine.
+pub const model = @import("model.zig");
+
 // Force `zig test` to discover the per-file `test {}` blocks. Without
 // these references the compiler only pulls in the symbols re-exported
 // above, so nested tests would silently no-op.
@@ -47,4 +50,5 @@ test {
     _ = @import("rpdl.zig");
     _ = arc;
     _ = ver;
+    _ = model;
 }
