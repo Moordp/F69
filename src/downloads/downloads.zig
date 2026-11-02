@@ -44,6 +44,9 @@ pub const model = @import("model.zig");
 /// Downloader v2 SQLite store (dl_jobs / dl_events).
 pub const store = @import("store.zig");
 
+/// Downloader v2 bandwidth and slot policy.
+pub const policy = @import("policy.zig");
+
 // Force `zig test` to discover the per-file `test {}` blocks. Without
 // these references the compiler only pulls in the symbols re-exported
 // above, so nested tests would silently no-op.
@@ -55,4 +58,5 @@ test {
     _ = ver;
     _ = model;
     _ = store;
+    _ = policy;
 }
