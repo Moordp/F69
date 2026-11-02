@@ -122,7 +122,10 @@ fn resolveMasked(alloc: std.mem.Allocator, http: Http, href: []const u8, depth: 
 
     switch (parseMaskedReply(reply.body)) {
         .html => return .needs_browser,
-        .not_ok => |raw| return .{ .dead = try jsonUnescape(alloc, raw) },
+        .not_ok => |raw| return .{ .dead = if (raw.len == 0)
+            try dupe(alloc, "Link unavailable")
+        else
+            try jsonUnescape(alloc, raw) },
         .ok => |raw| {
             const next = try jsonUnescape(alloc, raw);
             defer alloc.free(next);
@@ -184,7 +187,8 @@ pub const MaskedReply = union(enum) {
 /// Classifies the reply to a masked-link POST. Strings are slices of `body`
 /// and still JSON-escaped.
 pub fn parseMaskedReply(body: []const u8) MaskedReply {
-    const t = std.mem.trim(u8, body, " \t\r\n");
+    const no_bom = if (std.mem.startsWith(u8, body, "\xEF\xBB\xBF")) body[3..] else body;
+    const t = std.mem.trim(u8, no_bom, " \t\r\n");
     if (t.len == 0 or t[0] != '{') return .html;
     const status = jsonStringField(t, "status") orelse return .html;
     const msg = jsonStringField(t, "msg");
@@ -311,7 +315,7 @@ pub fn mediafireDirect(page: []const u8) ?[]const u8 {
 // ---- tests ----
 
 const Stub = struct {
-    const Route = struct { url_prefix: []const u8, status: u16 = 200, body: []const u8 };
+    const Route = struct { url_prefix: []const u8, status: u16 = 200, body: []const u8, post_auth_err: bool = false };
     routes: []const Route,
     cookie: ?[]const u8 = null,
 
@@ -332,6 +336,7 @@ const Stub = struct {
         std.debug.assert(std.mem.eql(u8, body, "xhr=1&download=1"));
         std.debug.assert(hdrs.len == 2);
         const r = self.find(url) orelse return errs.Error.NotFound;
+        if (r.post_auth_err) return errs.Error.AuthRequired;
         return .{ .status = r.status, .body = alloc.dupe(u8, r.body) catch return errs.Error.OutOfMemory };
     }
     fn stubCookie(ctx: *anyopaque) ?[]const u8 {
@@ -350,12 +355,16 @@ test "parseMaskedReply ok / not_ok / html" {
     const b = parseMaskedReply("{\"status\":\"error\",\"msg\":\"Link is dead\"}");
     try std.testing.expectEqualStrings("Link is dead", b.not_ok);
     try std.testing.expect(parseMaskedReply("<!DOCTYPE html><html></html>") == .html);
+    const c = parseMaskedReply("\xEF\xBB\xBF{\"status\":\"ok\",\"msg\":\"https://x.org/a\"}");
+    try std.testing.expectEqualStrings("https://x.org/a", c.ok);
 }
 
 test "pixeldrainId" {
     try std.testing.expectEqualStrings("abc", pixeldrainId("https://pixeldrain.com/u/abc").?);
     try std.testing.expectEqualStrings("abc", pixeldrainId("https://pixeldrain.com/api/file/abc?download").?);
     try std.testing.expect(pixeldrainId("https://pixeldrain.com/l/abc") == null);
+    try std.testing.expectEqualStrings("abc", pixeldrainId("https://pixeldrain.com/u/abc/extra").?);
+    try std.testing.expectEqualStrings("abc", pixeldrainId("https://pixeldrain.com/u/abc#frag").?);
 }
 
 test "driveId" {
@@ -389,6 +398,27 @@ test "resolve: masked 403 and AuthRequired -> auth_required" {
     var r = try run(&stub, "https://f95zone.to/masked/pixeldrain.com/abc/x");
     defer r.deinit(std.testing.allocator);
     try std.testing.expect(r == .auth_required);
+}
+
+test "resolve: postForm AuthRequired error -> auth_required" {
+    var stub = Stub{ .routes = &.{.{ .url_prefix = "https://f95zone.to/masked/", .body = "", .post_auth_err = true }} };
+    var r = try run(&stub, "https://f95zone.to/masked/pixeldrain.com/abc/x");
+    defer r.deinit(std.testing.allocator);
+    try std.testing.expect(r == .auth_required);
+}
+
+test "resolve: masked chain hits depth limit -> needs_browser" {
+    var stub = Stub{ .routes = &.{.{ .url_prefix = "https://f95zone.to/masked/", .body = "{\"status\":\"ok\",\"msg\":\"https:\\/\\/f95zone.to\\/masked\\/pixeldrain.com\\/abc\\/y\"}" }} };
+    var r = try run(&stub, "https://f95zone.to/masked/pixeldrain.com/abc/x");
+    defer r.deinit(std.testing.allocator);
+    try std.testing.expect(r == .needs_browser);
+}
+
+test "resolve: masked not ok without msg -> fallback text" {
+    var stub = Stub{ .routes = &.{.{ .url_prefix = "https://f95zone.to/masked/", .body = "{\"status\":\"error\"}" }} };
+    var r = try run(&stub, "https://f95zone.to/masked/pixeldrain.com/abc/x");
+    defer r.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("Link unavailable", r.dead);
 }
 
 test "resolve: masked html -> needs_browser" {
