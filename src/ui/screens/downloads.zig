@@ -14,36 +14,53 @@ const components = @import("../components.zig");
 const comp = @import("ui_comp");
 
 const Frame = types.Frame;
+const JobView = downloads.JobView;
+const Job = downloads.model.Job;
+const Step = downloads.model.Step;
 
-/// Display label + chip color for a download job's status (Design B chips).
-fn statusChipSpec(status: downloads.JobStatus, extracting: bool) struct { label: []const u8, color: tokens.Color } {
-    if (extracting) return .{ .label = "Extracting", .color = .{ .r = 0xC0, .g = 0x84, .b = 0x1F, .a = 0xff } };
-    return switch (status) {
-        .queued => .{ .label = "Queued", .color = .{ .r = 0x55, .g = 0x6A, .b = 0x8A, .a = 0xff } },
-        .fetching_metadata => .{ .label = "Metadata", .color = .{ .r = 0x55, .g = 0x6A, .b = 0x8A, .a = 0xff } },
-        .downloading => .{ .label = "Downloading", .color = .{ .r = 0x1F, .g = 0x6A, .b = 0xA0, .a = 0xff } },
-        .verifying => .{ .label = "Verifying", .color = .{ .r = 0x6A, .g = 0x4A, .b = 0xB0, .a = 0xff } },
-        .extracting => .{ .label = "Extracting", .color = .{ .r = 0xC0, .g = 0x84, .b = 0x1F, .a = 0xff } },
-        .applying => .{ .label = "Applying", .color = .{ .r = 0x2A, .g = 0x8A, .b = 0x82, .a = 0xff } },
-        .seeding => .{ .label = "Seeding", .color = .{ .r = 0x2F, .g = 0x9E, .b = 0x4F, .a = 0xff } },
-        .paused => .{ .label = "Paused", .color = .{ .r = 0x6F, .g = 0x6F, .b = 0x6F, .a = 0xff } },
-        .done => .{ .label = "Done", .color = .{ .r = 0x2E, .g = 0x7D, .b = 0x32, .a = 0xff } },
-        .failed => .{ .label = "Failed", .color = .{ .r = 0xB7, .g = 0x1C, .b = 0x1C, .a = 0xff } },
-        .cancelled => .{ .label = "Cancelled", .color = .{ .r = 0x6F, .g = 0x6F, .b = 0x6F, .a = 0xff } },
+/// Display label + chip color for a download job's step (Design B chips).
+/// Labels come from `Step.label()`.
+fn statusChipSpec(step: Step, extracting: bool) struct { label: []const u8, color: tokens.Color } {
+    if (extracting) return .{ .label = Step.extracting.label(), .color = .{ .r = 0xC0, .g = 0x84, .b = 0x1F, .a = 0xff } };
+    const color: tokens.Color = switch (step) {
+        .queued, .resolving, .fetching_metadata, .finding_peers => .{ .r = 0x55, .g = 0x6A, .b = 0x8A, .a = 0xff },
+        .awaiting_user => .{ .r = 0xC0, .g = 0x84, .b = 0x1F, .a = 0xff },
+        .downloading => .{ .r = 0x1F, .g = 0x6A, .b = 0xA0, .a = 0xff },
+        .verifying => .{ .r = 0x6A, .g = 0x4A, .b = 0xB0, .a = 0xff },
+        .extracting => .{ .r = 0xC0, .g = 0x84, .b = 0x1F, .a = 0xff },
+        .installing => .{ .r = 0x2A, .g = 0x8A, .b = 0x82, .a = 0xff },
+        .seeding => .{ .r = 0x2F, .g = 0x9E, .b = 0x4F, .a = 0xff },
+        .paused, .cancelled => .{ .r = 0x6F, .g = 0x6F, .b = 0x6F, .a = 0xff },
+        .done => .{ .r = 0x2E, .g = 0x7D, .b = 0x32, .a = 0xff },
+        .failed => .{ .r = 0xB7, .g = 0x1C, .b = 0x1C, .a = 0xff },
     };
+    return .{ .label = step.label(), .color = color };
+}
+
+fn isTorrent(j: *const Job) bool {
+    return j.engine == .aria2_torrent;
+}
+
+/// Donor DDL jobs: plain HTTP with no seeding obligation, so Cancel and
+/// Remove are always offered.
+fn isDonor(j: *const Job) bool {
+    return std.mem.eql(u8, j.host, "donor");
+}
+
+/// The snapshot copied into the dvui per-frame arena (no lock held while
+/// widgets are built).
+fn snapCopy(frame: *Frame) actions.SnapCopy {
+    return actions.copySnapshot(frame, dvui.currentWindow().arena());
 }
 
 // ============================================================
 //  downloads screen — paste-URL prototype + active jobs list
 // ============================================================
 
-/// Seed-ratio target the running aria2 daemon was configured with.
-/// The UI's seed-ratio bar fills toward this number so the user sees
-/// the finish line. Falls back to the daemon-wide default (5.0) when
-/// the daemon hasn't been spawned yet (e.g. first frame of the app).
+/// Seed-ratio target from the downloader settings. The UI's seed-ratio
+/// bar fills toward this number so the user sees the finish line.
 pub fn seedRatioTarget(frame: *Frame) f32 {
-    if (frame.dl_mgr.daemon) |d| return d.seed_ratio;
-    return 5.0;
+    return frame.state.dl_settings.seed_ratio;
 }
 
 pub fn downloadsScreen(frame: *Frame) !bool {
@@ -64,9 +81,9 @@ pub fn downloadsScreen(frame: *Frame) !bool {
         // Compute live totals across all jobs — gives the user a
         // single glanceable "what's happening" number even before
         // they scroll.
+        const snap = snapCopy(frame);
         var live = LiveTotals{};
-        var it = frame.dl_mgr.jobs.iterator();
-        while (it.next()) |entry| live.fold(entry.value_ptr.*);
+        for (snap.jobs) |*v| live.fold(&v.job);
 
         var dl_buf: [24]u8 = undefined;
         var up_buf: [24]u8 = undefined;
@@ -84,14 +101,15 @@ pub fn downloadsScreen(frame: *Frame) !bool {
         // greyed when there's nothing for them to act on (e.g.
         // "Resume all" with no paused jobs); we keep them rendered
         // so the row layout stays stable.
-        const has_paused = frame.dl_mgr.anyPaused();
-        const has_resumable = frame.dl_mgr.anyResumable();
+        const pr = actions.pauseResumeState(snap.jobs);
+        const has_paused = pr.any_paused;
+        const has_resumable = pr.any_pausable;
         const pause_opts: dvui.Options = if (has_resumable)
             .{}
         else
             .{ .style = .control, .color_text = .{ .color = .{ .r = 0x80, .g = 0x80, .b = 0x80 } } };
         if (style.button(@src(), "Pause all", .{}, pause_opts) and has_resumable) {
-            frame.dl_mgr.pauseAll();
+            frame.dl.send(.pause_all);
         }
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 6, .h = 1 } });
         const resume_opts: dvui.Options = if (has_paused)
@@ -99,11 +117,11 @@ pub fn downloadsScreen(frame: *Frame) !bool {
         else
             .{ .style = .control, .color_text = .{ .color = .{ .r = 0x80, .g = 0x80, .b = 0x80 } } };
         if (style.button(@src(), "Resume all", .{}, resume_opts) and has_paused) {
-            frame.dl_mgr.resumeAll();
+            frame.dl.send(.unpause_all);
         }
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 12, .h = 1 } });
         if (style.button(@src(), "Clear completed", .{}, .{})) {
-            _ = frame.dl_mgr.clearCompleted();
+            frame.dl.send(.clear_history);
         }
     }
     _ = dvui.separator(@src(), .{ .expand = .horizontal });
@@ -129,9 +147,7 @@ pub fn downloadsScreen(frame: *Frame) !bool {
         if (style.button(@src(), "Download", .{}, .{ .style = .highlight })) {
             const url = std.mem.trim(u8, state.dlUrlSlice(), " \t\n\r");
             if (url.len > 0) {
-                _ = frame.dl_mgr.enqueueUrl(url, .game, 0, null, null, null, .{}) catch |e| {
-                    std.log.scoped(.ui).warn("enqueue failed: {s}", .{@errorName(e)});
-                };
+                frame.dl.send(.{ .enqueue_url = .{ .url = url, .kind = .game, .game_thread_id = 0, .title = url, .host = "raw" } });
                 @memset(&state.dl_url_buf, 0);
             }
         }
@@ -139,8 +155,8 @@ pub fn downloadsScreen(frame: *Frame) !bool {
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
     var dst_buf: [256]u8 = undefined;
     const dst_msg = std.fmt.bufPrint(&dst_buf, "Files land in {s}. Torrents seed to a {d:.1}× ratio.", .{
-        frame.info.library_root, seedRatioTarget(frame),
-    }) catch "Files land in the library root.";
+        frame.info.downloads_root, seedRatioTarget(frame),
+    }) catch "Files land in the downloads folder.";
     dvui.labelNoFmt(@src(), dst_msg, .{}, .{
         .color_text = .{ .color = style.labelDim() },
     });
@@ -154,7 +170,8 @@ pub fn downloadsScreen(frame: *Frame) !bool {
 /// Completed) + per-row actions, or an empty state. Shared by the
 /// Downloads screen and the bottom Activity drawer (`renderActivityDrawer`).
 pub fn renderDownloadsBody(frame: *Frame) void {
-    if (frame.dl_mgr.jobCount() == 0) {
+    const snap = snapCopy(frame);
+    if (snap.jobs.len == 0) {
         components.emptyState(entypo.download, "No downloads yet", "Start one from a game's Download button, or paste a URL via + Add.");
         return;
     }
@@ -162,9 +179,8 @@ pub fn renderDownloadsBody(frame: *Frame) void {
     var list = dvui.scrollArea(@src(), .{}, .{ .expand = .both });
     defer list.deinit();
 
-    // Buttons inside the rows can't mutate the jobs map mid-iteration
-    // (HashMap iterator gets invalidated). Collect the click + apply
-    // after the loop.
+    // Rows render from a copy of the snapshot; the click is collected and
+    // sent as one command after the loop.
     var pending: RowAction = .none;
 
     // Render in three sections. Per-section count is computed up
@@ -177,25 +193,20 @@ pub fn renderDownloadsBody(frame: *Frame) void {
     };
     for (groups) |section| {
         var section_n: u32 = 0;
-        var iter = frame.dl_mgr.jobs.iterator();
-        while (iter.next()) |entry| {
-            if (classifyJob(entry.value_ptr.*) == section.group) section_n += 1;
+        for (snap.jobs) |*v| {
+            if (classifyJob(&v.job) == section.group) section_n += 1;
         }
         if (section_n == 0) continue;
 
         downloadsSectionHeader(section.name, section_n, @intFromEnum(section.group));
-        var it = frame.dl_mgr.jobs.iterator();
-        while (it.next()) |entry| {
-            const job = entry.value_ptr.*;
+        for (snap.jobs) |*v| {
+            const job = &v.job;
             if (classifyJob(job) != section.group) continue;
             const title = resolveJobTitle(frame.games, job);
-            // .done jobs that are mid-extract get a separate render
-            // path so the user sees "[extracting]" instead of a stale
-            // "done" pill on the row. The check is read-only and
-            // O(active workers) — typically 0–2.
+            // An install worker still moving the file / applying a mod
+            // shows "Extracting" instead of a stale "Installing" pill.
             const extracting = actions.isExtracting(frame, job.id);
-            const is_donor = actions.isDonorJob(frame, job.id);
-            const action = renderJobRow(job, title, extracting, seedRatioTarget(frame), is_donor);
+            const action = renderJobRow(job, title, extracting, seedRatioTarget(frame), isDonor(job));
             switch (action) {
                 .none => {},
                 else => pending = action,
@@ -205,11 +216,12 @@ pub fn renderDownloadsBody(frame: *Frame) void {
 
     switch (pending) {
         .none => {},
-        .cancel => |id| frame.dl_mgr.cancel(id),
-        .remove => |id| frame.dl_mgr.removeJob(id),
+        .cancel => |id| frame.dl.send(.{ .cancel = id }),
+        .remove => |id| frame.dl.send(.{ .remove = id }),
         .retry => |id| actions.retryDownload(frame, id),
-        .pause => |id| frame.dl_mgr.pauseJob(id),
-        .unpause => |id| frame.dl_mgr.resumeJob(id),
+        .pause => |id| frame.dl.send(.{ .pause = id }),
+        .unpause => |id| frame.dl.send(.{ .unpause = id }),
+        .stop_seeding => |id| frame.dl.send(.{ .stop_seeding = id }),
     }
 }
 
@@ -261,15 +273,16 @@ pub fn renderActivityDrawer(frame: *Frame) void {
             .font = title.withSize(title.size * 0.92),
         });
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-        if (frame.dl_mgr.anyResumable()) {
-            if (style.button(@src(), "Pause all", .{}, .{ .gravity_y = 0.5 })) frame.dl_mgr.pauseAll();
+        const pr = actions.pauseResumeState(snapCopy(frame).jobs);
+        if (pr.any_pausable) {
+            if (style.button(@src(), "Pause all", .{}, .{ .gravity_y = 0.5 })) frame.dl.send(.pause_all);
             _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 6, .h = 1 } });
         }
-        if (frame.dl_mgr.anyPaused()) {
-            if (style.button(@src(), "Resume all", .{}, .{ .gravity_y = 0.5, .style = .highlight })) frame.dl_mgr.resumeAll();
+        if (pr.any_paused) {
+            if (style.button(@src(), "Resume all", .{}, .{ .gravity_y = 0.5, .style = .highlight })) frame.dl.send(.unpause_all);
             _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 6, .h = 1 } });
         }
-        if (style.button(@src(), "Clear finished", .{}, .{ .gravity_y = 0.5 })) _ = frame.dl_mgr.clearCompleted();
+        if (style.button(@src(), "Clear finished", .{}, .{ .gravity_y = 0.5 })) frame.dl.send(.clear_history);
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 6, .h = 1 } });
         if (components.iconOnly(@src(), "drawer-close", entypo.chevron_down, .{ .gravity_y = 0.5, .tag = "drawer-close" })) state.dock_expanded = false;
     }
@@ -286,16 +299,16 @@ const LiveTotals = struct {
     n_seeding: u32 = 0,
     n_done: u32 = 0,
 
-    fn fold(self: *LiveTotals, j: downloads.Job) void {
+    fn fold(self: *LiveTotals, j: *const Job) void {
         switch (classifyJob(j)) {
             .downloading => {
                 self.n_downloading += 1;
-                self.dl_speed += j.download_speed;
-                self.up_speed += j.upload_speed;
+                self.dl_speed += j.dl_speed;
+                self.up_speed += j.ul_speed;
             },
             .seeding => {
                 self.n_seeding += 1;
-                self.up_speed += j.upload_speed;
+                self.up_speed += j.ul_speed;
             },
             .done => self.n_done += 1,
         }
@@ -310,8 +323,8 @@ const LiveTotals = struct {
 /// downloadsSectionHeader uses it as the dvui id_extra key.
 const JobGroup = enum(u8) { downloading = 1, seeding = 2, done = 3 };
 
-fn classifyJob(j: downloads.Job) JobGroup {
-    return switch (j.status) {
+fn classifyJob(j: *const Job) JobGroup {
+    return switch (j.step) {
         .seeding => .seeding,
         .done, .failed, .cancelled => .done,
         else => .downloading,
@@ -336,34 +349,34 @@ fn downloadsSectionHeader(label_text: []const u8, count: u32, key: u8) void {
     });
 }
 
-const RowAction = union(enum) { none, cancel: u64, remove: u64, retry: u64, pause: u64, unpause: u64 };
+const RowAction = union(enum) { none, cancel: u64, remove: u64, retry: u64, pause: u64, unpause: u64, stop_seeding: u64 };
 
 /// True iff this torrent's upload count has met the configured
 /// seed-ratio target. Used to gate the "Remove" button — without
 /// this you can stop seeding manually, which goes against the
 /// "give back what you took" RPDL contract.
-fn ratioMet(job: downloads.Job, ratio_target: f32) bool {
-    if (!job.is_torrent) return true; // HTTP downloads have no obligation
+fn ratioMet(job: *const Job, ratio_target: f32) bool {
+    if (!isTorrent(job)) return true; // HTTP downloads have no obligation
     const total = job.bytes_total orelse return false;
     if (total == 0) return false;
     const target: u64 = @intFromFloat(@as(f64, @floatFromInt(total)) * ratio_target);
     return job.bytes_uploaded >= target;
 }
 
-/// Look up the library row tied to this job's `game_id` (an
-/// `f95_thread_id`) and return its `Game.name`. Falls back to the
-/// job's source label when the row isn't loaded — manual URL pastes
-/// have `game_id = 0` and never match.
-fn resolveJobTitle(games: []const library.Game, job: downloads.Job) []const u8 {
-    if (job.game_id != 0) {
+/// Look up the library row tied to this job's `game_thread_id` and
+/// return its `Game.name`. Falls back to the job's own title, then to
+/// its source label — manual URL pastes have id 0 and never match.
+fn resolveJobTitle(games: []const library.Game, job: *const Job) []const u8 {
+    if (job.game_thread_id != 0) {
         for (games) |*g| {
-            if (g.f95_thread_id == job.game_id) return g.name;
+            if (g.f95_thread_id == job.game_thread_id) return g.name;
         }
     }
-    return job.source_url;
+    if (job.title.len > 0) return job.title;
+    return job.source_href;
 }
 
-fn renderJobRow(job: downloads.Job, title: []const u8, extracting: bool, ratio_target: f32, is_donor: bool) RowAction {
+fn renderJobRow(job: *const Job, title: []const u8, extracting: bool, ratio_target: f32, is_donor: bool) RowAction {
     var action: RowAction = .none;
     var row = dvui.box(@src(), .{ .dir = .vertical }, .{
         .id_extra = job.id,
@@ -375,6 +388,7 @@ fn renderJobRow(job: downloads.Job, title: []const u8, extracting: bool, ratio_t
         .margin = .{ .x = 0, .y = 0, .w = 0, .h = 6 },
         .color_fill = .{ .color = style.cardFill() },
         .color_border = .{ .color = style.borderColor() },
+        .tag = "dl-job-row",
     });
     defer row.deinit();
 
@@ -383,7 +397,7 @@ fn renderJobRow(job: downloads.Job, title: []const u8, extracting: bool, ratio_t
         var hdr = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
         defer hdr.deinit();
         // Design B status chip — colored by job state.
-        const spec = statusChipSpec(job.status, extracting);
+        const spec = statusChipSpec(job.step, extracting);
         comp.chip(@src(), .{
             .label = spec.label,
             .fill = spec.color,
@@ -396,7 +410,7 @@ fn renderJobRow(job: downloads.Job, title: []const u8, extracting: bool, ratio_t
             .padding = .{ .x = 7, .y = 2, .w = 7, .h = 2 },
             .corners = .all(3),
         });
-        if (job.is_torrent) {
+        if (isTorrent(job)) {
             _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 4, .h = 1 } });
             const t = tokens.active;
             comp.chip(@src(), .{
@@ -423,22 +437,16 @@ fn renderJobRow(job: downloads.Job, title: []const u8, extracting: bool, ratio_t
         _ = dvui.spacer(@src(), .{ .expand = .horizontal });
 
         // Per-row action policy:
-        //   - Failed → Retry + Remove (the only place ✕ Remove
-        //     appears on a job we ourselves consider unsuccessful).
-        //   - Cancelled → Remove only.
-        //   - Done (HTTP non-torrent) → Remove.
-        //   - Done (torrent, ratio met) → Remove.
-        //   - Done (torrent, still pre-target) → no button — aria2
-        //     is still seeding for us.
-        //   - Seeding → no button (cannot stop seeding manually
-        //     unless the ratio target has been met).
-        //   - Downloading donor DDL → Cancel allowed (URLs are
-        //     plain HTTP, no community obligation).
+        //   - Failed → Retry + Remove.
+        //   - Cancelled / Done → Remove (a done torrent is no longer
+        //     seeding).
+        //   - Seeding, ratio met → Remove; before that → Stop seeding.
+        //   - Downloading donor DDL → Cancel + Remove allowed (plain
+        //     HTTP, no community obligation).
         //   - Anything else mid-flight → no button.
         const ratio_met = ratioMet(job, ratio_target);
-        const removable = switch (job.status) {
-            .failed, .cancelled => true,
-            .done => !job.is_torrent or ratio_met,
+        const removable = switch (job.step) {
+            .failed, .cancelled, .done => true,
             .seeding => ratio_met,
             // Donor DDL has no community seeding obligation, so Remove
             // is always safe on those — and necessary, because a job
@@ -447,7 +455,7 @@ fn renderJobRow(job: downloads.Job, title: []const u8, extracting: bool, ratio_t
             // two-step the user shouldn't have to discover.
             else => is_donor,
         };
-        if (job.status == .failed) {
+        if (job.step == .failed) {
             if (components.iconButton(@src(), "Retry", entypo.cycle, .{ .id_extra = job.id, .style = .highlight })) {
                 action = .{ .retry = job.id };
             }
@@ -455,8 +463,8 @@ fn renderJobRow(job: downloads.Job, title: []const u8, extracting: bool, ratio_t
         // Pause / Resume an in-flight download. Seeding is intentionally NOT
         // pausable here (that would break the RPDL seed obligation — use the
         // ratio-gated "Stop seeding" below for that).
-        switch (job.status) {
-            .queued, .fetching_metadata, .downloading, .verifying => {
+        switch (job.step) {
+            .fetching_metadata, .finding_peers, .downloading => {
                 if (components.iconButton(@src(), "Pause", entypo.controller_pause, .{ .id_extra = job.id })) {
                     action = .{ .pause = job.id };
                 }
@@ -473,8 +481,8 @@ fn renderJobRow(job: downloads.Job, title: []const u8, extracting: bool, ratio_t
         // the row. Coexists with the always-visible Remove (below) so
         // the user has both "stop, keep history" and "stop, forget it".
         if (is_donor) {
-            switch (job.status) {
-                .queued, .fetching_metadata, .downloading, .verifying, .paused => {
+            switch (job.step) {
+                .queued, .resolving, .fetching_metadata, .finding_peers, .downloading, .paused => {
                     if (components.iconButton(@src(), "Cancel", entypo.cross, .{ .id_extra = job.id, .style = .err })) {
                         action = .{ .cancel = job.id };
                     }
@@ -486,21 +494,21 @@ fn renderJobRow(job: downloads.Job, title: []const u8, extracting: bool, ratio_t
             if (components.iconButton(@src(), "Remove", entypo.trash, .{ .id_extra = job.id })) {
                 action = .{ .remove = job.id };
             }
-        } else if (job.is_torrent and (job.status == .seeding or job.status == .done)) {
+        } else if (job.step == .seeding) {
             // Per-torrent seed control: stop seeding before the ratio target
             // is met. The default still seeds to ratio; this is the user's
             // explicit "I'm done giving back on this one" override.
             if (components.iconButton(@src(), "Stop seeding", entypo.cross, .{ .id_extra = job.id, .style = .err })) {
-                action = .{ .remove = job.id };
+                action = .{ .stop_seeding = job.id };
             }
         }
     }
 
     // Source label subline — `rpdl:<id>` / pasted URL / etc. Skip
     // when the title fell back to the source (we'd be repeating it).
-    if (!std.mem.eql(u8, title, job.source_url)) {
-        const src_truncated = if (job.source_url.len > 96) job.source_url[0..96] else job.source_url;
-        dvui.label(@src(), "{s}{s}", .{ src_truncated, if (job.source_url.len > 96) "…" else "" }, .{
+    if (!std.mem.eql(u8, title, job.source_href)) {
+        const src_truncated = if (job.source_href.len > 96) job.source_href[0..96] else job.source_href;
+        dvui.label(@src(), "{s}{s}", .{ src_truncated, if (job.source_href.len > 96) "…" else "" }, .{
             .color_text = .{ .color = .{ .r = 0x90, .g = 0x70, .b = 0x80 } },
         });
     }
@@ -508,14 +516,14 @@ fn renderJobRow(job: downloads.Job, title: []const u8, extracting: bool, ratio_t
     // Download-progress bar — shown for jobs that haven't finished
     // pulling bytes yet. Seeding rows skip this since the payload is
     // already complete.
-    if (job.status != .seeding) {
+    if (job.step != .seeding) {
         renderProgressBar(.download, job, ratio_target);
     }
 
     // Seed-ratio bar — shown for torrents (any status). Lets the user
     // see how close we are to the 2.0× target both while leeching
     // (early progress) and while seeding (the finish line).
-    if (job.is_torrent) {
+    if (isTorrent(job)) {
         renderProgressBar(.ratio, job, ratio_target);
     }
 
@@ -533,8 +541,13 @@ fn renderJobRow(job: downloads.Job, title: []const u8, extracting: bool, ratio_t
         }
     }
 
-    if (job.error_msg) |em| {
+    // The step's own line ("0 seeders, retrying in 30 s", "Not an archive
+    // — will install as a file", the failure message …).
+    if (job.step == .failed) {
+        const em = if (job.fail_msg.len > 0) job.fail_msg else if (job.fail) |f| @tagName(f) else "unknown error";
         dvui.label(@src(), "error: {s}", .{em}, .{ .style = .err });
+    } else if (job.step_detail.len > 0) {
+        dvui.labelNoFmt(@src(), job.step_detail, .{}, .{ .color_text = .{ .color = style.labelDim() } });
     }
     return action;
 }
@@ -550,7 +563,7 @@ const BarKind = enum { download, ratio };
 /// at `pct * 4px`, which capped visually at ~400px wide — so on a
 /// wider Downloads pane the bar appeared to "stop at half" even when
 /// the job was past 50%).
-fn renderProgressBar(kind: BarKind, job: downloads.Job, ratio_target: f32) void {
+fn renderProgressBar(kind: BarKind, job: *const Job, ratio_target: f32) void {
     const total = job.bytes_total orelse 0;
     const frac: f32 = blk: switch (kind) {
         .download => {
@@ -605,28 +618,28 @@ fn renderProgressBar(kind: BarKind, job: downloads.Job, ratio_target: f32) void 
 
 /// Format a one-line stats summary for a job. Adapts to plain HTTP vs
 /// torrent and to active vs idle.
-fn composeStatsLine(buf: []u8, job: downloads.Job, ratio_target: f32) ![]const u8 {
+fn composeStatsLine(buf: []u8, job: *const Job, ratio_target: f32) ![]const u8 {
     const total = job.bytes_total orelse 0;
     var dl_buf: [24]u8 = undefined;
     var up_buf: [24]u8 = undefined;
     var done_buf: [24]u8 = undefined;
     var total_buf: [24]u8 = undefined;
     var up_total_buf: [24]u8 = undefined;
-    const dl_s = components.humanRate(&dl_buf, job.download_speed);
-    const up_s = components.humanRate(&up_buf, job.upload_speed);
+    const dl_s = components.humanRate(&dl_buf, job.dl_speed);
+    const up_s = components.humanRate(&up_buf, job.ul_speed);
     const done_s = components.humanBytes(&done_buf, job.bytes_done);
     const total_s = if (total > 0) components.humanBytes(&total_buf, total) else "?";
     const up_total_s = components.humanBytes(&up_total_buf, job.bytes_uploaded);
 
-    if (job.is_torrent) {
+    if (isTorrent(job)) {
         const ratio: f32 = if (total == 0) 0 else @as(f32, @floatFromInt(job.bytes_uploaded)) / @as(f32, @floatFromInt(total));
-        if (job.status == .seeding) {
+        if (job.step == .seeding) {
             // ETA to ratio target: remaining bytes / current up speed.
             const target_bytes: u64 = @intFromFloat(@as(f64, @floatFromInt(total)) * ratio_target);
             const remaining: u64 = if (job.bytes_uploaded >= target_bytes) 0 else target_bytes - job.bytes_uploaded;
             var eta_buf: [32]u8 = undefined;
-            const eta_s: []const u8 = if (job.upload_speed > 0 and remaining > 0)
-                humanEta(&eta_buf, remaining / @max(job.upload_speed, 1))
+            const eta_s: []const u8 = if (job.ul_speed > 0 and remaining > 0)
+                humanEta(&eta_buf, remaining / @max(job.ul_speed, 1))
             else if (remaining == 0)
                 "target reached"
             else
@@ -634,13 +647,13 @@ fn composeStatsLine(buf: []u8, job: downloads.Job, ratio_target: f32) ![]const u
             return std.fmt.bufPrint(
                 buf,
                 "↑ {s} · uploaded {s} · ratio {d:.2}× / {d:.1}× · peers {d} · {s}",
-                .{ up_s, up_total_s, ratio, ratio_target, job.connections, eta_s },
+                .{ up_s, up_total_s, ratio, ratio_target, job.peers, eta_s },
             );
         }
         return std.fmt.bufPrint(
             buf,
             "↓ {s}  ↑ {s} · {s} / {s} · ratio {d:.2}× · seeders {d}/{d}",
-            .{ dl_s, up_s, done_s, total_s, ratio, job.num_seeders, job.connections },
+            .{ dl_s, up_s, done_s, total_s, ratio, job.seeders, job.peers },
         );
     }
     // Plain HTTP.

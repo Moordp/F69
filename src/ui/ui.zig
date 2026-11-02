@@ -93,7 +93,7 @@ pub fn runMainLoop(
     lib: *library.Library,
     f95_svc: *f95.Service,
     f95_indexer_client: *f95_indexer.Client,
-    dl_mgr: *downloads.Manager,
+    dl: *downloads.Downloader,
     recipe_repo: *recipe.Repo,
     sandbox_backend: *sandbox.Sandbox,
     host_launcher: *sandbox.NoSandbox,
@@ -243,6 +243,7 @@ pub fn runMainLoop(
         _ = sr_slice;
     }
     state.aria2_seed_time_persisted = info.initial_aria2_seed_time;
+    state.dl_settings = info.initial_dl_settings;
     {
         const st_slice = std.fmt.bufPrint(&state.aria2_seed_time_buf, "{d}", .{info.initial_aria2_seed_time}) catch state.aria2_seed_time_buf[0..0];
         _ = st_slice;
@@ -292,18 +293,21 @@ pub fn runMainLoop(
         // No-op when never used.
         @import("util_file_picker").deinit();
         actions.freeSyncRecap(&state, lib.alloc);
-        actions.freeDonorTables(&state, lib.alloc);
         actions.freeTagsMaster(lib.alloc, &state);
         if (state.sync_queue) |q| lib.alloc.free(q);
         if (state.rpdl_token) |t| lib.alloc.free(t);
         if (state.tag_colors) |*m| library.Library.freeTagColors(m);
     }
 
-    // Wire the download poller's UI wake-up: when the background aria2 poller
-    // refreshes job progress it schedules a re-render via dvui.refresh. `&win`
-    // is stable for the loop's lifetime; the poller is stopped (stopPoller)
-    // before the window is torn down.
-    dl_mgr.setWake(&win, wakeDownloadUi);
+    // Wire the downloader's UI wake-up: each snapshot publish schedules a
+    // re-render via dvui.refresh. `&win` is stable for the loop's lifetime;
+    // the thread is stopped (`dl.stop`) before the window is torn down —
+    // the defer covers early error returns, the quit path stops it first.
+    // The thread loads + reconciles stored jobs itself, so `start` does no
+    // I/O here.
+    dl.setWake(&win, wakeDownloadUi);
+    dl.start() catch |e| std.log.err("downloader thread failed to start: {s}", .{@errorName(e)});
+    defer dl.stop();
 
     var interrupted = false;
     main_loop: while (true) {
@@ -352,9 +356,9 @@ pub fn runMainLoop(
         const should_quit = try backend.addAllEvents(&win);
         if (should_quit) {
             std.log.info("quit signal received, shutting down", .{});
-            // Stop the download poller before any teardown — it touches the
-            // window (wake-up), the daemon, and the jobs map.
-            dl_mgr.stopPoller();
+            // Stop the downloader thread before any teardown — it calls the
+            // window's wake-up and owns the engines' sockets.
+            dl.stop();
             // End this frame cleanly first.
             _ = try win.end(.{ .manage_backend = false });
 
@@ -377,7 +381,7 @@ pub fn runMainLoop(
                 .lib = lib,
                 .f95_svc = f95_svc,
                 .f95_indexer_client = f95_indexer_client,
-                .dl_mgr = dl_mgr,
+                .dl = dl,
                 .recipe_repo = recipe_repo,
                 .sandbox = sandbox_backend,
                 .host_launcher = host_launcher,
@@ -442,7 +446,7 @@ pub fn runMainLoop(
             .lib = lib,
             .f95_svc = f95_svc,
             .f95_indexer_client = f95_indexer_client,
-            .dl_mgr = dl_mgr,
+            .dl = dl,
             .recipe_repo = recipe_repo,
             .sandbox = sandbox_backend,
             .host_launcher = host_launcher,
@@ -683,26 +687,19 @@ pub fn guiFrame(frame: *Frame) !bool {
     actions.drainUpdateCheck(frame);
     actions.drainRpdlDownload(frame);
     actions.drainDonorDownload(frame);
+    actions.drainDownloaderEvents(frame);
     actions.drainDonorProbe(frame);
     actions.drainSlideLoads(frame);
     actions.drainCoverLoads(frame);
     actions.drainLaunchWatcher(frame);
     actions.drainRefreshTags(frame);
     types.endLatency(frame.io, t_drain, "drain stack");
-    // Refresh aria2-driven download progress. `tick()` self-throttles the
-    // per-job status RPC to ~4 Hz (it's a synchronous round-trip on this
-    // thread) and skips terminal jobs, so a queue of finished downloads no
-    // longer blocks rendering. Skip the call entirely when there are no jobs.
-    if (frame.dl_mgr.jobs.count() > 0) frame.dl_mgr.tick();
-    // Aria2 progress + the detail-page "Installing…" sweep both
-    // arrive/animate between input events. Without an explicit
-    // re-render request, the main loop's `waitEventTimeout` would
-    // sit idle and neither would move until the user touched the
-    // mouse. Whenever any download job is non-terminal OR an
-    // extract worker is in flight, ask dvui to schedule another
-    // frame. vsync caps the cost at ~60 fps; idle libraries with
-    // no activity incur zero wakeups.
-    if (anyDownloadActive(frame.dl_mgr) or anyPostInstallActive(frame.state) or
+    // Download progress and the detail-page "Installing…" sweep both
+    // animate between input events. The downloader thread wakes the
+    // window on each publish; while anything is active (or an install
+    // worker runs) ask dvui for another frame too. vsync caps the cost at
+    // ~60 fps; an idle library incurs zero wakeups.
+    if (anyDownloadActive(frame.dl) or anyPostInstallActive(frame.state) or
         actions.folderImportActive(frame.state))
     {
         dvui.refresh(frame.win, @src(), null);
@@ -714,17 +711,9 @@ pub fn guiFrame(frame: *Frame) !bool {
         dvui.refresh(frame.win, @src(), null);
     }
 
-    // Verbose telemetry for donor-DDL downloads. Throttled to ~once
-    // per 3 s per job, with instant flushes on stall/recovery and
-    // aria2 errorMessage changes. Cheap when no donor jobs exist
-    // (early-out on empty `donor_jobs` map).
-    actions.drainDonorTelemetry(frame);
-    // Any newly-.done downloads with a known game_id get handed to
-    // a detached extract worker. `drainCompletedDownloads` just
-    // kicks off workers; `drainPostInstall` collects the finished
-    // ones and writes the install DB row on the UI thread (SQLite
-    // isn't multi-thread-write-safe at the app layer).
-    actions.drainCompletedDownloads(frame);
+    // Finished install workers (move / mod apply) write the install row
+    // on the UI thread (SQLite isn't multi-thread-write-safe at the app
+    // layer) and ack the downloader.
     actions.drainPostInstall(frame);
     actions.drainManualInstall(frame);
     actions.drainTestInstall(frame);
@@ -822,27 +811,14 @@ pub fn guiFrame(frame: *Frame) !bool {
     return result;
 }
 
-/// True iff the download manager has any job that is still
-/// changing (downloading, seeding, queued, mid-extract, etc.).
-/// Drives the `dvui.refresh` call in `guiFrame` so progress bars
-/// keep moving between input events.
-fn anyDownloadActive(dl_mgr: *downloads.Manager) bool {
-    if (dl_mgr.jobs.count() == 0) return false;
-    var it = dl_mgr.jobs.iterator();
-    while (it.next()) |entry| {
-        switch (entry.value_ptr.status) {
-            // Terminal + paused + seeding states don't animate
-            // anything the user cares about per frame, so skip them
-            // when deciding whether to schedule another redraw.
-            // (Paused still re-polls via tick(), but the numbers
-            // don't move. Seeding ticks an upload counter the UI
-            // shows on the Downloads tab only; not worth a 60Hz
-            // refresh on every screen.)
-            .done, .failed, .cancelled, .paused, .seeding => continue,
-            else => return true,
-        }
-    }
-    return false;
+/// True iff the downloader has a job that is still changing (queued,
+/// downloading, verifying, extracting, installing, paused …). Seeding and
+/// terminal jobs do not count. Drives the `dvui.refresh` call in
+/// `guiFrame` so progress bars keep moving between input events.
+fn anyDownloadActive(dl: *downloads.Downloader) bool {
+    const snap = dl.snapshot();
+    defer dl.releaseSnapshot();
+    return snap.totals.active > 0;
 }
 
 /// True iff any post-install (extract) worker is in flight. Used

@@ -8,8 +8,9 @@
 //     clash modal state.
 //   - resolver preflight (`preflightResolveMod`, `preflightSolveSingle`,
 //     `reportResolverResult`).
-//   - post-install pipeline (`startPostInstall`, `postInstallWorker`,
-//     `drainPostInstall`, `postInstalledSet` helper).
+//   - post-install pipeline (`installFromArchive`, `postInstallWorker`,
+//     `drainPostInstall`): the downloader's `install_ready` event lands
+//     here; verify + extract already ran on the downloader thread.
 //   - manual-install pipeline (mirror of post-install with computed
 //     SHA + user-supplied archive).
 //   - `doRenameInstall` / `doDeleteInstall`.
@@ -33,12 +34,10 @@ const common = @import("common.zig");
 const mods_act = @import("mods.zig");
 const launch_act = @import("launch.zig");
 const sync_act = @import("sync.zig");
-const downloads_act = @import("downloads.zig");
 
 const Frame = types.Frame;
 const State = types.State;
 
-const PostInstalledSet = owned_types.PostInstalledSet;
 const PostInstallJobsList = owned_types.PostInstallJobsList;
 pub const PostInstallPayload = owned_types.PostInstallPayload;
 pub const ManualInstallPayload = owned_types.ManualInstallPayload;
@@ -50,17 +49,6 @@ pub const ManualInstallJob = owned_types.ManualInstallJob;
 pub const ManualInstallJobsList = owned_types.ManualInstallJobsList;
 pub const ModFileConflictAll = owned_types.ModFileConflictAll;
 pub const ClashModalState = owned_types.ClashModalState;
-
-/// Lazy-init the post-installed dedupe set; consumed by
-/// drainCompletedDownloads (downloads.zig) and by the auto-extract
-/// pipeline (this file).
-pub fn postInstalledSet(frame: *Frame) ?*PostInstalledSet {
-    if (frame.state.post_installed) |p| return p;
-    const set_ptr = frame.lib.alloc.create(PostInstalledSet) catch return null;
-    set_ptr.* = PostInstalledSet.init(frame.lib.alloc);
-    frame.state.post_installed = set_ptr;
-    return set_ptr;
-}
 
 // ============================================================
 //  per-mod install — enqueue mod archive download, post-install applies
@@ -1466,155 +1454,95 @@ pub fn isExtracting(frame: *Frame, download_job_id: u64) bool {
     return false;
 }
 
-/// True iff the user has a `.done` (or `.seeding`) download for
-/// this game whose archive hasn't been extracted into an `installs`
-/// row yet. Used to gate the manual "Install" button on the detail
-/// page — auto-install runs on every `.done` transition but skips
-/// (or fails) for unknown formats / busted archives / pre-startup
-/// crashes mid-extract, leaving the file on disk with no install
-/// record. The button gives the user an explicit retry.
-pub fn hasDownloadedButNotInstalled(frame: *Frame, thread_id: u64) bool {
-    // If an extract worker is already running for this game, the
-    // button shouldn't show — the install strip already covers it.
-    if (isInstallingForGame(frame, thread_id)) return false;
-
-    // Need at least one terminal-with-archive job whose version isn't
-    // already covered by an existing install row.
-    var buf: [16]DownloadedEntry = undefined;
-    return listDownloadedNotInstalled(frame, thread_id, &buf).len > 0;
-}
-
 /// One row in the per-game "downloaded versions, ready to install"
-/// list rendered as a dropdown next to the Install button.
+/// list rendered as a dropdown next to the Install button. Owns a copy
+/// of the version (the snapshot it came from is released before use).
 pub const DownloadedEntry = struct {
     job_id: u64,
-    /// `""` when the Job didn't capture a version (e.g. RPDL torrent
-    /// title without a parseable version segment). The UI labels it
+    version_buf: [64]u8 = undefined,
+    version_len: u8 = 0,
+    /// Kept for the detail screen's call shape; the downloader verifies.
+    expected_sha256: ?[32]u8 = null,
+
+    /// `""` when the job didn't capture a version. The UI labels it
     /// "unknown version".
-    version: []const u8,
-    /// SHA-256 the post-install worker verifies before extract. Null
-    /// when the source provider didn't ship one (most cases).
-    expected_sha256: ?[32]u8,
+    pub fn version(self: *const DownloadedEntry) []const u8 {
+        return self.version_buf[0..self.version_len];
+    }
 };
 
-/// Build the list of "downloaded but not yet installed" entries for
-/// this thread, written into `buf`. Returns the populated prefix.
-/// Filters out versions that already have an `installs` row so the
-/// dropdown doesn't list redundant choices. `buf` cap silently caps
-/// the result — 16 is plenty for the realistic case.
+/// Build the list of "downloaded but not installed" entries for this
+/// thread from the downloader snapshot, written into `buf`: finished
+/// jobs (done / seeding) whose version has no `installs` row, and jobs
+/// whose install step failed. Returns the populated prefix (capped at
+/// `buf.len`).
 pub fn listDownloadedNotInstalled(
     frame: *Frame,
     thread_id: u64,
     buf: []DownloadedEntry,
 ) []DownloadedEntry {
     if (isInstallingForGame(frame, thread_id)) return buf[0..0];
-    // Existing installs — used to suppress versions the user already
-    // has, so the dropdown only offers new builds.
+    var n: usize = 0;
+    {
+        const snap = frame.dl.snapshot();
+        defer frame.dl.releaseSnapshot();
+        for (snap.jobs) |v| {
+            if (n >= buf.len) break;
+            const j = &v.job;
+            if (j.game_thread_id != thread_id or j.kind != .game) continue;
+            const ready = switch (j.step) {
+                .done, .seeding => true,
+                .failed => j.fail == .install_failed,
+                else => false,
+            };
+            if (!ready) continue;
+            const ver = j.version orelse "";
+            const len: u8 = @intCast(@min(ver.len, 64));
+            buf[n] = .{ .job_id = j.id, .version_len = len, .expected_sha256 = j.expected_sha256 };
+            @memcpy(buf[n].version_buf[0..len], ver[0..len]);
+            n += 1;
+        }
+    }
+    // Existing installs (DB read, after the snapshot is released) hide
+    // versions the user already has, so the dropdown only offers new
+    // builds. Versions compare with `version_mod.equivalent` ("21.0" ≡
+    // "21.0.0").
     const installs = frame.lib.listInstalls(thread_id) catch &[_]library.Install{};
     defer frame.lib.freeInstalls(@constCast(installs));
-
-    var n: usize = 0;
-    var it = frame.dl_mgr.jobs.iterator();
-    while (it.next()) |entry| : ({}) {
-        if (n >= buf.len) break;
-        const j = entry.value_ptr.*;
-        if (j.game_id != thread_id) continue;
-        switch (j.status) {
-            .done, .seeding => {},
-            else => continue,
-        }
-        const ver_slice: []const u8 = if (j.version) |v| v else "";
-        // Skip versions whose install row already exists. Versions
-        // compared with `version_mod.equivalent` so "21.0" ≡ "21.0.0".
-        var already_installed = false;
+    var kept: usize = 0;
+    for (buf[0..n]) |e| {
+        const ver = e.version();
+        var already = false;
         for (installs) |inst| {
-            if (ver_slice.len > 0 and version_mod.equivalent(inst.version, ver_slice)) {
-                already_installed = true;
+            if (ver.len > 0 and version_mod.equivalent(inst.version, ver)) {
+                already = true;
                 break;
             }
         }
-        if (already_installed) continue;
-        buf[n] = .{
-            .job_id = j.id,
-            .version = ver_slice,
-            .expected_sha256 = j.expected_sha256,
-        };
-        n += 1;
+        if (already) continue;
+        buf[kept] = e;
+        kept += 1;
     }
-    return buf[0..n];
+    return buf[0..kept];
 }
 
-/// Kick off the post-install worker for a specific downloaded job.
-/// Companion to `startInstallFromDownload` for the multi-version
-/// dropdown case. `expected_sha256` (if known) is forwarded so the
-/// worker verifies the archive before extracting.
+/// Install a downloaded job again (the detail page's Install button):
+/// the downloader re-runs extract (an existing folder is registered as
+/// is) and raises `install_ready`, which lands in `installFromArchive`.
 pub fn startInstallFromDownloadJob(
     frame: *Frame,
     thread_id: u64,
     job_id: u64,
     expected_sha256: ?[32]u8,
 ) void {
+    _ = expected_sha256;
     const state = frame.state;
     if (isInstallingForGame(frame, thread_id)) {
         state.setDownloadMsg("install already running for this game");
         return;
     }
-    if (state.post_installed) |set_ptr| _ = set_ptr.remove(job_id);
-    startPostInstall(frame, job_id, thread_id, expected_sha256) catch |e| {
-        var msg_buf: [128]u8 = undefined;
-        const m = std.fmt.bufPrint(&msg_buf, "install start failed: {s}", .{@errorName(e)}) catch "install start failed";
-        state.setDownloadMsg(m);
-        return;
-    };
-    state.setDownloadMsg("install started — extracting archive in background");
-}
-
-/// Kick off the post-install worker for the game's existing downloaded
-/// archive. Picks the first .done/.seeding job tied to `thread_id`
-/// and routes it through `startPostInstall`. Also clears the job from
-/// the `post_installed` dedupe set so the worker actually fires —
-/// `drainCompletedDownloads` would otherwise skip it as "already
-/// processed". No-op when nothing matches or a worker is already in
-/// flight for this game.
-pub fn startInstallFromDownload(frame: *Frame, game: *const library.Game) void {
-    const state = frame.state;
-    if (isInstallingForGame(frame, game.f95_thread_id)) {
-        state.setDownloadMsg("install already running for this game");
-        return;
-    }
-
-    var job_id_opt: ?u64 = null;
-    var sha_opt: ?[32]u8 = null;
-    var it = frame.dl_mgr.jobs.iterator();
-    while (it.next()) |entry| {
-        const j = entry.value_ptr.*;
-        if (j.game_id != game.f95_thread_id) continue;
-        switch (j.status) {
-            .done, .seeding => {
-                job_id_opt = j.id;
-                sha_opt = j.expected_sha256;
-                break;
-            },
-            else => {},
-        }
-    }
-    const job_id = job_id_opt orelse {
-        state.setDownloadMsg("no downloaded archive on record for this game");
-        return;
-    };
-
-    // Drop the dedupe entry so the worker spawn isn't gated by a
-    // prior auto-attempt that bailed (e.g. unknown 7z without
-    // p7zip on PATH).
-    if (state.post_installed) |set_ptr| _ = set_ptr.remove(job_id);
-
-    startPostInstall(frame, job_id, game.f95_thread_id, sha_opt) catch |e| {
-        var msg_buf: [128]u8 = undefined;
-        const m = std.fmt.bufPrint(&msg_buf, "install start failed: {s}", .{@errorName(e)}) catch "install start failed";
-        state.setDownloadMsg(m);
-        return;
-    };
-    state.setDownloadMsg("install started — extracting archive in background");
+    frame.dl.send(.{ .retry_install = job_id });
+    state.setDownloadMsg("install started");
 }
 
 /// True iff a post-install worker is currently extracting an archive
@@ -1662,32 +1590,6 @@ pub fn extractProgressForGame(frame: *Frame, thread_id: u64) ?u8 {
     return null;
 }
 
-/// Background thread that estimates extract progress while the
-/// worker is blocked in `archive.extract`. Walks `dest_dir` every
-/// ~250 ms summing file sizes; pct = bytes_on_disk / (archive_size *
-/// 2). The ×2 fudge factor accounts for the typical ~50%
-/// compression ratio of Ren'Py / RPGM archive payloads. Capped at 99
-/// so the UI doesn't claim "done" before the worker actually returns.
-fn extractProgressPoller(job: *PostInstallJob) void {
-    job_mod.lowerWorkerPriority();
-    const p = &job.payload;
-    // ×2 is a coarse fit for Ren'Py / RPGM zips. Smaller for raw
-    // 7z (already-compressed assets) → progress moves slower but
-    // never overshoots, which is the safer failure mode.
-    const denom: u64 = @max(1, p.archive_size * 2);
-    const tick = std.Io.Duration.fromMilliseconds(250);
-    while (!p.progress_stop.load(.acquire)) {
-        const bytes = dirSizeBytes(p.io, p.dest_dir);
-        const pct_u64: u64 = @min(99, @divTrunc(bytes * 100, denom));
-        p.progress_pct.store(@intCast(pct_u64), .release);
-        // Nudge dvui so the bar repaints even when no input event
-        // arrives — without this the UI sits idle and the % only
-        // updates when the user moves the mouse.
-        job_mod.refreshDebounced(job.win, @src());
-        std.Io.sleep(p.io, tick, .awake) catch break;
-    }
-}
-
 /// Recursive directory size — sum of regular file sizes under `path`.
 /// Walks via `std.Io.Dir.walk`. Returns 0 on any error (best-effort
 /// estimator; the UI handles "unknown" gracefully).
@@ -1716,36 +1618,16 @@ pub fn anyPostInstallActive(state: *const State) bool {
     return list_ptr.items.len > 0;
 }
 
-/// Spawn the post-install worker for a completed game-job. Resolves
-/// everything the worker needs (file path via aria2, recipe lookup,
-/// destination dir) up front, then hands off. Failures here surface
-/// to the caller; failures inside the worker land on the job's
-/// `err_name` field for `drainPostInstall` to log.
-pub fn startPostInstall(
-    frame: *Frame,
-    download_job_id: u64,
-    game_id: u64,
-    expected_sha256: ?[32]u8,
-) !void {
+/// Resolve the version string recorded on the install row. Priority:
+///   1. The version captured on the job at enqueue time (the RPDL title
+///      version, or the F95 scrape for donor DDL) — "the build the user
+///      actually downloaded". Junk values ("0", blank) are skipped.
+///   2. The recipe's version (if a recipe exists for this thread).
+///   3. The F95-scraped `latest_version` of the library row.
+///   4. "unversioned".
+/// Returns owned slices; `have_recipe` reports whether a recipe matched.
+fn resolveInstallVersion(frame: *Frame, game_id: u64, job_version: ?[]const u8) !struct { version: []u8, recipe_id: []u8, have_recipe: bool } {
     const alloc = frame.lib.alloc;
-
-    const daemon = if (frame.dl_mgr.daemon) |*d| d else return error.NoDaemon;
-    const gid = frame.dl_mgr.job_gids.get(download_job_id) orelse return error.NoGid;
-    const file_path = try daemon.getFiles(gid);
-    errdefer alloc.free(file_path);
-    if (file_path.len == 0) {
-        alloc.free(file_path);
-        return error.NoFilePath;
-    }
-
-    // Resolve version + recipe_id. Priority order:
-    //   1. The version captured on the Job at enqueue time (the
-    //      RPDL-derived title version, or the F95 scrape for donor
-    //      DDL) — that's "the build the user actually downloaded".
-    //   2. The recipe's version (if a recipe exists for this thread).
-    //   3. The fallback string "unversioned".
-    // All owned slices so the worker has stable memory regardless of
-    // frame turnover.
     var version_str: []u8 = try alloc.dupe(u8, "unversioned");
     errdefer alloc.free(version_str);
     var recipe_id: []u8 = try alloc.dupe(u8, "");
@@ -1760,28 +1642,13 @@ pub fn startPostInstall(
         recipe_id = try alloc.dupe(u8, pp.recipe.id);
         have_recipe = true;
     }
-    // Override with the Job-captured version when present — that's
-    // strictly more specific than the recipe's "what's current"
-    // string, especially for RPDL where the title's version segment
-    // pins us to a single torrent build. Skip junk values (bare "0",
-    // whitespace) so we don't downgrade a good recipe.version with
-    // garbage extracted from a title.
-    if (frame.dl_mgr.jobs.get(download_job_id)) |j| {
-        if (j.version) |v| {
-            const trimmed = std.mem.trim(u8, v, " \t\r\n");
-            if (trimmed.len > 0 and !std.mem.eql(u8, trimmed, "0")) {
-                alloc.free(version_str);
-                version_str = try alloc.dupe(u8, trimmed);
-            }
+    if (job_version) |v| {
+        const trimmed = std.mem.trim(u8, v, " \t\r\n");
+        if (trimmed.len > 0 and !std.mem.eql(u8, trimmed, "0")) {
+            alloc.free(version_str);
+            version_str = try alloc.dupe(u8, trimmed);
         }
     }
-    // Final fallback: when neither a recipe nor the Job captured a
-    // version (e.g. an RPDL torrent whose title didn't expose one
-    // despite the more permissive `looksLikeVersion` rules), pull
-    // from the F95-scraped game record. RPDL torrents reliably
-    // carry SOMETHING parseable in the title, so this branch is
-    // mostly for donor DDL on a game we haven't fully synced —
-    // still better than literal "unversioned".
     if (std.mem.eql(u8, version_str, "unversioned")) {
         for (frame.games) |*gg| {
             if (gg.f95_thread_id != game_id) continue;
@@ -1795,164 +1662,226 @@ pub fn startPostInstall(
             break;
         }
     }
-    log.info("post-install version resolution: tid={d} → '{s}'", .{ game_id, version_str });
+    return .{ .version = version_str, .recipe_id = recipe_id, .have_recipe = have_recipe };
+}
 
-    // Pick the install directory. With ANY known version (Job- or
-    // recipe-derived) we land at `<lib>/<tid>/<version>/`; without
-    // we fall back to `<lib>/<tid>/`.
-    const versioned_dir = have_recipe or !std.mem.eql(u8, version_str, "unversioned");
-    var dest_buf: [640]u8 = undefined;
-    const dest_dir_local = if (versioned_dir)
-        std.fmt.bufPrint(&dest_buf, "{s}/{d}/{s}", .{ frame.info.library_root, game_id, version_str }) catch return error.PathTooLong
-    else
-        std.fmt.bufPrint(&dest_buf, "{s}/{d}", .{ frame.info.library_root, game_id }) catch return error.PathTooLong;
-
-    if (dirNonEmpty(frame.io, dest_dir_local)) {
-        log.info("post-install game-job {d}: {s} already populated, skipping extract", .{ download_job_id, dest_dir_local });
-        // Still record the install row — without it the detail
-        // page's install dropdown stays empty and the user can't
-        // pick or launch this version.
-        // Match the provenance sniff used by the worker path below so
-        // an early-exit RPDL install also records `.rpdl`.
-        const early_source: library.InstallSource = blk: {
-            if (frame.dl_mgr.jobs.get(download_job_id)) |j| {
-                if (std.mem.startsWith(u8, j.source_url, "rpdl:")) break :blk .rpdl;
-            }
-            break :blk .recipe;
+/// One path segment from a version string (same rule as the
+/// downloader's extract folder): path separators and reserved
+/// characters become `_`; empty / dot-only → "unversioned".
+fn versionSegment(buf: []u8, v: []const u8) []const u8 {
+    const n = @min(v.len, buf.len);
+    var all_dots = true;
+    for (v[0..n], buf[0..n]) |c, *o| {
+        o.* = switch (c) {
+            '/', '\\', ':', '*', '?', '"', '<', '>', '|' => '_',
+            else => if (c < 0x20) '_' else c,
         };
-        doInstallUpsert(frame, game_id, version_str, dest_dir_local, recipe_id, early_source);
-        // Refresh the per-frame install-set so the InstallDot flips
-        // green immediately — this path bypasses the worker (no
-        // drainPostInstall pickup), so without this the UI keeps the
-        // stale "not installed" snapshot until the next nav event.
-        common.refreshInstalledSet(frame);
-        alloc.free(file_path);
-        alloc.free(version_str);
-        alloc.free(recipe_id);
+        if (c != '.' and c != ' ') all_dots = false;
+    }
+    if (n == 0 or all_dots) return "unversioned";
+    return buf[0..n];
+}
+
+fn trimTrailingSep(p: []const u8) []const u8 {
+    var end = p.len;
+    while (end > 1 and (p[end - 1] == '/' or p[end - 1] == '\\')) end -= 1;
+    return p[0..end];
+}
+
+/// Tell the downloader the install for `job_id` failed.
+fn sendInstallFailed(frame: *Frame, job_id: u64, msg: []const u8) void {
+    frame.dl.send(.{ .install_failed = .{ .job_id = job_id, .msg = msg } });
+}
+
+/// Handle the downloader's `install_ready` event. The downloader has
+/// already verified and (for game archives) extracted, so no archive
+/// work happens here:
+///   - game, `extracted_dir` set → register that folder (install row,
+///     installed-set refresh, auto-convert, diagnostics), ack at once;
+///   - game, `extracted_dir == null` (not an archive) → a worker moves
+///     the file into `<library_root>/<tid>/<version>/`; the drain
+///     registers that folder and acks;
+///   - mod → a worker applies the archive onto the game's latest
+///     install; the drain acks.
+/// Any failure is reported with `install_failed`. `ev` is borrowed:
+/// everything kept is copied.
+pub fn installFromArchive(frame: *Frame, ev: downloads.downloader.InstallReady) void {
+    installFromArchiveInner(frame, ev) catch |e| {
+        log.warn("install for download {d} failed to start: {s}", .{ ev.job_id, @errorName(e) });
+        var buf: [96]u8 = undefined;
+        const m = std.fmt.bufPrint(&buf, "Install could not start: {s}", .{@errorName(e)}) catch "Install could not start";
+        sendInstallFailed(frame, ev.job_id, m);
+        frame.state.setDownloadMsg(m);
+    };
+}
+
+fn installFromArchiveInner(frame: *Frame, ev: downloads.downloader.InstallReady) !void {
+    const alloc = frame.lib.alloc;
+    const source_kind: library.InstallSource = if (ev.source_is_rpdl) .rpdl else .recipe;
+
+    if (ev.kind == .mod) {
+        const mod_id = ev.mod_id orelse return error.NoModId;
+        // Latest install of the parent game is where the mod applies.
+        const install = (frame.lib.latestInstallForGame(ev.game_thread_id) catch null) orelse return error.GameNotInstalled;
+        defer frame.lib.freeInstall(install);
+        const file_path = try alloc.dupe(u8, ev.archive_path);
+        errdefer alloc.free(file_path);
+        const dest_dir = try alloc.dupe(u8, install.install_path);
+        errdefer alloc.free(dest_dir);
+        try spawnPostInstall(frame, .{
+            .io = frame.io,
+            .download_job_id = ev.job_id,
+            .game_id = ev.game_thread_id,
+            .mode = .apply_mod,
+            .mod_id = mod_id,
+            .file_path = file_path,
+            .dest_dir = dest_dir,
+            .version = try alloc.dupe(u8, ""),
+            .recipe_id = try alloc.dupe(u8, ""),
+            .have_recipe = false,
+            .expected_sha256 = null,
+            .source = source_kind,
+        });
         return;
     }
 
-    const dest_dir = try alloc.dupe(u8, dest_dir_local);
+    const rv = try resolveInstallVersion(frame, ev.game_thread_id, ev.version);
+    log.info("install: download {d} tid={d} → version '{s}'", .{ ev.job_id, ev.game_thread_id, rv.version });
+
+    if (ev.extracted_dir) |dir| {
+        defer alloc.free(rv.version);
+        defer alloc.free(rv.recipe_id);
+        finishGameInstall(frame, ev.game_thread_id, rv.version, trimTrailingSep(dir), rv.recipe_id, source_kind);
+        frame.dl.send(.{ .install_ack = ev.job_id });
+        return;
+    }
+
+    // Not an archive: move the file into its own versioned folder on a
+    // worker (the library may be on a slow FUSE mount).
+    errdefer alloc.free(rv.version);
+    errdefer alloc.free(rv.recipe_id);
+    var seg_buf: [128]u8 = undefined;
+    const seg = versionSegment(&seg_buf, ev.version orelse rv.version);
+    const dest_dir = try std.fmt.allocPrint(alloc, "{s}" ++ std.fs.path.sep_str ++ "{d}" ++ std.fs.path.sep_str ++ "{s}", .{ frame.info.library_root, ev.game_thread_id, seg });
     errdefer alloc.free(dest_dir);
+    const file_path = try alloc.dupe(u8, ev.archive_path);
+    errdefer alloc.free(file_path);
+    try spawnPostInstall(frame, .{
+        .io = frame.io,
+        .download_job_id = ev.job_id,
+        .game_id = ev.game_thread_id,
+        .mode = .move_file,
+        .file_path = file_path,
+        .dest_dir = dest_dir,
+        .version = rv.version,
+        .recipe_id = rv.recipe_id,
+        .have_recipe = rv.have_recipe,
+        .expected_sha256 = ev.expected_sha256,
+        .source = source_kind,
+    });
+}
 
-    // Stat the archive up-front for the extract-progress poller. Best
-    // effort — 0 means "unknown" and the poller stays quiet.
-    const archive_size: u64 = blk: {
-        var f = std.Io.Dir.cwd().openFile(frame.io, file_path, .{ .mode = .read_only }) catch break :blk 0;
-        defer f.close(frame.io);
-        const st = f.stat(frame.io) catch break :blk 0;
-        break :blk st.size;
-    };
-
-    // Provenance: sniff the Job's `source_url` (which is the label we
-    // passed to `enqueueTorrent` / `enqueueUrl`). RPDL torrents are
-    // labelled `rpdl:<id>`; everything else falls back to `.recipe`.
-    const source_kind: library.InstallSource = blk: {
-        if (frame.dl_mgr.jobs.get(download_job_id)) |j| {
-            if (std.mem.startsWith(u8, j.source_url, "rpdl:")) break :blk .rpdl;
-        }
-        break :blk .recipe;
-    };
-
+/// Spawn the post-install worker. Takes ownership of the payload's
+/// strings on success; on error the caller still owns them.
+fn spawnPostInstall(frame: *Frame, payload: PostInstallPayload) !void {
+    const alloc = frame.lib.alloc;
     const list = postInstallJobsList(frame) orelse return error.OutOfMemory;
-    // spawnJob into a transient slot so the worker is detached
-    // before we add it to the list; if list.append fails we
-    // already have a running worker but the carrier still gets
-    // tracked locally so cleanup runs.
+    try list.ensureUnusedCapacity(alloc, 1);
     var slot: ?*PostInstallJob = null;
-    const pij = job_mod.spawnJob(
-        PostInstallPayload,
-        postInstallWorker,
-        alloc,
-        frame.win,
-        .{
-            .io = frame.io,
-            .download_job_id = download_job_id,
-            .game_id = game_id,
-            .file_path = file_path,
-            .dest_dir = dest_dir,
-            .version = version_str,
-            .recipe_id = recipe_id,
-            .have_recipe = have_recipe,
-            .expected_sha256 = expected_sha256,
-            .archive_size = archive_size,
-            .source = source_kind,
+    const pij = try job_mod.spawnJob(PostInstallPayload, postInstallWorker, alloc, frame.win, payload, &slot);
+    list.appendAssumeCapacity(pij);
+    log.info("post-install download {d}: {s} worker spawned", .{ payload.download_job_id, @tagName(payload.mode) });
+}
+
+/// Install row + installed-set refresh + optional auto-convert +
+/// post-install diagnostics for a finished game folder. UI thread.
+fn finishGameInstall(
+    frame: *Frame,
+    game_id: u64,
+    version_str: []const u8,
+    dest_dir: []const u8,
+    recipe_id: []const u8,
+    source: library.InstallSource,
+) void {
+    // Always write the install row — even raw-paste / no-recipe installs
+    // deserve an entry so they land in the detail-page dropdown.
+    doInstallUpsert(frame, game_id, version_str, dest_dir, recipe_id, source);
+    // Refresh the per-frame install-set snapshot so the InstallDot +
+    // detail page flip green immediately.
+    common.refreshInstalledSet(frame);
+    // Auto-convert hook (user opt-in).
+    if (frame.state.auto_convert) maybeAutoConvert(frame, game_id, dest_dir);
+    // Walk the folder for a Linux launcher and run the pre-launch checks;
+    // an actionable issue opens the launch-issue dialog before Launch.
+    runPostInstallDiagnostics(frame, game_id, dest_dir);
+}
+
+/// Move `src` into `dest_dir` (created). Rename first; a cross-volume
+/// move (downloads and library on different drives) falls back to copy
+/// + delete.
+fn moveFileInto(io: std.Io, src: []const u8, dest_dir: []const u8) !void {
+    const cwd = std.Io.Dir.cwd();
+    try cwd.createDirPath(io, dest_dir);
+    var buf: [1024]u8 = undefined;
+    const dst = try std.fmt.bufPrint(&buf, "{s}" ++ std.fs.path.sep_str ++ "{s}", .{ dest_dir, std.fs.path.basename(src) });
+    cwd.rename(src, cwd, dst, io) catch |e| switch (e) {
+        error.FileNotFound => return e,
+        else => {
+            log.info("rename '{s}' failed ({s}); copying instead", .{ src, @errorName(e) });
+            try common.copyFile(io, src, dst);
+            cwd.deleteFile(io, src) catch |de| log.warn("could not delete '{s}' after copy: {s}", .{ src, @errorName(de) });
         },
-        &slot,
-    ) catch |e| {
-        alloc.free(file_path);
-        alloc.free(dest_dir);
-        alloc.free(version_str);
-        alloc.free(recipe_id);
-        return e;
     };
-    list.append(alloc, pij) catch |e| {
-        // Worker is already running — we can't unspawn. Request
-        // cancel (worker treats it as a soft fail) and let the
-        // next drain reap the carrier. Payload strings live on
-        // until drain frees them; appending failed so the list
-        // doesn't reference pij, but we still own it.
-        pij.requestCancel();
-        return e;
-    };
-    log.info("post-install game-job {d}: worker spawned, extracting in background", .{download_job_id});
 }
 
 fn postInstallWorker(job: *PostInstallJob) void {
     const p = &job.payload;
-    const fail = struct {
-        fn run(j: *PostInstallJob, name: []const u8) void {
-            j.payload.err_name = name;
-            j.markFailed();
-        }
-    }.run;
-
-    if (p.expected_sha256) |want| {
-        downloads.verifyFile(p.io, p.file_path, want) catch {
-            log.warn("post-install game-job {d}: SHA-256 mismatch for {s}", .{ p.download_job_id, p.file_path });
-            fail(job, "HashMismatch");
-            return;
-        };
-    }
-
-    const fmt = downloads.detectFormat(p.file_path);
-    if (fmt == .unknown) {
-        log.warn("post-install game-job {d}: unknown archive format for {s}", .{ p.download_job_id, p.file_path });
-        fail(job, "UnknownFormat");
-        return;
-    }
-
-    log.info("post-install game-job {d}: extracting {s} → {s}", .{ p.download_job_id, p.file_path, p.dest_dir });
-
-    // Fire up the size-polling thread so the UI's "Installing —
-    // extracting" strip shows a moving %. Worker keeps blocking in
-    // std.zip/std.tar.extract; the poller watches dest_dir size and
-    // writes the estimate into payload.progress_pct.
-    var poller_thread: ?std.Thread = null;
-    if (p.archive_size > 0) {
-        poller_thread = std.Thread.spawn(.{}, extractProgressPoller, .{job}) catch null;
-    }
-    downloads.extract(job.alloc, p.io, p.file_path, p.dest_dir, .{ .strip = 0 }) catch {
-        if (poller_thread) |t| {
-            p.progress_stop.store(true, .release);
-            t.join();
-        }
-        fail(job, "ExtractionFailed");
-        return;
-    };
-    if (poller_thread) |t| {
-        p.progress_stop.store(true, .release);
-        t.join();
+    switch (p.mode) {
+        .move_file => {
+            moveFileInto(p.io, p.file_path, p.dest_dir) catch |e| {
+                log.warn("post-install download {d}: moving {s} failed: {s}", .{ p.download_job_id, p.file_path, @errorName(e) });
+                p.err_name = @errorName(e);
+                job.markFailed();
+                return;
+            };
+        },
+        .apply_mod => {
+            applyModWorker(job) catch |e| {
+                log.warn("post-install mod download {d}: apply failed: {s}", .{ p.download_job_id, @errorName(e) });
+                p.err_name = @errorName(e);
+                job.markFailed();
+                return;
+            };
+        },
     }
     p.progress_pct.store(100, .release);
-    log.info("post-install game-job {d}: extract finished", .{p.download_job_id});
-
     job.markDone();
 }
 
-/// Each guiFrame: scan the in-flight list, do the DB upsert for
-/// freshly-finished extractions (must run on the UI thread because
-/// SQLite isn't multi-thread-safe at the app layer), then free.
+/// Apply a downloaded mod archive onto the game install at `dest_dir`.
+/// The tracker lives at `<game_root>/.f69-mods.json` — the same place
+/// `doInstallMod` writes — so the Mods page sees the result.
+fn applyModWorker(job: *PostInstallJob) !void {
+    const p = &job.payload;
+    const alloc = job.alloc;
+    const layout = try mods_act.modTrackerLayout(p.io, alloc, p.dest_dir);
+    defer mods_act.freeModTrackerLayout(alloc, layout);
+    var tracker = installer_mod.Tracker.init(alloc, p.io, layout.tracker_path);
+    defer tracker.deinit();
+    // Re-load existing entries so the flush rewrites the full file.
+    var existing = installer_mod.Tracker.load(alloc, p.io, layout.tracker_path) catch installer_mod.InstallLog{ .entries = &.{} };
+    defer existing.deinit(alloc);
+    for (existing.entries) |e| tracker.record(e) catch {};
+    var mod_id_buf: [32]u8 = undefined;
+    const mod_id_str = try std.fmt.bufPrint(&mod_id_buf, "{d}", .{p.mod_id});
+    log.info("post-install mod download {d}: applying {s} → {s}", .{ p.download_job_id, p.file_path, layout.game_root });
+    try installer_mod.applyModArchive(alloc, p.io, mod_id_str, p.file_path, layout.game_root, &tracker, .{});
+}
+
+/// Each guiFrame: collect finished post-install workers. A finished
+/// file move writes the install row (UI thread — SQLite isn't multi-
+/// thread-safe at the app layer); then the downloader gets
+/// `install_ack`, or `install_failed` when the worker failed.
 pub fn drainPostInstall(frame: *Frame) void {
     if (frame.state.post_install_jobs == null) return;
     const list = postInstallJobsList(frame) orelse return;
@@ -1967,31 +1896,13 @@ pub fn drainPostInstall(frame: *Frame) void {
         }
         const p = &pij.payload;
         if (phase == .done) {
-            // Always write the install row — even raw-paste / no-
-            // recipe extracts deserve an entry so they land in the
-            // detail-page dropdown and the user can launch them.
-            doInstallUpsert(frame, p.game_id, p.version, p.dest_dir, p.recipe_id, p.source);
-            // Refresh the per-frame install-set snapshot so the
-            // InstallDot + detail page flip green immediately without
-            // waiting for the next navigation event.
-            common.refreshInstalledSet(frame);
-            // Auto-convert hook. Only fires when the user opted in
-            // AND we have a recipe for this game with a non-`none`
-            // convert_linux block (the convert spec needs an engine
-            // pin; without a recipe we have nothing to feed Convert).
-            if (frame.state.auto_convert) {
-                maybeAutoConvert(frame, p.game_id, p.dest_dir);
-            }
-            // Post-install diagnostics. Walk the extracted dir for
-            // a Linux launcher and run `ldd` against it. If unresolved
-            // libs are found, auto-open the launch-issue dialog so
-            // the user knows BEFORE they click Launch — and gets a
-            // one-click "Fix" if we recognise the issue. Skips when
-            // no Linux launcher exists yet (e.g. Windows-only build
-            // waiting for Convert).
-            runPostInstallDiagnostics(frame, p.game_id, p.dest_dir);
+            if (p.mode == .move_file) finishGameInstall(frame, p.game_id, p.version, p.dest_dir, p.recipe_id, p.source);
+            frame.dl.send(.{ .install_ack = p.download_job_id });
         } else if (phase == .failed) {
-            log.warn("post-install game-job {d}: worker failed ({s})", .{ p.download_job_id, p.err_name orelse "?" });
+            log.warn("post-install download {d}: worker failed ({s})", .{ p.download_job_id, p.err_name orelse "?" });
+            var buf: [96]u8 = undefined;
+            const m = std.fmt.bufPrint(&buf, "Install failed: {s}", .{p.err_name orelse "cancelled"}) catch "Install failed";
+            sendInstallFailed(frame, p.download_job_id, m);
         }
         pij.alloc.free(p.file_path);
         pij.alloc.free(p.dest_dir);
@@ -2451,98 +2362,6 @@ fn slugify(buf: []u8, src: []const u8) ?[]const u8 {
     while (n > 0 and buf[n - 1] == '-') : (n -= 1) {}
     if (n == 0) return null;
     return buf[0..n];
-}
-
-pub fn postInstallMod(frame: *Frame, job_id: u64, game_id: u64, mod_id_opt: ?u64) !void {
-    const alloc = frame.lib.alloc;
-    const mod_id = mod_id_opt orelse {
-        log.warn("post-install mod-job {d}: no mod_id", .{job_id});
-        return;
-    };
-
-    // Locate the downloaded archive file via aria2.
-    const daemon = if (frame.dl_mgr.daemon) |*d| d else return;
-    const gid = frame.dl_mgr.job_gids.get(job_id) orelse return;
-    const file_path = try daemon.getFiles(gid);
-    defer alloc.free(file_path);
-    if (file_path.len == 0) {
-        log.warn("post-install mod-job {d}: aria2 returned no file path", .{job_id});
-        return;
-    }
-
-    // Latest install of the parent game is where we apply.
-    const install_opt = frame.lib.latestInstallForGame(game_id) catch null;
-    defer if (install_opt) |i| frame.lib.freeInstall(i);
-    const install = install_opt orelse {
-        log.warn("post-install mod-job {d}: game {d} has no install row — apply skipped", .{ job_id, game_id });
-        return;
-    };
-
-    var mod_id_buf: [32]u8 = undefined;
-    const mod_id_str = std.fmt.bufPrint(&mod_id_buf, "{d}", .{mod_id}) catch return;
-
-    // Tracker lives at <game_root>/.f69-mods.json — same place
-    // `doInstallMod` writes — so the Mods page sees the post-install
-    // result, not a tracker stranded at the wrapper-folder parent.
-    const layout = mods_act.modTrackerLayout(frame.io, alloc, install.install_path) catch |e| {
-        log.warn("post-install mod-job {d}: tracker layout failed: {s}", .{ job_id, @errorName(e) });
-        return;
-    };
-    defer mods_act.freeModTrackerLayout(alloc, layout);
-
-    var tracker = installer_mod.Tracker.init(alloc, frame.io, layout.tracker_path);
-    defer tracker.deinit();
-
-    // Re-load existing entries into the tracker so flush rewrites the
-    // full file (line-delimited JSON, full overwrite).
-    var existing = installer_mod.Tracker.load(alloc, frame.io, layout.tracker_path) catch installer_mod.InstallLog{ .entries = &.{} };
-    defer existing.deinit(alloc);
-    for (existing.entries) |e| {
-        tracker.record(e) catch {};
-    }
-
-    log.info("post-install mod-job {d}: applying {s} → {s}", .{ job_id, file_path, layout.game_root });
-    installer_mod.applyModArchive(
-        alloc,
-        frame.io,
-        mod_id_str,
-        file_path,
-        layout.game_root,
-        &tracker,
-        .{},
-    ) catch |e| {
-        log.warn("post-install mod-job {d}: apply failed: {s}", .{ job_id, @errorName(e) });
-        return;
-    };
-}
-
-/// On a .failed download for `game_id`, advance the per-game source
-/// attempt index and enqueue the next mirror. When the recipe's
-/// sources are exhausted, surface a status line and stop.
-pub fn tryNextSource(frame: *Frame, game_id: u64) !void {
-    const state = frame.state;
-    const m = common.attemptsMap(frame) orelse return error.OutOfMemory;
-    const next_idx: u32 = (m.get(game_id) orelse 0) + 1;
-    m.put(game_id, next_idx) catch {};
-
-    const parsed_opt = frame.recipe_repo.findGameByThread(game_id) catch return;
-    var parsed = parsed_opt orelse return;
-    defer parsed.deinit();
-
-    const sources = parsed.recipe.sources;
-    if (next_idx >= sources.len) {
-        var buf: [192]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "All {d} source(s) failed for game {d}", .{ sources.len, game_id }) catch "All sources failed";
-        state.setDownloadMsg(msg);
-        log.warn("{s}", .{msg});
-        return;
-    }
-
-    log.info("game {d}: source {d} failed, trying source {d}/{d}", .{ game_id, next_idx - 1, next_idx + 1, sources.len });
-    const new_job = try downloads_act.enqueueOneSource(frame, sources[next_idx], .game, game_id, null);
-    var ok_buf: [192]u8 = undefined;
-    const ok_msg = std.fmt.bufPrint(&ok_buf, "Source {d}/{d} failed; trying next (job {d})", .{ next_idx, sources.len, new_job }) catch "Trying next source";
-    state.setDownloadMsg(ok_msg);
 }
 
 /// Fill `out` with a random RFC-4122 v4 UUID string. 36 chars

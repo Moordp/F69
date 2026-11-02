@@ -2,6 +2,7 @@
 // handlers; render reads it each frame.
 
 const std = @import("std");
+const downloads = @import("downloads");
 const library = @import("library");
 const dvui = @import("dvui");
 const buf_mod = @import("buf.zig");
@@ -918,19 +919,6 @@ pub const State = struct {
     /// Mirrors `pending_rpdl_download` for the Tier-1 donor-DDL flow:
     /// POST `/sam/dddl.php` → grab signed URL → enqueue via aria2.
     pending_donor_download: ?*owned.DonorDownloadJob = null,
-    /// Tracks which in-flight aria2 jobs originated from a donor-DDL
-    /// signed URL so the failure handler knows it can POST for a fresh
-    /// URL and re-enqueue (handles signed-URL TTL expiry).
-    donor_jobs: ?*owned.DonorJobsMap = null,
-    /// Bounds the auto-retry loop on signed-URL expiry — without it a
-    /// permanently dead URL would just spin forever.
-    donor_retries: ?*owned.DonorRetriesMap = null,
-    /// `HashMap(u64 job_id → DonorTickState)` — per-job rolling
-    /// telemetry for donor downloads (last log timestamp, last
-    /// observed byte count, stall-since timestamp, last seen aria2
-    /// errorMessage). Drives the verbose "how is this download
-    /// behaving" logging that `drainDonorTelemetry` emits.
-    donor_tick_log: ?*owned.DonorTickLog = null,
     /// Heap-allocated RefreshTagsJob (defined in `actions/tags.zig`).
     /// Set while a master-tag-list refresh is in flight.
     pending_tags_refresh: ?*owned.RefreshTagsJob = null,
@@ -1258,7 +1246,10 @@ pub const State = struct {
     /// Editable seed-time cap (minutes) text buffer + last-saved value.
     aria2_seed_time_buf: [16]u8 = @splat(0),
     aria2_seed_time_persisted: u32 = 0,
-    aria2_seed_ratio_persisted: f32 = 5.0,
+    aria2_seed_ratio_persisted: f32 = 3.0,
+    /// Mirror of the downloader's settings (loaded at startup). Settings
+    /// changes edit this copy and send it as `reload_settings`.
+    dl_settings: downloads.policy.Settings = .{},
     aria2_seed_ratio_msg_buf: [80]u8 = @splat(0),
     aria2_seed_ratio_msg_len: usize = 0,
     /// Status from Settings → Library → "Re-detect engines from installs".
@@ -1378,14 +1369,6 @@ pub const State = struct {
     /// progress widget can read plain `u32`s.
     bookmarks_progress_current: u32 = 0,
     bookmarks_progress_total: u32 = 0,
-    /// Job ids whose terminal status (.done OR .failed) has been
-    /// processed by the post-install / fallback drainer. Lazy-init
-    /// on first use.
-    post_installed: ?*owned.PostInstalledSet = null,
-    /// Per-game F95-thread-id → index into `recipe.sources[]` we're
-    /// currently downloading. Bumped on each `.failed` to point at the
-    /// next mirror. Lazy-init like `post_installed`.
-    download_attempts: ?*owned.AttemptsMap = null,
     /// "Auto-convert new installs" toggle. When true, the post-
     /// install pipeline runs Convert immediately after an extract
     /// finishes (for games that have a recipe with `convert_linux`).

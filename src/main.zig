@@ -145,6 +145,51 @@ fn pruneRunLogs(io: std.Io, gpa: std.mem.Allocator, dir_path: []const u8) void {
 
 const log = std.log.scoped(.main);
 
+/// Downloader v2 settings, one file per value under `<data_root>/`
+/// (`dl_slots_files`, `dl_cap_total_kbs`, …). A missing or unreadable file
+/// keeps the `policy.Settings` default. `watch_dir`/`megacmd_path` are
+/// owned by `gpa`; free with `freeDownloaderSettings`.
+fn loadDownloaderSettings(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    data_root: []const u8,
+    seed_ratio: f32,
+    seed_time_min: u32,
+) !downloads.policy.Settings {
+    const D: downloads.policy.Settings = .{};
+    var s: downloads.policy.Settings = .{ .seed_ratio = seed_ratio, .seed_time_min = seed_time_min };
+    var buf: [1024]u8 = undefined;
+    const P = struct {
+        fn path(b: []u8, root: []const u8, name: []const u8) []const u8 {
+            return std.fmt.bufPrint(b, "{s}/{s}", .{ root, name }) catch name;
+        }
+    };
+    s.slots_files = util_setting.loadInt(u8, io, gpa, P.path(&buf, data_root, "dl_slots_files"), D.slots_files);
+    s.slots_torrents = util_setting.loadInt(u8, io, gpa, P.path(&buf, data_root, "dl_slots_torrents"), D.slots_torrents);
+    s.cap_total_kbs = util_setting.loadInt(u32, io, gpa, P.path(&buf, data_root, "dl_cap_total_kbs"), D.cap_total_kbs);
+    s.cap_files_kbs = util_setting.loadInt(u32, io, gpa, P.path(&buf, data_root, "dl_cap_files_kbs"), D.cap_files_kbs);
+    s.cap_torrents_kbs = util_setting.loadInt(u32, io, gpa, P.path(&buf, data_root, "dl_cap_torrents_kbs"), D.cap_torrents_kbs);
+    s.torrent_share_pct = util_setting.loadInt(u8, io, gpa, P.path(&buf, data_root, "dl_torrent_share_pct"), D.torrent_share_pct);
+    s.ul_cap_busy_kbs = util_setting.loadInt(u32, io, gpa, P.path(&buf, data_root, "ul_cap_busy_kbs"), D.ul_cap_busy_kbs);
+    s.ul_cap_idle_kbs = util_setting.loadInt(u32, io, gpa, P.path(&buf, data_root, "ul_cap_idle_kbs"), D.ul_cap_idle_kbs);
+    // A 0 slot count would never start anything; keep at least one.
+    s.slots_files = @max(s.slots_files, 1);
+    s.slots_torrents = @max(s.slots_torrents, 1);
+    s.torrent_share_pct = @min(s.torrent_share_pct, 100);
+    s.watch_dir = (util_setting.readSingleLine(io, gpa, P.path(&buf, data_root, "watch_dir")) catch null) orelse "";
+    errdefer if (s.watch_dir.len > 0) gpa.free(s.watch_dir);
+    s.megacmd_path = (util_setting.readSingleLine(io, gpa, P.path(&buf, data_root, "megacmd_path")) catch null) orelse "";
+    log.info("downloader slots files={d} torrents={d} cap total={d} KB/s seed {d:.2}x/{d}m", .{
+        s.slots_files, s.slots_torrents, s.cap_total_kbs, s.seed_ratio, s.seed_time_min,
+    });
+    return s;
+}
+
+fn freeDownloaderSettings(gpa: std.mem.Allocator, s: downloads.policy.Settings) void {
+    if (s.watch_dir.len > 0) gpa.free(s.watch_dir);
+    if (s.megacmd_path.len > 0) gpa.free(s.megacmd_path);
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
 
@@ -304,14 +349,14 @@ pub fn main(init: std.process.Init) !void {
     const initial_aria2_port: u16 = util_setting.loadInt(u16, init.io, gpa, aria2_port_path, 0);
     log.info("aria2 port {d} ({s})", .{ initial_aria2_port, if (initial_aria2_port == 0) "random" else "user-configured" });
 
-    // aria2 seed ratio — `<data_root>/aria2_seed_ratio`. Floor 2.0,
-    // default 5.0. Daemon-wide --seed-ratio flag wires from here.
-    // Changes take effect on the next launch.
+    // aria2 seed ratio — `<data_root>/aria2_seed_ratio`. Floor 1.0,
+    // default 3.0. Daemon-wide --seed-ratio flag wires from here; the
+    // Settings screen applies changes live through the downloader.
     const aria2_seed_ratio_path = try std.fmt.allocPrint(gpa, "{s}/aria2_seed_ratio", .{data_root});
     defer gpa.free(aria2_seed_ratio_path);
-    // Seed ratio is clamped to ≥ 2.0 (RPDL community floor) — generic
-    // loadFloat handles the parse + default, the floor stays here.
-    const initial_aria2_seed_ratio: f32 = @max(util_setting.loadFloat(f32, init.io, gpa, aria2_seed_ratio_path, 5.0), 2.0);
+    // Seed ratio is clamped to ≥ 1.0 — generic loadFloat handles the
+    // parse + default, the floor stays here.
+    const initial_aria2_seed_ratio: f32 = @max(util_setting.loadFloat(f32, init.io, gpa, aria2_seed_ratio_path, 3.0), 1.0);
     log.info("aria2 seed_ratio {d:.2}", .{initial_aria2_seed_ratio});
 
     // aria2 seed-time cap (minutes) — `<data_root>/aria2_seed_time`. 0 = no
@@ -344,26 +389,10 @@ pub fn main(init: std.process.Init) !void {
 
     const aria2_path = try resolveAria2Path(gpa, init.io, init.minimal.environ, data_root);
     defer gpa.free(aria2_path);
-    var dl_mgr = downloads.Manager.init(
-        gpa,
-        init.io,
-        library_root,
-        library_root,
-        downloads_direct_root,
-        downloads_torrents_root,
-        aria2_path,
-        initial_aria2_port,
-        initial_aria2_seed_ratio,
-        initial_aria2_seed_time,
-    );
-    defer dl_mgr.deinit();
 
-    // Cross-restart persistence for in-flight downloads. Two files in
-    // `<data_root>/cache/downloads/`:
-    //   - aria2.session           — aria2's own session file.
-    //   - manager_jobs.json       — our id ↔ gid ↔ url mapping.
-    // SIGKILL-safe: aria2 checkpoints every 60s, manager_jobs writes
-    // atomically on every enqueue/remove.
+    // Downloader v2 state lives in the library DB (`dl_jobs`/`dl_events`,
+    // created by the migrations `Library.open` ran above). The aria2
+    // session file stays under `<data_root>/cache/downloads/`.
     const dl_cache_dir = try std.fmt.allocPrint(gpa, "{s}/cache/downloads", .{data_root});
     defer gpa.free(dl_cache_dir);
     try std.Io.Dir.cwd().createDirPath(init.io, dl_cache_dir);
@@ -372,15 +401,43 @@ pub fn main(init: std.process.Init) !void {
     const manager_jobs_path = try std.fmt.allocPrint(gpa, "{s}/manager_jobs.json", .{dl_cache_dir});
     defer gpa.free(manager_jobs_path);
     log.info("dl cache  {s}", .{dl_cache_dir});
-    dl_mgr.enablePersistence(manager_jobs_path, aria2_session_path);
-    // Eagerly spawn aria2 if we have anything to resume. Aria2's own
-    // --input-file=<session> reads the persisted BT/HTTP state at
-    // launch, so downloads that were mid-leech and torrents that
-    // were mid-seed pick right back up. First-run users skip the
-    // spawn — `resumeFromDisk` sees no jobs / no session and bails.
-    dl_mgr.resumeFromDisk() catch |e| {
-        log.warn("download manager resume failed: {s}", .{@errorName(e)});
-    };
+
+    const dl_settings = try loadDownloaderSettings(gpa, init.io, data_root, initial_aria2_seed_ratio, initial_aria2_seed_time);
+    defer freeDownloaderSettings(gpa, dl_settings);
+
+    // No `try` between here and `Downloader.init` (which takes ownership
+    // of the store), so the store cannot leak on an error path.
+    var dl_store = try downloads.store.Store.open(gpa, db_path);
+    // One-time import of the old Manager's job list; the store renames
+    // the file to `.imported`, so later launches find nothing.
+    if (dl_store.importLegacyJson(gpa, init.io, manager_jobs_path)) |n| {
+        if (n > 0) log.info("imported {d} download(s) from the old manager_jobs.json", .{n});
+    } else |e| log.warn("importing manager_jobs.json failed: {s}", .{@errorName(e)});
+
+    var aria2_engine = downloads.engine_aria2.Aria2Engine.init(gpa, init.io, .{
+        .aria2_path = aria2_path,
+        .direct_root = downloads_direct_root,
+        .torrents_root = downloads_torrents_root,
+        .session_path = aria2_session_path,
+        .port = initial_aria2_port,
+        .seed_ratio = initial_aria2_seed_ratio,
+        .seed_time_min = initial_aria2_seed_time,
+    });
+    // Runs after `dl.deinit` (defers unwind in reverse): the downloader
+    // thread is joined before the engine goes away.
+    defer aria2_engine.deinit();
+
+    var dl = downloads.Downloader.init(
+        gpa,
+        init.io,
+        dl_store,
+        .{ .aria2 = aria2_engine.engine() },
+        .{ .downloads_root = downloads_root, .library_root = library_root, .data_root = data_root },
+        dl_settings,
+    );
+    // `deinit` stops the thread (no-op if the UI already did) and closes
+    // the store.
+    defer dl.deinit();
 
     // Recipe repository — points at `<config>/f69/recipes/`. UI's
     // per-game Download button calls `findGameByThread` against this.
@@ -732,7 +789,7 @@ pub fn main(init: std.process.Init) !void {
     const staging_dir = try resolveTempDir(gpa, init.minimal.environ);
     defer gpa.free(staging_dir);
 
-    try ui.runMainLoop(init, &lib, &f95_service, &indexer_client, &dl_mgr, &recipe_repo, &sandbox, &host_launcher, &convert_svc, &compat_svc, rpdl_token, .{
+    try ui.runMainLoop(init, &lib, &f95_service, &indexer_client, &dl, &recipe_repo, &sandbox, &host_launcher, &convert_svc, &compat_svc, rpdl_token, .{
         .exe_dir = ui_exe_dir,
         .data_root = data_root,
         .db_path = db_path,
@@ -764,6 +821,8 @@ pub fn main(init: std.process.Init) !void {
         .initial_aria2_seed_ratio = initial_aria2_seed_ratio,
         .aria2_seed_time_path = aria2_seed_time_path,
         .initial_aria2_seed_time = initial_aria2_seed_time,
+        .downloads_root = downloads_root,
+        .initial_dl_settings = dl_settings,
         .auto_convert_path = auto_convert_path,
         .initial_auto_convert = initial_auto_convert,
         .auto_apply_compat_path = auto_apply_compat_path,

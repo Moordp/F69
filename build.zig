@@ -539,7 +539,6 @@ pub fn build(b: *std.Build) void {
     // aria2 rewrite — pure units, unit-tested standalone.
     const dl_aria2_args_mod = mod(b, "dl_aria2_args", "src/downloads/aria2_args.zig", target, optimize);
     const dl_rpc_mod = mod(b, "dl_rpc", "src/downloads/rpc.zig", target, optimize);
-    const dl_jobs_mod = mod(b, "dl_jobs", "src/downloads/jobs.zig", target, optimize);
     const dl_transport_mod = mod(b, "dl_transport", "src/downloads/transport.zig", target, optimize);
     const dl_http_mod = mod(b, "dl_http", "src/downloads/http.zig", target, optimize);
     dl_http_mod.addImport("util_http", util_http_mod);
@@ -732,16 +731,16 @@ pub fn build(b: *std.Build) void {
     }
 
     const test_targets = [_]*std.Build.Module{
-        exe_mod,            ui_tokens_mod,   ui_sortx_mod,        ui_columns_mod,     util_argv_mod,
-        util_reltime_mod,   ui_comp_mod,     ui_theme_store_mod,  util_ratelimit_mod, ui_engine_palette_mod,
-        dl_aria2_args_mod,  dl_rpc_mod,      dl_jobs_mod,         dl_ws_mod,          dl_transport_mod,
-        dl_http_mod,        util_notify_mod, util_rpgm_crypt_mod, util_rpa_mod,       library_mod,
-        recipe_mod,         resolver_mod,    f95_mod_,            f95_indexer_mod,    downloads_mod,
-        installer_mod,      convert_mod,     sandbox_mod,         server_mod,         ui_mod,
-        config_mod,         image_mod,       importers_mod,       compat_mod,         util_paths_mod,
-        util_kahn_mod,      util_db_mod,     util_crash_mod,      util_version_mod,   util_renpy_mod,
-        util_atomic_io_mod, util_domain_mod, util_http_mod,       util_proc_mod,      util_setting_mod,
-        util_test_env_mod,  file_picker_mod, util_archive_mod,
+        exe_mod,           ui_tokens_mod,       ui_sortx_mod,       ui_columns_mod,     util_argv_mod,
+        util_reltime_mod,  ui_comp_mod,         ui_theme_store_mod, util_ratelimit_mod, ui_engine_palette_mod,
+        dl_aria2_args_mod, dl_rpc_mod,          dl_ws_mod,          dl_transport_mod,   dl_http_mod,
+        util_notify_mod,   util_rpgm_crypt_mod, util_rpa_mod,       library_mod,        recipe_mod,
+        resolver_mod,      f95_mod_,            f95_indexer_mod,    downloads_mod,      installer_mod,
+        convert_mod,       sandbox_mod,         server_mod,         ui_mod,             config_mod,
+        image_mod,         importers_mod,       compat_mod,         util_paths_mod,     util_kahn_mod,
+        util_db_mod,       util_crash_mod,      util_version_mod,   util_renpy_mod,     util_atomic_io_mod,
+        util_domain_mod,   util_http_mod,       util_proc_mod,      util_setting_mod,   util_test_env_mod,
+        file_picker_mod,   util_archive_mod,
     };
     const test_step = b.step("test", "Run unit tests");
     for (test_targets) |m| {

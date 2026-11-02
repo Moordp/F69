@@ -114,24 +114,21 @@ pub fn diagnosticsScreen(frame: *Frame) !bool {
     // --- downloads ---
     {
         diagSection(@src(), "Downloads");
-        var jobs_buf: [64]u8 = undefined;
-        const jobs_msg = std.fmt.bufPrint(&jobs_buf, "{d} job(s) in Manager", .{frame.dl_mgr.jobs.count()}) catch "?";
-        dvui.labelNoFmt(@src(), jobs_msg, .{}, .{});
-
-        var it = frame.dl_mgr.jobs.iterator();
-        while (it.next()) |entry| {
-            const j = entry.value_ptr;
-            var row_buf: [256]u8 = undefined;
-            const row = std.fmt.bufPrint(&row_buf, "  #{d} [{s}/{s}] game={d} mod={?d} src={s}", .{
-                j.id,
-                @tagName(j.kind),
-                @tagName(j.status),
-                j.game_id,
-                j.mod_id,
-                j.source_url,
-            }) catch continue;
-            dvui.labelNoFmt(@src(), row, .{}, .{});
+        // Totals only: the downloader does not expose its engines, so
+        // aria2 liveness is not shown here.
+        var n_jobs: usize = 0;
+        var totals: @import("downloads").downloader.Totals = .{};
+        {
+            const snap = frame.dl.snapshot();
+            defer frame.dl.releaseSnapshot();
+            n_jobs = snap.jobs.len;
+            totals = snap.totals;
         }
+        var jobs_buf: [160]u8 = undefined;
+        const jobs_msg = std.fmt.bufPrint(&jobs_buf, "{d} job(s) · {d} active · {d} seeding · {d} waiting for you · ↓ {d} B/s ↑ {d} B/s", .{
+            n_jobs, totals.active, totals.seeding, totals.waiting_for_user, totals.dl_speed, totals.ul_speed,
+        }) catch "?";
+        dvui.labelNoFmt(@src(), jobs_msg, .{}, .{});
     }
 
     diagSep(@src());

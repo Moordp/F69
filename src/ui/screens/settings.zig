@@ -1130,11 +1130,11 @@ fn renderSettingsDownloads(frame: *Frame) void {
     // persisted on disk. Helps the user see that the change won't take
     // effect until restart.
     var live_buf: [64]u8 = undefined;
-    const live_port = if (frame.dl_mgr.daemon) |d| d.port else 0;
+    const live_port = frame.info.initial_aria2_port;
     const live_msg = if (live_port == 0)
-        "(aria2 not yet started)"
+        "(this session: random port)"
     else
-        std.fmt.bufPrint(&live_buf, "now bound to {d}", .{live_port}) catch "(bound)";
+        std.fmt.bufPrint(&live_buf, "this session: {d}", .{live_port}) catch "(set)";
     dvui.labelNoFmt(@src(), live_msg, .{}, .{
         .gravity_y = 0.5,
         .color_text = .{ .color = style.labelDim() },
@@ -1154,9 +1154,9 @@ fn renderSettingsDownloads(frame: *Frame) void {
     dvui.label(@src(), "Seed ratio", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     components.settingsHelpText(
-        "How much each completed torrent uploads before aria2 stops seeding. 2.0× is the RPDL community " ++
-            "floor (give back twice what you took); 5.0× is the f69 default — generous and gets you a " ++
-            "good-seeder reputation. Effective on next launch.",
+        "How much each completed torrent uploads before aria2 stops seeding. 1.0× is the floor " ++
+            "(give back what you took); 3.0× is the f69 default — generous and gets you a " ++
+            "good-seeder reputation. Applied immediately to the running daemon + in-flight torrents.",
     );
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
 
@@ -1178,14 +1178,15 @@ fn renderSettingsDownloads(frame: *Frame) void {
         if (actions.saveAria2SeedRatio(state, frame.info.aria2_seed_ratio_path, frame.io)) |ratio| {
             // Apply immediately to the running daemon + in-flight torrents
             // (no restart needed); the file persists it for next launch.
-            frame.dl_mgr.setSeedRatioLive(ratio);
+            frame.state.dl_settings.seed_ratio = ratio;
+            frame.dl.send(.{ .reload_settings = frame.state.dl_settings });
             var msg_buf: [80]u8 = undefined;
             const m = std.fmt.bufPrint(&msg_buf, "saved — {d:.1}× target applied now", .{ratio}) catch "saved";
             setAria2SeedRatioMsg(state, m);
         } else |e| {
             const m: []const u8 = switch (e) {
                 error.Empty => "ratio cannot be blank",
-                error.BelowFloor => "ratio must be ≥ 2.0",
+                error.BelowFloor => "ratio must be ≥ 1.0",
                 error.NotFinite => "not a finite number",
                 error.InvalidCharacter => "not a valid number",
                 else => "save failed",
@@ -1196,11 +1197,8 @@ fn renderSettingsDownloads(frame: *Frame) void {
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
 
     var live_sr_buf: [48]u8 = undefined;
-    const live_sr = if (frame.dl_mgr.daemon) |d| d.seed_ratio else 0;
-    const live_sr_msg = if (live_sr == 0)
-        "(aria2 not yet started)"
-    else
-        std.fmt.bufPrint(&live_sr_buf, "now using {d:.1}×", .{live_sr}) catch "(set)";
+    const live_sr = frame.state.dl_settings.seed_ratio;
+    const live_sr_msg = std.fmt.bufPrint(&live_sr_buf, "now using {d:.1}×", .{live_sr}) catch "(set)";
     dvui.labelNoFmt(@src(), live_sr_msg, .{}, .{
         .gravity_y = 0.5,
         .color_text = .{ .color = style.labelDim() },
@@ -1240,7 +1238,8 @@ fn renderSettingsDownloads(frame: *Frame) void {
 
     if (style.button(@src(), "Save", .{}, .{ .style = .highlight, .gravity_y = 0.5, .id_extra = 0xCEEE })) {
         if (actions.saveAria2SeedTime(state, frame.info.aria2_seed_time_path, frame.io)) |minutes| {
-            frame.dl_mgr.setSeedTimeLive(minutes);
+            frame.state.dl_settings.seed_time_min = minutes;
+            frame.dl.send(.{ .reload_settings = frame.state.dl_settings });
             var msg_buf: [80]u8 = undefined;
             const m = if (minutes == 0)
                 "saved — no seed-time cap"

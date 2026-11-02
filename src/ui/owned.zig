@@ -44,17 +44,6 @@ pub const Job = job_mod.Job;
 /// consulted by `isInstalled` to colour rows.
 pub const InstalledSet = std.AutoHashMap(u64, void);
 
-/// Set of f95_thread_id → unit. Tracks games that have *finished*
-/// their auto-extract step in this process. The on-disk presence is
-/// the source of truth; this set just avoids re-running extract on
-/// every frame while the file system catches up.
-pub const PostInstalledSet = std.AutoHashMap(u64, void);
-
-/// Map of f95_thread_id → attempt count. Records how many automatic
-/// post-download install attempts have been kicked off per game so a
-/// repeatedly-failing extract doesn't loop forever.
-pub const AttemptsMap = std.AutoHashMap(u64, u32);
-
 /// Metadata carried per running game entry.
 /// `version` is `null` until a launch records a real install version; when
 /// non-null it owns a `lib.alloc`-duped string that must be freed on map
@@ -70,15 +59,6 @@ pub const RunningGameEntry = struct {
 /// Map of f95_thread_id → RunningGameEntry. Populated when "Run" launches
 /// a game and consulted to grey-out the row and offer "Stop".
 pub const RunningGamesMap = std.AutoHashMap(u64, RunningGameEntry);
-
-/// Map of donor download_job_id → f95_thread_id. Used to correlate
-/// `downloads.Manager` events back to the game whose donor flow
-/// kicked them off.
-pub const DonorJobsMap = std.AutoHashMap(u64, u64);
-
-/// Map of f95_thread_id → retry counter. Caps how many times a
-/// donor-DDL attempt is retried before the user has to re-trigger.
-pub const DonorRetriesMap = std.AutoHashMap(u64, u8);
 
 // ---- R4b: caches ----------------------------------------------
 
@@ -424,6 +404,8 @@ pub const RpdlDownloadPayload = struct {
     game_name: []u8,
     game_version: ?[]u8,
     thread_id: u64,
+    /// Recipe-pinned RPDL torrent id: skip the search and fetch this one.
+    direct_id: ?u64 = null,
     /// Worker output. On success: torrent bytes + the picked
     /// torrent's metadata. UI thread hands the bytes to aria2 and
     /// frees both. On failure: err_name explains the stop.
@@ -459,26 +441,6 @@ pub const DonorDownloadPayload = struct {
     err_name: ?[]const u8 = null,
 };
 pub const DonorDownloadJob = Job(DonorDownloadPayload);
-
-pub const DonorTickState = struct {
-    /// Wall-clock ms of the last verbose log line for this job.
-    /// Throttles the per-tick log to ~once per 3 s to keep the
-    /// terminal readable.
-    last_log_ms: i64 = 0,
-    /// Bytes completed at last log — paired with `last_log_ms` to
-    /// derive a rolling "speed since previous log line" value that
-    /// matches what aria2 reports.
-    last_bytes: u64 = 0,
-    /// Wall-clock ms when the download first started reporting
-    /// 0 B/s. Null while progress is flowing. Logged at the moment
-    /// the stall begins AND when it recovers.
-    stalled_since_ms: ?i64 = null,
-    /// Last-seen aria2 errorMessage. Owned by the alloc; freed on
-    /// replace and on `freeDonorTables`. Logged whenever it changes.
-    last_error_msg: ?[]u8 = null,
-};
-
-pub const DonorTickLog = std.AutoHashMap(u64, DonorTickState);
 
 /// Payload for the master-tag-list refresh worker. Generic carrier
 /// (atomic phase, cancel flag, thread, allocator, dvui window) is
@@ -600,8 +562,15 @@ pub const TestInstallJob = Job(TestInstallPayload);
 /// migration just folds the per-task data into the payload.
 pub const PostInstallPayload = struct {
     io: std.Io,
+    /// Downloader v2 job id; acked (or failed) when the worker finishes.
     download_job_id: u64,
     game_id: u64,
+    /// `move_file`: a non-archive download moves into `dest_dir` (then
+    /// the drain registers `dest_dir`). `apply_mod`: the mod archive is
+    /// applied onto the game install at `dest_dir`.
+    mode: enum { move_file, apply_mod },
+    /// Mod thread id for `apply_mod`.
+    mod_id: u64 = 0,
     /// All inputs heap-owned so the worker can outlive its frame.
     file_path: []u8,
     dest_dir: []u8,

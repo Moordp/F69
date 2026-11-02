@@ -6,11 +6,7 @@
 //   - `cancelAllWorkers` / `workersBusy` — global worker shutdown +
 //     liveness probe.
 //   - `installedSetPtr` / `refreshInstalledSet` / `isInstalled` /
-//     `retryDownload` / `installDotState` / `freeInstalledSet` —
-//     installed-set + download-retry glue between installer.zig and
-//     downloads.zig.
-//   - `attemptsMap` / `resetAttempt` — per-game download-attempt
-//     counter, shared by downloads.zig and installer.zig.
+//     `installDotState` / `freeInstalledSet` — installed-set glue.
 //   - Settings persistence + browser launch — every dirty-flag
 //     debounced disk write pre-R9 lived here; no single domain owns
 //     "settings".
@@ -33,12 +29,10 @@ const Frame = types.Frame;
 const State = types.State;
 
 const InstalledSet = owned_types.InstalledSet;
-const AttemptsMap = owned_types.AttemptsMap;
 
 // Imports of sibling action modules. Routed through pointers-to-pubs
 // so the explicit cross-file calls below resolve.
 const sync_mod = @import("sync.zig");
-const downloads_mod = @import("downloads.zig");
 const installer_mod = @import("installer.zig");
 const imports_mod = @import("imports.zig");
 const launch_mod = @import("launch.zig");
@@ -401,7 +395,7 @@ fn uniqueGuidePath(alloc: std.mem.Allocator, io: std.Io, guides_dir: []const u8,
 /// Cheap stream-copy. We're typically dealing with small docs
 /// (KB to MB), not big binaries, so a single allocation buffer
 /// keeps the implementation simple.
-fn copyFile(io: std.Io, src: []const u8, dst: []const u8) !void {
+pub fn copyFile(io: std.Io, src: []const u8, dst: []const u8) !void {
     var in = try std.Io.Dir.cwd().openFile(io, src, .{ .mode = .read_only });
     defer in.close(io);
     var out = try std.Io.Dir.cwd().createFile(io, dst, .{ .truncate = true });
@@ -760,17 +754,17 @@ pub fn saveAria2Port(state: *State, path: []const u8, io: std.Io) !u16 {
 }
 
 /// Parse the seed-ratio textEntry buffer + Save it. Floor enforced
-/// at 2.0; anything below is rejected so the user gets an explicit
+/// at 1.0; anything below is rejected so the user gets an explicit
 /// "too low" message instead of a silent clamp. Persists to
-/// `<data_root>/aria2_seed_ratio`. Effective on next launch (the
-/// --seed-ratio flag is daemon-wide and set at spawn).
+/// `<data_root>/aria2_seed_ratio`; the Settings screen also sends it to
+/// the downloader (`reload_settings`) so it applies at once.
 pub fn saveAria2SeedRatio(state: *State, path: []const u8, io: std.Io) !f32 {
     const end = std.mem.indexOfScalar(u8, &state.aria2_seed_ratio_buf, 0) orelse state.aria2_seed_ratio_buf.len;
     const trimmed = std.mem.trim(u8, state.aria2_seed_ratio_buf[0..end], " \t\r\n");
     if (trimmed.len == 0) return error.Empty;
     const parsed = try std.fmt.parseFloat(f32, trimmed);
     if (!std.math.isFinite(parsed)) return error.NotFinite;
-    if (parsed < 2.0) return error.BelowFloor;
+    if (parsed < 1.0) return error.BelowFloor;
 
     var buf: [16]u8 = undefined;
     const text = std.fmt.bufPrint(&buf, "{d:.2}", .{parsed}) catch return error.OutOfMemory;
@@ -1040,72 +1034,6 @@ pub fn isInstalled(frame: *Frame, thread_id: u64) bool {
     return set.contains(thread_id);
 }
 
-/// Re-trigger a failed download. Picks the right provider based on
-/// the failed job's source: RPDL torrents re-enter the search flow,
-/// donor DDL re-POSTs for a fresh signed URL, plain HTTP re-enqueues
-/// the URL as-is. Removes the failed row from the manager once the
-/// replacement is in flight so the downloads page doesn't show two
-/// stacked entries for the same game.
-pub fn retryDownload(frame: *Frame, job_id: u64) void {
-    const state = frame.state;
-    const job = frame.dl_mgr.jobs.get(job_id) orelse {
-        log.warn("retryDownload: job {d} no longer in manager", .{job_id});
-        return;
-    };
-    const game_id = job.game_id;
-    const source = job.source_url;
-    const was_donor = downloads_mod.isDonorJob(frame, job_id);
-
-    // Find the matching library row — needed for the RPDL / donor
-    // workers which take a *library.Game.
-    var target: ?*library.Game = null;
-    if (game_id != 0) {
-        for (frame.games) |*g| {
-            if (g.f95_thread_id == game_id) {
-                target = g;
-                break;
-            }
-        }
-    }
-
-    if (was_donor) {
-        if (target) |g| {
-            log.info("retryDownload: job {d} (tid={d}) was donor DDL — restarting flow", .{ job_id, game_id });
-            frame.dl_mgr.removeJob(job_id);
-            downloads_mod.startDonorDownload(frame, g);
-            return;
-        }
-    }
-    if (std.mem.startsWith(u8, source, "rpdl:")) {
-        if (target) |g| {
-            log.info("retryDownload: job {d} (tid={d}) was RPDL — restarting search", .{ job_id, game_id });
-            frame.dl_mgr.removeJob(job_id);
-            downloads_mod.startRpdlDownload(frame, g);
-            return;
-        }
-    }
-    // Plain HTTP / unrecognised — just re-enqueue the same URL.
-    if (std.mem.startsWith(u8, source, "http://") or std.mem.startsWith(u8, source, "https://")) {
-        log.info("retryDownload: job {d} — re-enqueuing URL '{s}'", .{ job_id, source });
-        // Duplicate before removing the job so the URL slice isn't
-        // freed under us.
-        const url_dup = frame.lib.alloc.dupe(u8, source) catch {
-            state.setDownloadMsg("Retry failed: out of memory");
-            return;
-        };
-        defer frame.lib.alloc.free(url_dup);
-        frame.dl_mgr.removeJob(job_id);
-        _ = frame.dl_mgr.enqueueUrl(url_dup, .game, game_id, null, null, null, .{}) catch |e| {
-            var msg_buf: [128]u8 = undefined;
-            const m = std.fmt.bufPrint(&msg_buf, "Retry failed: {s}", .{@errorName(e)}) catch "Retry failed";
-            state.setDownloadMsg(m);
-        };
-        return;
-    }
-    log.warn("retryDownload: job {d} source '{s}' isn't HTTP/RPDL/donor — cannot retry", .{ job_id, source });
-    state.setDownloadMsg("Retry not supported for this source.");
-}
-
 /// Three-way state used to drive the install dot on grid/list cards.
 pub const InstallDotState = enum {
     /// No install row for this game.
@@ -1162,22 +1090,6 @@ pub fn freeInstalledSet(state: *State, alloc: std.mem.Allocator) void {
     }
 }
 
-pub fn attemptsMap(frame: *Frame) ?*AttemptsMap {
-    if (frame.state.download_attempts) |p| return p;
-    const map_ptr = frame.lib.alloc.create(AttemptsMap) catch return null;
-    map_ptr.* = AttemptsMap.init(frame.lib.alloc);
-    frame.state.download_attempts = map_ptr;
-    return map_ptr;
-}
-
-/// Record that the user just clicked Download for `game_id` — i.e. we
-/// just enqueued `sources[0]` and should start counting failures from
-/// index 0. Called by `doDownloadGame` before `enqueueOneSource`.
-pub fn resetAttempt(frame: *Frame, game_id: u64) void {
-    const m = attemptsMap(frame) orelse return;
-    m.put(game_id, 0) catch {};
-}
-
 // ============================================================
 //  exe-exists probe
 // ============================================================
@@ -1193,19 +1105,9 @@ fn exeExistsUnder(io: std.Io, install_dir: []const u8, exe: []const u8) bool {
     return true;
 }
 
-/// Tear-down for the post_installed set + per-game download-attempts
-/// map + running-games map. Called from runMainLoop's defer block.
+/// Tear-down for the running-games map. Called from runMainLoop's
+/// defer block (name kept from when it also freed download tables).
 pub fn freePostInstalled(state: *State, alloc: std.mem.Allocator) void {
-    if (state.post_installed) |set_ptr| {
-        set_ptr.deinit();
-        alloc.destroy(set_ptr);
-        state.post_installed = null;
-    }
-    if (state.download_attempts) |map_ptr| {
-        map_ptr.deinit();
-        alloc.destroy(map_ptr);
-        state.download_attempts = null;
-    }
     launch_mod.freeRunningGames(state, alloc);
 }
 

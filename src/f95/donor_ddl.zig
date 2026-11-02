@@ -108,7 +108,7 @@ pub fn checkDonorStatus(
 }
 
 /// Two-step happy path: list → auto-pick → link. Returns the URL +
-/// cookie ready for `dl_mgr.enqueueUrl`. Errors carry the same
+/// cookie ready for `Command.enqueue_url`. Errors carry the same
 /// taxonomy as before (`AuthRequired` / `DonorNotEligible` / etc.).
 pub fn requestDownload(
     alloc: std.mem.Allocator,

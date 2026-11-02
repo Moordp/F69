@@ -1347,13 +1347,24 @@ fn statusCancelButton(frame: *Frame, src: std.builtin.SourceLocation, cancelling
     }
 }
 
-fn statusJobTitle(frame: *Frame, job: *const downloads.Job) []const u8 {
-    if (job.game_id != 0) {
+/// The primary active download, copied out of the snapshot (the lock is
+/// released before anything renders).
+const StatusPrimary = struct {
+    game_thread_id: u64,
+    title_buf: [96]u8 = undefined,
+    title_len: usize = 0,
+    bytes_done: u64,
+    bytes_total: ?u64,
+    dl_speed: u64,
+};
+
+fn statusJobTitle(frame: *Frame, p: *const StatusPrimary) []const u8 {
+    if (p.game_thread_id != 0) {
         for (frame.games) |*g| {
-            if (g.f95_thread_id == job.game_id) return g.name;
+            if (g.f95_thread_id == p.game_thread_id) return g.name;
         }
     }
-    return job.source_url;
+    return p.title_buf[0..p.title_len];
 }
 
 fn statusSeg(key: u32, label: []const u8, n: u32, col: dvui.Color, font: dvui.Font) void {
@@ -1388,18 +1399,35 @@ pub fn renderStatusBar(frame: *Frame) void {
     var n_down: u32 = 0;
     var n_seed: u32 = 0;
     var n_post: u32 = 0;
-    var primary: ?*const downloads.Job = null;
-    var it = frame.dl_mgr.jobs.iterator();
-    while (it.next()) |e| {
-        switch (e.value_ptr.status) {
-            .downloading => {
-                n_down += 1;
-                if (primary == null) primary = e.value_ptr;
-            },
-            .queued, .fetching_metadata, .verifying => n_down += 1,
-            .extracting, .applying => n_post += 1,
-            .seeding => n_seed += 1,
-            else => {},
+    var primary_buf: StatusPrimary = undefined;
+    var primary: ?*const StatusPrimary = null;
+    {
+        const snap = frame.dl.snapshot();
+        defer frame.dl.releaseSnapshot();
+        for (snap.jobs) |*v| {
+            const j = &v.job;
+            switch (j.step) {
+                .downloading => {
+                    n_down += 1;
+                    if (primary == null) {
+                        primary_buf = .{
+                            .game_thread_id = j.game_thread_id,
+                            .bytes_done = j.bytes_done,
+                            .bytes_total = j.bytes_total,
+                            .dl_speed = j.dl_speed,
+                        };
+                        const name = if (j.title.len > 0) j.title else j.source_href;
+                        const n = @min(name.len, primary_buf.title_buf.len);
+                        @memcpy(primary_buf.title_buf[0..n], name[0..n]);
+                        primary_buf.title_len = n;
+                        primary = &primary_buf;
+                    }
+                },
+                .queued, .resolving, .fetching_metadata, .finding_peers, .verifying => n_down += 1,
+                .extracting, .installing => n_post += 1,
+                .seeding => n_seed += 1,
+                else => {},
+            }
         }
     }
 
@@ -1416,7 +1444,7 @@ pub fn renderStatusBar(frame: *Frame) void {
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 9, .h = 1 } });
         var b2: [48]u8 = undefined;
         const pct: u32 = @intFromFloat(std.math.clamp(frac, 0, 1) * 100);
-        const mbps = @as(f64, @floatFromInt(j.download_speed)) / (1024.0 * 1024.0);
+        const mbps = @as(f64, @floatFromInt(j.dl_speed)) / (1024.0 * 1024.0);
         dvui.labelNoFmt(@src(), std.fmt.bufPrint(&b2, "{d}% · {d:.1} MB/s", .{ pct, mbps }) catch "", .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = td(t.ink3) }, .font = mono });
     } else if (n_post > 0) {
         statusDot(td(t.warn));

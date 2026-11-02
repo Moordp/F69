@@ -67,7 +67,10 @@ pub const Frame = struct {
     /// independent of `f95_svc.client.cookie`. Always non-null — the
     /// scraper backend just doesn't touch it.
     f95_indexer_client: *f95_indexer.Client,
-    dl_mgr: *downloads.Manager,
+    /// Downloader v2. The UI sends `Command`s, reads `snapshot()` (always
+    /// paired with `releaseSnapshot()` in the same scope) and drains
+    /// `UiEvent`s once per frame (`actions.drainDownloaderEvents`).
+    dl: *downloads.Downloader,
     /// Local recipes repo — used by the per-game Download button to
     /// resolve a game's recipe + sources at click time.
     recipe_repo: *recipe.Repo,
@@ -278,6 +281,11 @@ pub const RuntimeInfo = struct {
     aria2_seed_time_path: []const u8,
     /// Aria2 seed-time cap (minutes) loaded from disk at startup.
     initial_aria2_seed_time: u32,
+    /// Where downloads land before install: `<downloads_root>/<engine>/<job>/`.
+    downloads_root: []const u8 = "",
+    /// Downloader v2 settings as loaded at startup; the UI keeps a mirror
+    /// in `state.dl_settings` and sends `reload_settings` on change.
+    initial_dl_settings: downloads.policy.Settings = .{},
     /// Snapshot of host env at process start — XDG_RUNTIME_DIR /
     /// WAYLAND_DISPLAY / DISPLAY / HOME. The sandbox backend uses
     /// these to wire display + audio + fontconfig binds.

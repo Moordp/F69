@@ -8,17 +8,21 @@
 //                      sync-all queue, advanceSyncQueue, image queue
 //                      (phase-2 screenshots), slide/thumb/cover caches
 //                      + prewarm. Owns SyncJob, SyncRecapEntry, ImageJob.
-//   downloads.zig    — doDownloadGame + enqueueOneSource, RPDL worker
-//                      (Tier 2), Donor DDL worker (Tier 1) + telemetry +
-//                      retry, drainCompletedDownloads bridge. Owns
-//                      RpdlDownloadJob, DonorDownloadJob.
+//   downloads.zig    — RPDL worker (Tier 2) and Donor DDL worker
+//                      (Tier 1); both hand over to the downloader with
+//                      a Command. Owns RpdlDownloadJob, DonorDownloadJob.
+//   dl.zig           — downloader v2 glue: drainDownloaderEvents,
+//                      doDownloadGame (recipe path), retryDownload,
+//                      snapshot readers (hasActiveDownloadForGame,
+//                      findLeechingJobForGame, copySnapshot).
 //   installer.zig    — modJobRunner + runInstall/Uninstall, test-install
 //                      preview, doInstallMod + conflicts + clash modal,
 //                      resolver preflight, post-install pipeline,
 //                      manual-install pipeline, install rename/delete.
 //                      Owns TestInstallJob, PostInstallJob,
 //                      ManualInstallJob[List], ModFileConflictAll,
-//                      ClashModalState. Hosts postInstalledSet helper.
+//                      ClashModalState. installFromArchive handles the
+//                      downloader's install_ready event.
 //   launch.zig       — doLaunchGame, doStopGame, isGameRunning,
 //                      drainRunningGames, doConvertGame, compat env,
 //                      shouldSandbox / shouldAutoUpdate /
@@ -47,12 +51,13 @@
 //                      job. Owns UpdateCheckJob.
 //   common.zig       — bridge helpers (cancelAllWorkers, workersBusy,
 //                      deleteGameAndReturn, installedSet/installDotState/
-//                      retryDownload glue, attemptsMap, settings
+//                      settings
 //                      persistence, browser launch, friendlyError,
 //                      persistTextFile, exeExistsUnder, freePostInstalled).
 
 const sync = @import("actions/sync.zig");
-const dl = @import("actions/downloads.zig");
+const dl_flows = @import("actions/downloads.zig");
+const dl = @import("actions/dl.zig");
 const installer = @import("actions/installer.zig");
 const launch = @import("actions/launch.zig");
 const bookmarks = @import("actions/bookmarks.zig");
@@ -180,23 +185,25 @@ pub const setInstallFolder = common.setInstallFolder;
 pub const setSavesFolder = common.setSavesFolder;
 pub const clearSavesFolder = common.clearSavesFolder;
 pub const refreshInstalledSet = common.refreshInstalledSet;
-pub const retryDownload = common.retryDownload;
 pub const installDotState = common.installDotState;
 pub const freeInstalledSet = common.freeInstalledSet;
 pub const freePostInstalled = common.freePostInstalled;
 
 // ---- Downloads ----
-pub const startRpdlDownload = dl.startRpdlDownload;
-pub const drainRpdlDownload = dl.drainRpdlDownload;
-pub const freeDonorTables = dl.freeDonorTables;
-pub const drainDonorTelemetry = dl.drainDonorTelemetry;
-pub const isDonorJob = dl.isDonorJob;
-pub const startDonorDownload = dl.startDonorDownload;
-pub const drainDonorDownload = dl.drainDonorDownload;
+pub const startRpdlDownload = dl_flows.startRpdlDownload;
+pub const drainRpdlDownload = dl_flows.drainRpdlDownload;
+pub const startDonorDownload = dl_flows.startDonorDownload;
+pub const drainDonorDownload = dl_flows.drainDonorDownload;
+pub const drainDownloaderEvents = dl.drainDownloaderEvents;
+pub const retryDownload = dl.retryDownload;
 pub const hasActiveDownloadForGame = dl.hasActiveDownloadForGame;
 pub const findLeechingJobForGame = dl.findLeechingJobForGame;
+pub const DlProgress = dl.DlProgress;
+pub const copySnapshot = dl.copySnapshot;
+pub const SnapCopy = dl.SnapCopy;
+pub const pauseResumeState = dl.pauseResumeState;
 pub const doDownloadGame = dl.doDownloadGame;
-pub const drainCompletedDownloads = dl.drainCompletedDownloads;
+pub const installFromArchive = installer.installFromArchive;
 
 // ---- Refresh tags ----
 pub const startRefreshTags = tags.startRefreshTags;

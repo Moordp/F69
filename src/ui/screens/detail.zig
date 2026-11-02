@@ -2564,10 +2564,10 @@ fn renderDetailInstallButton(frame: *Frame, game: *const library.Game) void {
         var fw = dvui.floatingMenu(@src(), .{ .from = anchor }, .{});
         defer fw.deinit();
 
-        for (entries, 0..) |e, i| {
+        for (entries, 0..) |*e, i| {
             var lbl_buf: [96]u8 = undefined;
-            const label: []const u8 = if (e.version.len > 0)
-                std.fmt.bufPrint(&lbl_buf, "Install version {s}", .{e.version}) catch "Install (unknown version)"
+            const label: []const u8 = if (e.version().len > 0)
+                std.fmt.bufPrint(&lbl_buf, "Install version {s}", .{e.version()}) catch "Install (unknown version)"
             else
                 "Install (unknown version)";
             if (dvui.menuItemLabel(@src(), label, .{}, .{
@@ -2778,13 +2778,13 @@ fn renderStatusStrip(frame: *Frame, args: StatusStripArgs) void {
     }
 }
 
-fn downloadProgressPct(job: downloads.Job) ?u32 {
+fn downloadProgressPct(job: actions.DlProgress) ?u32 {
     const total = job.bytes_total orelse 0;
     if (total == 0) return null;
     return @intCast(@min(@divTrunc(job.bytes_done * 100, total), 100));
 }
 
-fn downloadStatusText(job: downloads.Job) []const u8 {
+fn downloadStatusText(job: actions.DlProgress) []const u8 {
     const tmp = struct {
         var buf: [192]u8 = undefined;
     };
@@ -2792,7 +2792,7 @@ fn downloadStatusText(job: downloads.Job) []const u8 {
     var done_buf: [24]u8 = undefined;
     var total_buf: [24]u8 = undefined;
     const total = job.bytes_total orelse 0;
-    const dl_s = components.humanRate(&dl_buf, job.download_speed);
+    const dl_s = components.humanRate(&dl_buf, job.dl_speed);
     const done_s = components.humanBytes(&done_buf, job.bytes_done);
     const total_s = if (total > 0) components.humanBytes(&total_buf, total) else "?";
     if (total > 0) {

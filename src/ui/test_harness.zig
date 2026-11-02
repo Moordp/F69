@@ -45,7 +45,10 @@ pub const Harness = struct {
     f95_client: f95.Client,
     f95_service: f95.Service,
     indexer_client: f95_indexer.Client,
-    dl_mgr: downloads.Manager,
+    /// Downloader v2 on an in-memory store with a scripted engine. Never
+    /// started: tests drive it with `dl.stepOnce(now)`.
+    dl: downloads.Downloader,
+    dl_fake: downloads.engine.FakeEngine,
     recipe_repo: recipe.Repo,
     sandbox_backend: sandbox.Sandbox,
     host_launcher: sandbox.NoSandbox,
@@ -82,6 +85,7 @@ pub const Harness = struct {
         const covers_dir = try join(a, root, "covers");
         const library_root = try join(a, root, "library");
         const recipes_dir = try join(a, root, "recipes");
+        const downloads_root = try join(a, root, "downloads");
         const direct_root = try join(a, root, "downloads/direct");
         const torrents_root = try join(a, root, "downloads/torrents");
         const cache_root = try join(a, root, "cache");
@@ -98,7 +102,16 @@ pub const Harness = struct {
         self.f95_client = f95.Client.init(gpa, io, 1500);
         self.f95_service = f95.Service.init(gpa, &self.f95_client);
         self.indexer_client = f95_indexer.Client.init(gpa, io, f95_indexer.DEFAULT_BASE_URL);
-        self.dl_mgr = downloads.Manager.init(gpa, io, library_root, library_root, direct_root, torrents_root, "aria2c", 0, 5.0, 0);
+        self.dl_fake = .{ .alloc = gpa, .script = &.{}, .alive = true };
+        self.dl = downloads.Downloader.init(
+            gpa,
+            io,
+            try downloads.store.Store.openMemory(gpa),
+            .{ .aria2 = self.dl_fake.engine() },
+            .{ .downloads_root = downloads_root, .library_root = library_root, .data_root = try a.dupe(u8, root) },
+            .{},
+        );
+        errdefer self.dl.deinit();
         self.recipe_repo = recipe.Repo.init(gpa, io, recipes_dir);
 
         const env = std.process.Environ.empty;
@@ -163,9 +176,10 @@ pub const Harness = struct {
             .aria2_port_path = try join(a, root, "aria2_port"),
             .initial_aria2_port = 0,
             .aria2_seed_ratio_path = try join(a, root, "aria2_seed_ratio"),
-            .initial_aria2_seed_ratio = 5.0,
+            .initial_aria2_seed_ratio = 3.0,
             .aria2_seed_time_path = try join(a, root, "aria2_seed_time"),
             .initial_aria2_seed_time = 0,
+            .downloads_root = downloads_root,
             .update_check_source_path = try join(a, root, "update_check_source"),
             .initial_update_check_source = .builtin,
             .host = .{},
@@ -188,7 +202,7 @@ pub const Harness = struct {
         actions.drainDonorProbe(f);
         actions.drainRpdlDownload(f);
         actions.drainDonorDownload(f);
-        actions.drainCompletedDownloads(f);
+        actions.drainDownloaderEvents(f);
         actions.drainImport(f);
         actions.drainModJobs(f);
         actions.drainPostInstall(f);
@@ -249,7 +263,6 @@ pub const Harness = struct {
         actions.freeFolderScan(&self.state, &self.lib, self.io);
         actions.freeF95Review(&self.state, lib_alloc);
         actions.freeSyncRecap(&self.state, lib_alloc);
-        actions.freeDonorTables(&self.state, lib_alloc);
         actions.freeTagsMaster(lib_alloc, &self.state);
         if (self.state.sync_queue) |q| lib_alloc.free(q);
         if (self.state.rpdl_token) |t| lib_alloc.free(t);
@@ -261,7 +274,7 @@ pub const Harness = struct {
         self.convert_svc.deinit();
         self.sandbox_backend.deinit();
         self.recipe_repo.deinit();
-        self.dl_mgr.deinit();
+        self.dl.deinit();
         self.f95_client.deinit();
         self.lib.close();
         self.arena.deinit();
@@ -278,7 +291,7 @@ pub const Harness = struct {
             .lib = &self.lib,
             .f95_svc = &self.f95_service,
             .f95_indexer_client = &self.indexer_client,
-            .dl_mgr = &self.dl_mgr,
+            .dl = &self.dl,
             .recipe_repo = &self.recipe_repo,
             .sandbox = &self.sandbox_backend,
             .host_launcher = &self.host_launcher,

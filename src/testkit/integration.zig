@@ -1801,10 +1801,10 @@ test "resolver: load_after edges order every mod after what it loads after" {
 
 test "flow: a missing aria2 binary fails a download enqueue cleanly" {
     tlog("START: flow-aria2-missing", .{});
-    // This is the REAL state of a clean Windows install: the Windows package
-    // ships no aria2c.exe (packaging gap, found 2026-08-12), so the first
-    // download a user queues takes exactly this path. The contract: a prompt
-    // AriaSpawnFailed — never a hang, never a crash, no ghost job.
+    // This is the REAL state of a clean Windows install when the package
+    // ships no aria2c.exe: the first download a user queues takes exactly
+    // this path. The contract: a prompt failure on the job (engine marked
+    // down) — never a hang, never a crash, no ghost job.
     const gpa = std.testing.allocator;
     const downloads = @import("downloads");
     // smp-backed io, NOT env.io: std.process.spawn parks on a futex under
@@ -1815,22 +1815,126 @@ test "flow: a missing aria2 binary fails a download enqueue cleanly" {
     const io = threaded.io();
     var env = try TestEnv.init(gpa, "aria2-missing");
     defer env.deinit();
-    try env.mkdirP("direct");
-    try env.mkdirP("torrents");
-    const direct = try env.path("direct");
+    try env.mkdirP("downloads/direct");
+    try env.mkdirP("downloads/torrents");
+    const dl_root = try env.path("downloads");
+    defer gpa.free(dl_root);
+    const direct = try env.path("downloads/direct");
     defer gpa.free(direct);
-    const torrents = try env.path("torrents");
+    const torrents = try env.path("downloads/torrents");
     defer gpa.free(torrents);
 
-    var m = downloads.Manager.init(gpa, io, env.root, env.root, direct, torrents, "f69-no-such-aria2c-binary", 0, 5.0, 0);
-    defer m.deinit();
+    var aria2 = downloads.engine_aria2.Aria2Engine.init(gpa, io, .{
+        .aria2_path = "f69-no-such-aria2c-binary",
+        .direct_root = direct,
+        .torrents_root = torrents,
+        .session_path = null,
+        .port = 0,
+        .seed_ratio = 3.0,
+        .seed_time_min = 0,
+    });
+    defer aria2.deinit();
+    var dl = downloads.Downloader.init(
+        gpa,
+        io,
+        try downloads.store.Store.openMemory(gpa),
+        .{ .aria2 = aria2.engine() },
+        .{ .downloads_root = dl_root, .library_root = env.root, .data_root = env.root },
+        .{},
+    );
+    defer dl.deinit();
 
-    const r = m.enqueueUrl("http://127.0.0.1:9/none.zip", .game, 1, null, null, null, .{});
-    if (r) |_| return error.TestUnexpectedResult else |e| switch (e) {
-        error.AriaSpawnFailed, error.AriaStartTimeout => {},
-        else => return e,
-    }
+    dl.send(.{ .enqueue_url = .{ .url = "http://127.0.0.1:9/none.zip", .kind = .game, .game_thread_id = 1, .title = "none", .host = "raw" } });
+    dl.stepOnce(1000);
+    try std.testing.expectEqual(@as(usize, 1), dl.recs.items.len);
+    const j = dl.recs.items[0].job;
+    try std.testing.expectEqual(downloads.model.Step.failed, j.step);
+    try std.testing.expect(std.mem.indexOf(u8, j.fail_msg, "AriaSpawnFailed") != null or
+        std.mem.indexOf(u8, j.fail_msg, "AriaStartTimeout") != null);
+    try std.testing.expect(!aria2.daemonAlive());
     tlog("flow-aria2-missing: clean failure OK", .{});
+}
+
+var dlv2_frame: ?*ui.Frame = null;
+fn dlv2Render() !dvui.App.Result {
+    if (dlv2_frame) |fr| _ = ui.guiFrame(fr) catch return .close;
+    return .ok;
+}
+
+test "downloads v2: enqueue via command shows in the Downloads screen and install_ready drives doInstallUpsert" {
+    tlog("START: dl-v2", .{});
+    const gpa = std.testing.allocator;
+    const downloads = @import("downloads");
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(8) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var env = try TestEnv.init(gpa, "dl-v2");
+    defer env.deinit();
+    var t = try dvui.testing.init(.{ .allocator = gpa, .io = io, .window_size = .{ .w = 1280, .h = 800 } });
+    defer t.deinit();
+    ui.registerBundledFonts(t.window);
+    var h = try ui.Harness.init(gpa, io, t.window, env.root);
+    defer h.deinit();
+
+    // What the fake engine reports: a finished plain file (not an archive).
+    try env.writeFile("payload/game.bin", "hello");
+    const file = try env.path("payload/game.bin");
+    defer gpa.free(file);
+    const script = [_]downloads.model.Progress{
+        .{ .phase = .downloading, .bytes_done = 2, .bytes_total = 5 },
+        .{ .phase = .transfer_done, .bytes_done = 5, .bytes_total = 5, .final_path = file },
+    };
+    h.dl_fake.script = &script;
+    // The game row the install hangs off (installs has a foreign key).
+    _ = try h.lib.insertIfMissing(&.{ .f95_thread_id = 4242, .name = "V2 Test Game" });
+    try h.reloadGames();
+
+    var fr = h.frame();
+    dlv2_frame = &fr;
+    defer dlv2_frame = null;
+
+    // 1. The command goes in; one downloader tick starts it.
+    h.dl.send(.{ .enqueue_url = .{
+        .url = "https://example.invalid/game.bin",
+        .kind = .game,
+        .game_thread_id = 4242,
+        .title = "V2 Test Game",
+        .version = "1.0",
+        .host = "raw",
+    } });
+    h.dl.stepOnce(1000);
+    try std.testing.expectEqual(@as(usize, 1), h.dl_fake.started);
+
+    // 2. The Downloads screen renders the row from the snapshot.
+    h.state.screen = .downloads;
+    _ = try dvui.testing.step(dlv2Render);
+    _ = try dvui.testing.step(dlv2Render);
+    try dvui.testing.expectVisible("dl-job-row");
+    tlog("dl-v2: row visible", .{});
+
+    // 3. Transfer done → verify → extract (not an archive) → install_ready.
+    h.dl.stepOnce(1001);
+    h.dl.stepOnce(1002);
+    const id = h.dl.recs.items[0].job.id;
+    try std.testing.expectEqual(downloads.model.Step.installing, h.dl.recs.items[0].job.step);
+
+    // 4. The UI drains the event; the install worker moves the file into
+    //    <library_root>/4242/1.0/ and the drain writes the install row.
+    h.drainWorkers(300);
+    const installs = try h.lib.listInstalls(4242);
+    defer h.lib.freeInstalls(installs);
+    try std.testing.expectEqual(@as(usize, 1), installs.len);
+    try std.testing.expectEqualStrings("1.0", installs[0].version);
+    try std.testing.expect(std.mem.endsWith(u8, installs[0].install_path, "4242" ++ std.fs.path.sep_str ++ "1.0"));
+    var moved_buf: [512]u8 = undefined;
+    const moved = try std.fmt.bufPrint(&moved_buf, "{s}" ++ std.fs.path.sep_str ++ "game.bin", .{installs[0].install_path});
+    try std.Io.Dir.cwd().access(io, moved, .{});
+
+    // 5. The ack reached the downloader: the job is done.
+    h.dl.stepOnce(1003);
+    try std.testing.expectEqual(id, h.dl.recs.items[0].job.id);
+    try std.testing.expectEqual(downloads.model.Step.done, h.dl.recs.items[0].job.step);
+    tlog("dl-v2: OK", .{});
 }
 
 test "hostile: findLauncher dispatch picks the OS-correct launcher from a mixed install" {
