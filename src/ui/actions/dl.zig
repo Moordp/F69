@@ -33,7 +33,10 @@ pub fn drainDownloaderEvents(frame: *Frame) void {
         .install_ready => |ir| installer_act.installFromArchive(frame, ir),
         .open_url => |u| common.openExternalUrl(frame, u),
         .toast => |t| frame.state.setDownloadMsg(t),
-        .sign_in_needed => frame.state.setDownloadMsg("Sign in to F95zone to download this"),
+        .sign_in_needed => |svc| frame.state.setDownloadMsg(switch (svc) {
+            .f95 => "Sign in to F95zone to download this",
+            .mega => "Sign in to MEGA in Settings → Accounts",
+        }),
     };
 }
 
@@ -42,39 +45,45 @@ pub fn drainDownloaderEvents(frame: *Frame) void {
 /// DDL / mirror sources go straight in as `enqueue_url`.
 ///
 /// On success: routes to the Downloads screen so the user sees the new
-/// job. On failure: one toast line and the detail screen stays.
-pub fn doDownloadGame(frame: *Frame, game: *const library.Game) void {
+/// job and returns true. On failure (no recipe, RPDL worker busy or not
+/// signed in, …): one toast line, the screen stays, returns false.
+pub fn doDownloadGame(frame: *Frame, game: *const library.Game) bool {
     const state = frame.state;
 
     const parsed_opt = frame.recipe_repo.findGameByThread(game.f95_thread_id) catch |e| {
         var buf: [128]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "Recipe lookup failed: {s}", .{@errorName(e)}) catch "Recipe lookup failed";
         state.setDownloadMsg(msg);
-        return;
+        return false;
     };
     var parsed = parsed_opt orelse {
         state.setDownloadMsg("No recipe for this game. Drop one in <config>/f69/recipes/<id>.game.zon");
-        return;
+        return false;
     };
     defer parsed.deinit();
 
     if (parsed.recipe.sources.len == 0) {
         state.setDownloadMsg("Recipe has no sources defined.");
-        return;
+        return false;
     }
 
     switch (parsed.recipe.sources[0]) {
         .rpdl => |x| {
             // The worker refuses (with its own message) when another RPDL
             // fetch runs or no token is set; it then never enqueues.
+            // A busy worker is detected by its game id, not just by the
+            // slot being taken.
+            const before = state.pending_rpdl_download;
             flows.startRpdlDownloadById(frame, game, x.id);
-            if (state.pending_rpdl_download == null) return;
+            const after = state.pending_rpdl_download orelse return false;
+            if (before != null and before.? == after) return false;
         },
         .ddl => |x| enqueueUrl(frame, game, x.url, downloads.hexDecode(x.sha256) catch null, "ddl"),
         .mirror => |x| enqueueUrl(frame, game, x.url, if (x.sha256) |h| (downloads.hexDecode(h) catch null) else null, "mirror"),
     }
     state.setDownloadMsg("Queued download — see Downloads");
     state.screen = .downloads;
+    return true;
 }
 
 fn enqueueUrl(frame: *Frame, game: *const library.Game, url: []const u8, sha: ?[32]u8, host: []const u8) void {

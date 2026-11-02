@@ -1458,8 +1458,14 @@ fn onSyncDone(frame: *Frame, job: *SyncJob) void {
                         launch_mod.recipeReadyForAutoUpdate(frame, game.f95_thread_id, new_v))
                     {
                         log.info("auto-update: tid={d} '{s}' {s} -> {s}", .{ game.f95_thread_id, game.name, old_v, new_v });
-                        downloads_mod.doDownloadGame(frame, game);
-                        markRecapAutoDownloaded(state, game.f95_thread_id);
+                        // Mark the recap only when the download was really
+                        // queued (e.g. a busy RPDL worker refuses the next
+                        // game in the same pass).
+                        if (downloads_mod.doDownloadGame(frame, game)) {
+                            markRecapAutoDownloaded(state, game.f95_thread_id);
+                        } else {
+                            log.warn("auto-update: tid={d} not queued (see the download message)", .{game.f95_thread_id});
+                        }
                     } else if (launch_mod.shouldAutoUpdate(state, game) and
                         !launch_mod.hasAutoFetchableSource(frame, game.f95_thread_id))
                     {

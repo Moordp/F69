@@ -138,6 +138,8 @@ pub const JobView = struct {
 pub const Totals = struct {
     dl_speed: u64 = 0,
     ul_speed: u64 = 0,
+    /// Jobs that are moving: not terminal, not paused, not seeding, not
+    /// waiting for the user.
     active: u32 = 0,
     waiting_for_user: u32 = 0,
     seeding: u32 = 0,
@@ -1200,7 +1202,9 @@ pub const Downloader = struct {
             switch (r.job.step) {
                 .awaiting_user => totals.waiting_for_user += 1,
                 .seeding => totals.seeding += 1,
-                .done, .failed, .cancelled => {},
+                // Paused jobs do not move: they must not keep the UI
+                // redrawing every frame.
+                .done, .failed, .cancelled, .paused => {},
                 else => totals.active += 1,
             }
         }
@@ -2047,4 +2051,24 @@ test "downloader: retry_install re-raises install_ready for a done job and for a
     fx.dl.send(.{ .retry_install = id2 });
     fx.dl.stepOnce(1008);
     try testing.expect(fx.rec(id2).job.step != .installing or before == .installing);
+}
+
+test "downloader: a paused job is not counted as active in the snapshot totals" {
+    var fx = try Fx.create(.{});
+    defer fx.destroy();
+    const script = [_]model.Progress{.{ .phase = .downloading, .bytes_done = 1, .bytes_total = 5 }};
+    fx.fake.script = &script;
+    fx.enqueue("https://example.invalid/a.bin");
+    fx.dl.stepOnce(1000);
+    {
+        const snap = fx.dl.snapshot();
+        defer fx.dl.releaseSnapshot();
+        try testing.expectEqual(@as(u32, 1), snap.totals.active);
+    }
+    fx.dl.send(.{ .pause = fx.dl.recs.items[0].job.id });
+    fx.dl.stepOnce(1001);
+    try testing.expectEqual(model.Step.paused, fx.dl.recs.items[0].job.step);
+    const snap = fx.dl.snapshot();
+    defer fx.dl.releaseSnapshot();
+    try testing.expectEqual(@as(u32, 0), snap.totals.active);
 }

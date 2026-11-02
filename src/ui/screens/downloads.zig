@@ -219,6 +219,8 @@ pub fn renderDownloadsBody(frame: *Frame) void {
         .cancel => |id| frame.dl.send(.{ .cancel = id }),
         .remove => |id| frame.dl.send(.{ .remove = id }),
         .retry => |id| actions.retryDownload(frame, id),
+        // The file is on disk; only the install step failed.
+        .retry_install => |id| frame.dl.send(.{ .retry_install = id }),
         .pause => |id| frame.dl.send(.{ .pause = id }),
         .unpause => |id| frame.dl.send(.{ .unpause = id }),
         .stop_seeding => |id| frame.dl.send(.{ .stop_seeding = id }),
@@ -349,7 +351,21 @@ fn downloadsSectionHeader(label_text: []const u8, count: u32, key: u8) void {
     });
 }
 
-const RowAction = union(enum) { none, cancel: u64, remove: u64, retry: u64, pause: u64, unpause: u64, stop_seeding: u64 };
+const RowAction = union(enum) { none, cancel: u64, remove: u64, retry: u64, retry_install: u64, pause: u64, unpause: u64, stop_seeding: u64 };
+
+/// Retry for a failed job: an install failure installs again from the
+/// file on disk; any other failure downloads again.
+fn retryAction(job: *const Job) RowAction {
+    return if (job.fail == .install_failed) .{ .retry_install = job.id } else .{ .retry = job.id };
+}
+
+test "retryAction: install failure re-installs, other failures re-download" {
+    var j: Job = .{ .id = 7, .group_id = 7, .kind = .game, .game_thread_id = 1, .source_href = "x", .engine = .aria2_http, .step = .failed, .dest_dir = "" };
+    j.fail = .install_failed;
+    try std.testing.expectEqual(@as(u64, 7), retryAction(&j).retry_install);
+    j.fail = .network;
+    try std.testing.expectEqual(@as(u64, 7), retryAction(&j).retry);
+}
 
 /// True iff this torrent's upload count has met the configured
 /// seed-ratio target. Used to gate the "Remove" button — without
@@ -457,7 +473,7 @@ fn renderJobRow(job: *const Job, title: []const u8, extracting: bool, ratio_targ
         };
         if (job.step == .failed) {
             if (components.iconButton(@src(), "Retry", entypo.cycle, .{ .id_extra = job.id, .style = .highlight })) {
-                action = .{ .retry = job.id };
+                action = retryAction(job);
             }
         }
         // Pause / Resume an in-flight download. Seeding is intentionally NOT

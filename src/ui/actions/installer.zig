@@ -1751,7 +1751,9 @@ fn installFromArchiveInner(frame: *Frame, ev: downloads.downloader.InstallReady)
     if (ev.extracted_dir) |dir| {
         defer alloc.free(rv.version);
         defer alloc.free(rv.recipe_id);
-        finishGameInstall(frame, ev.game_thread_id, rv.version, trimTrailingSep(dir), rv.recipe_id, source_kind);
+        // An error here goes to `installFromArchive`, which reports
+        // `install_failed`; the ack is only sent on success.
+        try finishGameInstall(frame, ev.game_thread_id, rv.version, trimTrailingSep(dir), rv.recipe_id, source_kind);
         frame.dl.send(.{ .install_ack = ev.job_id });
         return;
     }
@@ -1795,6 +1797,7 @@ fn spawnPostInstall(frame: *Frame, payload: PostInstallPayload) !void {
 
 /// Install row + installed-set refresh + optional auto-convert +
 /// post-install diagnostics for a finished game folder. UI thread.
+/// Fails (and does nothing else) when the install row cannot be written.
 fn finishGameInstall(
     frame: *Frame,
     game_id: u64,
@@ -1802,10 +1805,10 @@ fn finishGameInstall(
     dest_dir: []const u8,
     recipe_id: []const u8,
     source: library.InstallSource,
-) void {
+) !void {
     // Always write the install row — even raw-paste / no-recipe installs
     // deserve an entry so they land in the detail-page dropdown.
-    doInstallUpsert(frame, game_id, version_str, dest_dir, recipe_id, source);
+    try doInstallUpsert(frame, game_id, version_str, dest_dir, recipe_id, source);
     // Refresh the per-frame install-set snapshot so the InstallDot +
     // detail page flip green immediately.
     common.refreshInstalledSet(frame);
@@ -1896,13 +1899,23 @@ pub fn drainPostInstall(frame: *Frame) void {
         }
         const p = &pij.payload;
         if (phase == .done) {
-            if (p.mode == .move_file) finishGameInstall(frame, p.game_id, p.version, p.dest_dir, p.recipe_id, p.source);
-            frame.dl.send(.{ .install_ack = p.download_job_id });
+            const registered = if (p.mode == .move_file)
+                finishGameInstall(frame, p.game_id, p.version, p.dest_dir, p.recipe_id, p.source)
+            else {};
+            if (registered) |_| {
+                frame.dl.send(.{ .install_ack = p.download_job_id });
+            } else |e| {
+                var buf: [96]u8 = undefined;
+                const m = std.fmt.bufPrint(&buf, "Install failed: could not save the install ({s})", .{@errorName(e)}) catch "Install failed";
+                sendInstallFailed(frame, p.download_job_id, m);
+                frame.state.setDownloadMsg(m);
+            }
         } else if (phase == .failed) {
             log.warn("post-install download {d}: worker failed ({s})", .{ p.download_job_id, p.err_name orelse "?" });
             var buf: [96]u8 = undefined;
             const m = std.fmt.bufPrint(&buf, "Install failed: {s}", .{p.err_name orelse "cancelled"}) catch "Install failed";
             sendInstallFailed(frame, p.download_job_id, m);
+            frame.state.setDownloadMsg(m);
         }
         pij.alloc.free(p.file_path);
         pij.alloc.free(p.dest_dir);
@@ -1991,7 +2004,7 @@ fn doInstallUpsert(
     dest_dir: []const u8,
     recipe_id: []const u8,
     source: library.InstallSource,
-) void {
+) !void {
     var id_buf: [36]u8 = undefined;
     generateUuid(frame.io, &id_buf);
     const now = std.Io.Clock.Timestamp.now(frame.io, .real);
@@ -2006,6 +2019,7 @@ fn doInstallUpsert(
         .source = source,
     }) catch |e| {
         log.warn("installs row for game {d} failed: {s}", .{ game_id, @errorName(e) });
+        return e;
     };
 }
 

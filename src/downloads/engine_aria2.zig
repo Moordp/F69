@@ -44,9 +44,14 @@ pub const Aria2Engine = struct {
     last_plan: ?policy.Plan = null,
     /// Last failure message handed out in a `Progress`; valid until the next poll.
     last_msg: ?[]u8 = null,
-    /// Consecutive polls that found the daemon unreachable. Reset by any
-    /// poll that got an answer.
+    /// Consecutive downloader ticks in which the daemon was unreachable.
+    /// Reset by any poll that got an answer.
     gone_polls: u8 = 0,
+    /// The gid whose unreachable polls are counted (owned). The
+    /// downloader polls each gid once per tick, so counting only this
+    /// gid counts ticks, not jobs: three active jobs in one slow tick
+    /// count once.
+    gone_anchor: ?[]u8 = null,
 
     pub fn init(alloc: std.mem.Allocator, io: Io, cfg: DaemonConfig) Aria2Engine {
         return .{ .alloc = alloc, .io = io, .cfg = cfg };
@@ -57,6 +62,7 @@ pub const Aria2Engine = struct {
         while (it.next()) |k| self.alloc.free(k.*);
         self.gids.deinit(self.alloc);
         if (self.last_msg) |m| self.alloc.free(m);
+        self.clearGone();
         if (self.daemon) |*d| d.deinit();
         self.daemon = null;
     }
@@ -189,6 +195,12 @@ pub const Aria2Engine = struct {
     }
 
     fn forget(self: *Aria2Engine, gid: []const u8) void {
+        // A cancelled anchor would stop the count: the next gone gid
+        // becomes the anchor instead (the streak itself is kept).
+        if (self.gone_anchor) |a| if (std.mem.eql(u8, a, gid)) {
+            self.alloc.free(a);
+            self.gone_anchor = null;
+        };
         if (self.gids.fetchRemove(gid)) |kv| self.alloc.free(kv.key);
     }
 
@@ -232,17 +244,17 @@ pub const Aria2Engine = struct {
     fn absorb(self: *Aria2Engine, ref: []const u8, result: errs.Error!aria2_rpc.Status, now: i64) errs.Error!model.Progress {
         var st = result catch |e| switch (e) {
             errs.Error.NotFound => {
-                self.gone_polls = 0;
+                self.clearGone();
                 self.forget(ref);
                 return .{ .phase = .removed };
             },
             else => {
-                self.noteGone();
+                self.noteGone(ref);
                 return .{ .phase = .daemon_gone };
             },
         };
         defer st.deinit(self.alloc);
-        self.gone_polls = 0;
+        self.clearGone();
 
         const since = try self.observe(ref, &st, now);
         var prog = mapStatus(&st, since, now);
@@ -258,18 +270,32 @@ pub const Aria2Engine = struct {
         return prog;
     }
 
-    /// Count one unreachable poll. After `daemon_gone_limit` in a row the
-    /// daemon handle is dropped (its process is stopped by `deinit`), so
-    /// the next `ensureDaemon` respawns aria2c. The plan is cleared so the
-    /// limits are sent again to the new daemon.
-    fn noteGone(self: *Aria2Engine) void {
+    fn clearGone(self: *Aria2Engine) void {
+        self.gone_polls = 0;
+        if (self.gone_anchor) |a| self.alloc.free(a);
+        self.gone_anchor = null;
+    }
+
+    /// Count one unreachable tick: only polls of the anchor gid count
+    /// (the first gid seen unreachable becomes the anchor). After
+    /// `daemon_gone_limit` ticks in a row the daemon handle is dropped
+    /// (its process is stopped by `deinit`), so the next `ensureDaemon`
+    /// respawns aria2c. The plan is cleared so the limits are sent again
+    /// to the new daemon.
+    fn noteGone(self: *Aria2Engine, ref: []const u8) void {
+        if (self.gone_anchor) |a| {
+            if (!std.mem.eql(u8, a, ref)) return;
+        } else {
+            // On OOM there is no anchor: every poll counts (old behaviour).
+            self.gone_anchor = self.alloc.dupe(u8, ref) catch null;
+        }
         self.gone_polls +|= 1;
         if (self.gone_polls < daemon_gone_limit) return;
         log.warn("aria2c unreachable for {d} polls in a row; restarting it on next use", .{self.gone_polls});
         if (self.daemon) |*d| d.deinit();
         self.daemon = null;
         self.last_plan = null;
-        self.gone_polls = 0;
+        self.clearGone();
     }
 
     fn pauseImpl(p: *anyopaque, ref: []const u8) errs.Error!void {
@@ -494,4 +520,32 @@ test "absorb: 3 unreachable polls in a row drop the daemon handle; an answer res
     try testing.expectEqual(@as(u8, 0), eng.gone_polls);
     try testing.expect(eng.daemon == null);
     try testing.expect(eng.last_plan == null);
+}
+
+test "absorb: several gids unreachable in one tick count once; three ticks drop the daemon" {
+    var eng = Aria2Engine.init(testing.allocator, undefined, undefined);
+    defer eng.deinit();
+    const gids = [_][]const u8{ "a", "b", "c", "d" };
+    // Tick 1: four active jobs, daemon unreachable for all of them.
+    for (gids) |g| _ = try eng.absorb(g, errs.Error.HostUnreachable, 10);
+    try testing.expectEqual(@as(u8, 1), eng.gone_polls);
+    // Tick 2.
+    for (gids) |g| _ = try eng.absorb(g, errs.Error.HostUnreachable, 11);
+    try testing.expectEqual(@as(u8, 2), eng.gone_polls);
+    // The anchor job is cancelled: the next gone gid takes over, the
+    // streak is kept.
+    eng.forget("a");
+    _ = try eng.absorb("b", errs.Error.HostUnreachable, 12);
+    // Third tick in a row: handle dropped, counter and anchor reset.
+    try testing.expectEqual(@as(u8, 0), eng.gone_polls);
+    try testing.expect(eng.gone_anchor == null);
+    try testing.expect(eng.daemon == null);
+    // The rest of that tick starts a new streak at 1, not 2.
+    _ = try eng.absorb("c", errs.Error.HostUnreachable, 12);
+    _ = try eng.absorb("d", errs.Error.HostUnreachable, 12);
+    try testing.expectEqual(@as(u8, 1), eng.gone_polls);
+    // Any answer ends the streak.
+    _ = try eng.absorb("c", errs.Error.NotFound, 13);
+    try testing.expectEqual(@as(u8, 0), eng.gone_polls);
+    try testing.expect(eng.gone_anchor == null);
 }

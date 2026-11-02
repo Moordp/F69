@@ -1937,6 +1937,49 @@ test "downloads v2: enqueue via command shows in the Downloads screen and instal
     tlog("dl-v2: OK", .{});
 }
 
+test "downloads v2: a failed install worker fails the job instead of acking it" {
+    // The install-row write failure (fix round 1, item 2) takes the same
+    // drain branch, but it can only be provoked through a DB error, which
+    // the library logs at err level — and the test runner fails any test
+    // that logs an error. So this drives the branch with a move failure.
+    tlog("START: dl-v2-install-fail", .{});
+    const gpa = std.testing.allocator;
+    const downloads = @import("downloads");
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(8) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var env = try TestEnv.init(gpa, "dl-v2-install-fail");
+    defer env.deinit();
+    var t = try dvui.testing.init(.{ .allocator = gpa, .io = io, .window_size = .{ .w = 1280, .h = 800 } });
+    defer t.deinit();
+    var h = try ui.Harness.init(gpa, io, t.window, env.root);
+    defer h.deinit();
+
+    try env.writeFile("payload/game.bin", "hello");
+    const file = try env.path("payload/game.bin");
+    defer gpa.free(file);
+    const script = [_]downloads.model.Progress{.{ .phase = .transfer_done, .bytes_done = 5, .bytes_total = 5, .final_path = file }};
+    h.dl_fake.script = &script;
+    _ = try h.lib.insertIfMissing(&.{ .f95_thread_id = 5151, .name = "Gone File" });
+    try h.reloadGames();
+    h.dl.send(.{ .enqueue_url = .{ .url = "https://example.invalid/game.bin", .kind = .game, .game_thread_id = 5151, .title = "Gone File", .version = "2.0", .host = "raw" } });
+    h.dl.stepOnce(1000);
+    h.dl.stepOnce(1001);
+    try std.testing.expectEqual(downloads.model.Step.installing, h.dl.recs.items[0].job.step);
+    // The file disappears before the install worker can move it.
+    try std.Io.Dir.cwd().deleteFile(io, file);
+
+    h.drainWorkers(300);
+    h.dl.stepOnce(1002);
+    const j = h.dl.recs.items[0].job;
+    try std.testing.expectEqual(downloads.model.Step.failed, j.step);
+    try std.testing.expectEqual(downloads.model.FailReason.install_failed, j.fail.?);
+    const installs = try h.lib.listInstalls(5151);
+    defer h.lib.freeInstalls(installs);
+    try std.testing.expectEqual(@as(usize, 0), installs.len);
+    tlog("dl-v2-install-fail: OK ({s})", .{j.fail_msg});
+}
+
 test "hostile: findLauncher dispatch picks the OS-correct launcher from a mixed install" {
     // The production dispatch (launch.zig findLauncher) — NOT the per-OS
     // finders called directly. Walks a tree right after writing it; if this

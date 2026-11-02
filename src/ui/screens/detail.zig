@@ -397,7 +397,7 @@ fn renderHeroUpdate(frame: *Frame, game: *const library.Game) void {
     const lbl = std.fmt.bufPrint(&buf, "Update to {s}", .{newer}) catch "Update";
     if (components.iconButton(@src(), lbl, entypo.cloud, .{ .gravity_y = 0.5, .tag = "hero-update" })) {
         if (actions.hasAutoFetchableSource(frame, game.f95_thread_id)) {
-            actions.doDownloadGame(frame, game);
+            _ = actions.doDownloadGame(frame, game);
         } else {
             actions.openManualInstallForUpdate(frame.state, newer);
         }
