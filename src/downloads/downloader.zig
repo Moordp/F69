@@ -29,10 +29,14 @@ const TICK_MS: i64 = 250;
 const BYTES_PERSIST_S: i64 = 5;
 /// An engine that reported `daemon_gone` is not started again before this.
 const ENGINE_RESTART_S: i64 = 30;
+/// Terminal jobs kept in history (spec §3.3).
+const HISTORY_KEEP: u32 = 500;
 
 const NOT_ARCHIVE = "Not an archive — will install as a file";
 const FOLDER_EXISTS = "Folder already exists — registering";
 const MOD_ARCHIVE = "Mod archive — installed by the mod manager";
+/// Written into an extract destination while f69 extracts into it.
+const EXTRACT_MARKER = ".f69-extracting";
 
 pub const EnqueueUrl = struct {
     url: []const u8,
@@ -174,6 +178,8 @@ const PostWorker = struct {
     io: std.Io,
     src: []u8,
     dest: []const u8 = &.{},
+    /// `<dest>/.f69-extracting`, removed when the extract succeeds.
+    marker: []const u8 = &.{},
     sha: [32]u8 = @splat(0),
 
     fn run(pw: *PostWorker) ?model.FailReason {
@@ -187,6 +193,8 @@ const PostWorker = struct {
                     log.warn("extract '{s}' failed: {s}", .{ pw.src, @errorName(e) });
                     return if (e == error.DiskFull) .disk_full else .bad_archive;
                 };
+                std.Io.Dir.cwd().deleteFile(pw.io, pw.marker) catch |e|
+                    log.warn("removing '{s}' failed: {s}", .{ pw.marker, @errorName(e) });
                 return null;
             },
         }
@@ -196,6 +204,7 @@ const PostWorker = struct {
         pw.w.join();
         pw.alloc.free(pw.src);
         pw.alloc.free(pw.dest);
+        pw.alloc.free(pw.marker);
         pw.alloc.destroy(pw);
     }
 };
@@ -253,7 +262,12 @@ pub const Downloader = struct {
 
     /// When an engine last reported its daemon gone; null = up.
     down_since: std.EnumArray(EngineSlot, ?i64) = .initFill(null),
-    last_plan: ?policy.Plan = null,
+    /// Plan last applied per engine; null = apply on the next tick.
+    last_plan: std.EnumArray(EngineSlot, ?policy.Plan) = .initFill(null),
+    /// Something visible changed this tick (publish even when idle).
+    touched: bool = true,
+    /// A job reached a terminal step since the last history trim.
+    trim_due: bool = false,
 
     pub fn init(
         alloc: std.mem.Allocator,
@@ -293,11 +307,10 @@ pub const Downloader = struct {
 
     // ------------------------------------------------------------ public API
 
-    /// Load jobs, reconcile them with the engines, publish, spawn the loop.
+    /// Spawn the loop. The thread itself loads and reconciles the stored
+    /// jobs before its first tick, so the caller (the UI) does no I/O here.
     pub fn start(self: *Downloader) !void {
         if (self.thread != null) return;
-        try self.load();
-        self.reconcile();
         self.running.store(true, .release);
         self.thread = std.Thread.spawn(.{}, threadMain, .{self}) catch |e| {
             self.running.store(false, .release);
@@ -416,8 +429,16 @@ pub const Downloader = struct {
         self.tickRetries(now);
         self.schedule(now);
         self.persist(now);
-        self.applyLimits();
-        self.publish();
+        self.applyLimits(now);
+        // An idle app (only terminal jobs, nothing changed) must not wake
+        // the UI four times a second.
+        if (self.touched or self.anyLive()) self.publish();
+        self.touched = false;
+    }
+
+    fn anyLive(self: *Downloader) bool {
+        for (self.recs.items) |r| if (!r.job.step.isTerminal()) return true;
+        return false;
     }
 
     pub fn find(self: *Downloader, id: u64) ?*Rec {
@@ -432,6 +453,8 @@ pub const Downloader = struct {
     }
 
     fn threadMain(self: *Downloader) void {
+        self.load() catch |e| log.err("loading stored downloads failed: {s}", .{@errorName(e)});
+        self.reconcile();
         while (self.running.load(.acquire)) {
             self.stepOnce(self.nowSeconds());
             if (!self.running.load(.acquire)) break;
@@ -494,16 +517,19 @@ pub const Downloader = struct {
         var copy = s;
         copy.watch_dir = a.dupe(u8, s.watch_dir) catch {
             arena.deinit();
+            log.warn("reload_settings dropped: out of memory", .{});
             return;
         };
         copy.megacmd_path = a.dupe(u8, s.megacmd_path) catch {
             arena.deinit();
+            log.warn("reload_settings dropped: out of memory", .{});
             return;
         };
         if (self.settings_arena) |*old| old.deinit();
         self.settings_arena = arena;
         self.settings = copy;
-        self.last_plan = null;
+        self.last_plan = .initFill(null);
+        self.touched = true;
     }
 
     fn engineKindForUrl(url: []const u8) model.EngineKind {
@@ -581,7 +607,9 @@ pub const Downloader = struct {
             return self.addFailed(id);
         };
         self.store.update(&r.job) catch log.err("job {d}: dest_dir not stored", .{id});
-        self.store.addEvent(id, now, .queued, "enqueued") catch {};
+        self.store.addEvent(id, now, .queued, "enqueued") catch |e|
+            log.warn("job {d}: event not stored: {s}", .{ id, @errorName(e) });
+        self.touched = true;
         return r;
     }
 
@@ -603,6 +631,7 @@ pub const Downloader = struct {
         self.store.remove(r.job.id) catch log.err("job {d}: remove from store failed", .{r.job.id});
         _ = self.recs.orderedRemove(i);
         self.freeRec(r);
+        self.touched = true;
     }
 
     // ------------------------------------------------------------ scheduling
@@ -633,7 +662,7 @@ pub const Downloader = struct {
         const since = self.down_since.get(slot) orelse return false;
         if (now - since < ENGINE_RESTART_S) return true;
         self.down_since.set(slot, null);
-        self.last_plan = null;
+        self.last_plan.set(slot, null);
         return false;
     }
 
@@ -643,7 +672,7 @@ pub const Downloader = struct {
             log.warn("{s} engine reported its daemon gone", .{@tagName(slot)});
             self.down_since.set(slot, now);
         }
-        self.last_plan = null;
+        self.last_plan.set(slot, null);
     }
 
     fn schedule(self: *Downloader, now: i64) void {
@@ -682,6 +711,15 @@ pub const Downloader = struct {
 
     fn startEngine(self: *Downloader, r: *Rec, now: i64) void {
         const eng = self.engineFor(r.job.engine) orelse return self.missingEngine(r, now);
+        if (r.job.engine == .aria2_torrent and r.torrent_bytes == null and !isFetchableTorrentHref(r.job.source_href)) {
+            // Stage-1 limit: the .torrent body is kept in memory only.
+            return self.apply(r, .{
+                .step = .failed,
+                .fail = .unknown,
+                .detail = "Torrent file is gone after restart — start the download again",
+                .attempts = 3,
+            }, now);
+        }
         // A retried job may still hold the previous ref: drop it first.
         self.cancelEngine(r);
         const ref = eng.start(.{
@@ -787,9 +825,9 @@ pub const Downloader = struct {
         self.runEffect(r, t.side_effect, now);
     }
 
-    /// Copy the transition onto the job. Writes a `dl_events` row when the
-    /// step, detail or failure changed; the row itself is written by
-    /// `persist`.
+    /// Copy the transition onto the job. When the step, detail or failure
+    /// changed, the `dl_events` row is written here at once; the `dl_jobs`
+    /// row is marked dirty and written by `persist` at the end of the tick.
     fn apply(self: *Downloader, r: *Rec, t: model.Transition, now: i64) void {
         const j = &r.job;
         const step_changed = j.step != t.step;
@@ -816,8 +854,11 @@ pub const Downloader = struct {
             j.finished_at = null;
         }
         r.dirty = true;
+        self.touched = true;
+        if (step_changed and t.step.isTerminal()) self.trim_due = true;
         if (step_changed or detail_changed or fail_changed) {
-            self.store.addEvent(j.id, now, j.step, j.step_detail) catch {};
+            self.store.addEvent(j.id, now, j.step, j.step_detail) catch |e|
+                log.warn("job {d}: event not stored: {s}", .{ j.id, @errorName(e) });
         }
     }
 
@@ -853,7 +894,7 @@ pub const Downloader = struct {
         const path = r.job.final_path orelse
             return self.transition(r, .{ .verify_err = .bad_archive }, now, "The downloaded file could not be found");
         if (r.job.expected_sha256) |sha| {
-            const pw = self.newWorker(.verify, path, null) catch
+            const pw = self.newWorker(.verify, path, null, null) catch
                 return self.transition(r, .{ .verify_err = .unknown }, now, "Could not start the checksum check");
             pw.sha = sha;
             self.spawnWorker(r, pw, now);
@@ -873,23 +914,37 @@ pub const Downloader = struct {
         if (r.job.kind == .mod) return self.transition(r, .extract_ok, now, MOD_ARCHIVE);
         const dir = self.extractDir(&r.job) catch
             return self.transition(r, .{ .extract_err = .unknown }, now, "Out of memory");
-        if (dirHasEntries(self.io, dir)) {
+        const marker = std.fmt.allocPrint(self.alloc, "{s}" ++ EXTRACT_MARKER, .{dir}) catch {
+            self.alloc.free(dir);
+            return self.transition(r, .{ .extract_err = .unknown }, now, "Out of memory");
+        };
+        const cwd = std.Io.Dir.cwd();
+        if ((cwd.access(self.io, marker, .{}) catch null) != null) {
+            // Our own interrupted extract: start over from an empty folder.
+            log.info("job {d}: clearing half-extracted '{s}'", .{ r.job.id, dir });
+            cwd.deleteTree(self.io, dir) catch |e|
+                log.warn("job {d}: clearing '{s}' failed: {s}", .{ r.job.id, dir, @errorName(e) });
+        } else if (dirHasEntries(self.io, dir)) {
+            self.alloc.free(marker);
             self.alloc.free(dir);
             return self.transition(r, .extract_ok, now, FOLDER_EXISTS);
         }
-        const pw = self.newWorker(.extract, path, dir) catch {
+        writeMarker(self.io, dir, marker);
+        const pw = self.newWorker(.extract, path, dir, marker) catch {
+            self.alloc.free(marker);
             self.alloc.free(dir);
             return self.transition(r, .{ .extract_err = .unknown }, now, "Could not start extracting");
         };
         self.spawnWorker(r, pw, now);
     }
 
-    /// Takes ownership of `dest`.
-    fn newWorker(self: *Downloader, kind: PostKind, src: []const u8, dest: ?[]u8) !*PostWorker {
+    /// Takes ownership of `dest` and `marker` on success.
+    fn newWorker(self: *Downloader, kind: PostKind, src: []const u8, dest: ?[]u8, marker: ?[]u8) !*PostWorker {
         const pw = try self.alloc.create(PostWorker);
         errdefer self.alloc.destroy(pw);
         pw.* = .{ .kind = kind, .alloc = self.alloc, .io = self.io, .src = try self.alloc.dupe(u8, src) };
         pw.dest = dest orelse &.{};
+        pw.marker = marker orelse &.{};
         return pw;
     }
 
@@ -994,6 +1049,10 @@ pub const Downloader = struct {
                     // Installed already; the torrent is just gone from aria2.
                     return self.apply(r, .{ .step = .done, .attempts = j.attempts }, now);
                 }
+                if (j.final_path == null) {
+                    j.final_path = findSingleFile(self.alloc, self.io, j.dest_dir);
+                    if (j.final_path != null) r.dirty = true;
+                }
                 if (j.final_path) |fp| {
                     if (std.Io.Dir.cwd().statFile(self.io, fp, .{})) |_| {
                         self.apply(r, .{ .step = .verifying, .attempts = j.attempts }, now);
@@ -1021,24 +1080,75 @@ pub const Downloader = struct {
                 r.bytes_dirty = false;
                 r.bytes_saved_at = now;
             } else if (r.bytes_dirty and now - r.bytes_saved_at >= BYTES_PERSIST_S) {
-                self.store.updateBytes(r.job.id, r.job.bytes_done, r.job.bytes_total, r.job.bytes_uploaded) catch {};
+                self.store.updateBytes(r.job.id, r.job.bytes_done, r.job.bytes_total, r.job.bytes_uploaded) catch |e|
+                    log.warn("job {d}: byte counters not stored: {s}", .{ r.job.id, @errorName(e) });
                 r.bytes_dirty = false;
                 r.bytes_saved_at = now;
             }
         }
+        if (self.trim_due) {
+            self.trim_due = false;
+            self.trimHistory();
+        }
     }
 
-    fn applyLimits(self: *Downloader) void {
-        for (std.enums.values(EngineSlot)) |s| if (self.down_since.get(s) != null) return;
-        const p = policy.plan(self.settings, self.activeCounts());
-        if (self.last_plan) |lp| if (std.meta.eql(lp, p)) return;
-        var ok = true;
-        const list = [_]?Engine{ self.engines.aria2, self.engines.megacmd, self.engines.browser };
-        for (list) |maybe| if (maybe) |eng| eng.setLimits(p) catch |e| {
-            log.warn("setLimits failed: {s}", .{@errorName(e)});
-            ok = false;
+    /// Keep the newest `HISTORY_KEEP` terminal jobs, in the store and in
+    /// memory (same rule as `Store.trimHistory`: highest ids win).
+    fn trimHistory(self: *Downloader) void {
+        _ = self.store.trimHistory(HISTORY_KEEP) catch |e| {
+            log.warn("history trim failed: {s}", .{@errorName(e)});
+            return;
         };
-        if (ok) self.last_plan = p;
+        var terminal: usize = 0;
+        for (self.recs.items) |r| {
+            if (r.job.step.isTerminal()) terminal += 1;
+        }
+        // `recs` is ordered by id, so the oldest terminal jobs come first.
+        var i: usize = 0;
+        while (terminal > HISTORY_KEEP and i < self.recs.items.len) {
+            const r = self.recs.items[i];
+            if (!r.job.step.isTerminal()) {
+                i += 1;
+                continue;
+            }
+            _ = self.recs.orderedRemove(i);
+            self.freeRec(r);
+            terminal -= 1;
+            self.touched = true;
+        }
+    }
+
+    /// Engine has a transfer it is responsible for right now.
+    fn hasLiveJob(self: *Downloader, slot: EngineSlot) bool {
+        for (self.recs.items) |r| {
+            if (r.job.engine_ref != null and !r.job.step.isTerminal() and slotOf(r.job.engine) == slot) return true;
+        }
+        return false;
+    }
+
+    /// Apply the plan per engine when it changed. An engine that is down,
+    /// or not running with no live job, is skipped (no spawn at idle
+    /// startup). A spawn failure marks the engine down (30 s gate).
+    fn applyLimits(self: *Downloader, now: i64) void {
+        const p = policy.plan(self.settings, self.activeCounts());
+        for (std.enums.values(EngineSlot)) |slot| {
+            const eng: Engine = switch (slot) {
+                .aria2 => self.engines.aria2,
+                .megacmd => self.engines.megacmd orelse continue,
+                .browser => self.engines.browser orelse continue,
+            };
+            if (self.down_since.get(slot) != null) continue;
+            if (self.last_plan.get(slot)) |lp| if (std.meta.eql(lp, p)) continue;
+            if (!eng.isAlive() and !self.hasLiveJob(slot)) continue;
+            eng.setLimits(p) catch |e| {
+                log.warn("{s} setLimits failed: {s}", .{ @tagName(slot), @errorName(e) });
+                if (e == error.AriaSpawnFailed or e == error.AriaStartTimeout) {
+                    if (self.down_since.get(slot) == null) self.down_since.set(slot, now);
+                }
+                continue;
+            };
+            self.last_plan.set(slot, p);
+        }
     }
 
     fn publish(self: *Downloader) void {
@@ -1080,6 +1190,7 @@ pub const Downloader = struct {
             log.err("ui event {s} dropped: out of memory", .{@tagName(ev)});
             return;
         };
+        self.touched = true; // publish + wake so the UI drains it
         self.ev_lock.lockUncancelable(self.io);
         defer self.ev_lock.unlock(self.io);
         self.events.append(self.alloc, copy) catch {
@@ -1122,6 +1233,60 @@ fn safeSegment(buf: []u8, v: ?[]const u8) []const u8 {
     }
     if (n == 0 or all_dots) return "unversioned";
     return buf[0..n];
+}
+
+/// A torrent job without its .torrent body can still start when the href
+/// is a magnet link or a URL aria2 can fetch itself.
+fn isFetchableTorrentHref(href: []const u8) bool {
+    return std.mem.startsWith(u8, href, "magnet:") or
+        std.mem.startsWith(u8, href, "http://") or
+        std.mem.startsWith(u8, href, "https://");
+}
+
+/// Create `dir` and an empty marker file in it. Failure is logged: the
+/// extract still runs, it just cannot be told apart from a user folder if
+/// it is interrupted.
+fn writeMarker(io: std.Io, dir: []const u8, marker: []const u8) void {
+    const cwd = std.Io.Dir.cwd();
+    cwd.createDirPath(io, dir) catch |e| {
+        log.warn("create '{s}' failed: {s}", .{ dir, @errorName(e) });
+        return;
+    };
+    var f = cwd.createFile(io, marker, .{ .truncate = true }) catch |e| {
+        log.warn("create '{s}' failed: {s}", .{ marker, @errorName(e) });
+        return;
+    };
+    f.close(io);
+}
+
+/// Names a finished download never has: hidden files and the temp / control
+/// files of aria2 and browsers.
+fn isTempName(name: []const u8) bool {
+    if (name.len == 0 or name[0] == '.' or name[0] == '~') return true;
+    for ([_][]const u8{ ".aria2", ".part", ".tmp", ".crdownload", ".partial", ".download" }) |ext| {
+        if (std.mem.endsWith(u8, name, ext)) return true;
+    }
+    return false;
+}
+
+/// The one finished file in `dir` (owned full path), or null when there is
+/// none, more than one, or an aria2 control file marks a transfer as
+/// incomplete.
+fn findSingleFile(alloc: std.mem.Allocator, io: std.Io, dir: []const u8) ?[]u8 {
+    var d = std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch return null;
+    defer d.close(io);
+    var name_buf: [std.fs.max_name_bytes]u8 = undefined;
+    var name: ?[]const u8 = null;
+    var it = d.iterate();
+    while (it.next(io) catch return null) |e| {
+        if (e.kind != .file) continue;
+        if (std.mem.endsWith(u8, e.name, ".aria2")) return null;
+        if (isTempName(e.name)) continue;
+        if (name != null or e.name.len > name_buf.len) return null;
+        @memcpy(name_buf[0..e.name.len], e.name);
+        name = name_buf[0..e.name.len];
+    }
+    return std.fs.path.join(alloc, &.{ dir, name orelse return null }) catch null;
 }
 
 fn dirHasEntries(io: std.Io, path: []const u8) bool {
@@ -1661,4 +1826,144 @@ test "downloader: start spawns the loop thread and stop joins it" {
     const snap = fx.dl.snapshot();
     defer fx.dl.releaseSnapshot();
     try testing.expect(snap.generation >= 1);
+}
+
+test "downloader: limits are not applied to an idle engine that is not running; a down engine does not block another" {
+    var fx = try Fx.create(.{});
+    defer fx.destroy();
+    const script = [_]model.Progress{.{ .phase = .downloading }};
+    fx.fake.script = &script;
+    fx.fake.alive = false;
+    fx.dl.stepOnce(1000);
+    try testing.expectEqual(@as(?policy.Plan, null), fx.fake.last_plan);
+
+    fx.enqueue("https://example.invalid/z");
+    fx.dl.stepOnce(1001);
+    try testing.expect(fx.fake.last_plan != null);
+
+    var mega: engine_mod.FakeEngine = .{ .alloc = testing.allocator, .script = &.{} };
+    fx.dl.engines.megacmd = mega.engine();
+    fx.dl.down_since.set(.megacmd, 1001);
+    fx.fake.last_plan = null;
+    fx.dl.send(.{ .reload_settings = .{ .ul_cap_busy_kbs = 7 } });
+    fx.dl.stepOnce(1002);
+    try testing.expectEqual(@as(u64, 7 * 1024), fx.fake.last_plan.?.aria2_global_up);
+    try testing.expectEqual(@as(?policy.Plan, null), mega.last_plan);
+}
+
+test "downloader: idle app does not republish every tick" {
+    var fx = try Fx.create(.{});
+    defer fx.destroy();
+    fx.dl.stepOnce(1000);
+    const g1 = fx.dl.generation;
+    fx.dl.stepOnce(1001);
+    fx.dl.stepOnce(1002);
+    try testing.expectEqual(g1, fx.dl.generation);
+    fx.enqueue("https://example.invalid/w");
+    fx.dl.stepOnce(1003);
+    try testing.expect(fx.dl.generation > g1);
+}
+
+test "downloader: extract marker — our interrupted folder is cleared and re-extracted; a foreign non-empty folder is registered" {
+    var fx = try Fx.create(.{});
+    defer fx.destroy();
+    try fx.env.writeFile("payload/g.zip", "not really a zip");
+    const zip = try fx.env.path("payload/g.zip");
+    defer testing.allocator.free(zip);
+    try fx.env.writeFile("lib/9/v1/old.txt", "half");
+    try fx.env.writeFile("lib/9/v1/" ++ EXTRACT_MARKER, "");
+    try fx.env.writeFile("lib/9/v2/user.txt", "mine");
+
+    var a = storedJob(.extracting);
+    a.game_thread_id = 9;
+    a.version = "v1";
+    a.final_path = zip;
+    const id_a = try fx.dl.store.insert(&a);
+    var b = a;
+    b.version = "v2";
+    const id_b = try fx.dl.store.insert(&b);
+
+    try fx.dl.load();
+    fx.dl.reconcile();
+
+    try testing.expectEqual(model.Step.installing, fx.rec(id_b).job.step);
+    try testing.expectEqualStrings(FOLDER_EXISTS, fx.rec(id_b).job.step_detail);
+    const user = try fx.env.path("lib/9/v2/user.txt");
+    defer testing.allocator.free(user);
+    _ = try std.Io.Dir.cwd().statFile(fx.env.io, user, .{});
+
+    var spins: usize = 0;
+    while (fx.rec(id_a).job.step == .extracting and spins < 5000) : (spins += 1) {
+        fx.env.io.sleep(std.Io.Duration.fromMilliseconds(1), .real) catch {};
+        fx.dl.stepOnce(1000);
+    }
+    // The re-extract ran (and failed on the fake zip): not "registering".
+    try testing.expectEqual(model.Step.failed, fx.rec(id_a).job.step);
+    try testing.expectEqual(model.FailReason.bad_archive, fx.rec(id_a).job.fail.?);
+    const old = try fx.env.path("lib/9/v1/old.txt");
+    defer testing.allocator.free(old);
+    try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(fx.env.io, old, .{}));
+    const marker = try fx.env.path("lib/9/v1/" ++ EXTRACT_MARKER);
+    defer testing.allocator.free(marker);
+    _ = try std.Io.Dir.cwd().statFile(fx.env.io, marker, .{});
+}
+
+test "downloader: history keeps the newest 500 terminal jobs in the store and in memory" {
+    var fx = try Fx.create(.{});
+    defer fx.destroy();
+    for (0..501) |_| _ = try fx.dl.store.insert(&storedJob(.done));
+    var m = storedJob(.queued);
+    m.engine = .megacmd;
+    _ = try fx.dl.store.insert(&m);
+    try fx.dl.load();
+    fx.dl.stepOnce(1000); // the MEGAcmd job fails → 502 terminal
+    try testing.expectEqual(@as(usize, 500), fx.dl.recs.items.len);
+    try testing.expectEqual(@as(u64, 3), fx.dl.recs.items[0].job.id);
+    const rows = try fx.dl.store.loadAll(testing.allocator);
+    defer store_mod.Store.freeJobs(testing.allocator, rows);
+    try testing.expectEqual(@as(usize, 500), rows.len);
+    try testing.expectEqual(@as(u64, 3), rows[0].id);
+}
+
+test "downloader: torrent without its .torrent body after restart fails without retry; a magnet still starts" {
+    var fx = try Fx.create(.{});
+    defer fx.destroy();
+    const script = [_]model.Progress{.{ .phase = .downloading }};
+    fx.fake.script = &script;
+    var t = storedJob(.queued);
+    t.engine = .aria2_torrent;
+    t.source_href = "rpdl:5";
+    const id_t = try fx.dl.store.insert(&t);
+    var mg = t;
+    mg.source_href = "magnet:?xt=urn:btih:abc";
+    const id_m = try fx.dl.store.insert(&mg);
+    try fx.dl.load();
+    fx.dl.stepOnce(1000);
+    const jt = fx.rec(id_t).job;
+    try testing.expectEqual(model.Step.failed, jt.step);
+    try testing.expectEqual(model.FailReason.unknown, jt.fail.?);
+    try testing.expectEqualStrings("Torrent file is gone after restart — start the download again", jt.step_detail);
+    try testing.expectEqual(@as(u8, 3), jt.attempts);
+    try testing.expectEqual(@as(?i64, null), jt.next_retry_at);
+    try testing.expectEqual(@as(usize, 1), fx.fake.started);
+    try testing.expectEqual(model.Step.downloading, fx.rec(id_m).job.step);
+}
+
+test "downloader: reconcile finds the single finished file in dest_dir when final_path is unknown" {
+    var fx = try Fx.create(.{});
+    defer fx.destroy();
+    const script = [_]model.Progress{.{ .phase = .removed }};
+    fx.fake.script = &script;
+    try fx.env.writeFile("dl/aria2_http/1/game.bin", "payload");
+    try fx.env.writeFile("dl/aria2_http/1/.hidden", "");
+    const dest = try fx.env.path("dl/aria2_http/1/");
+    defer testing.allocator.free(dest);
+    var j = storedJob(.downloading);
+    j.engine_ref = "gone";
+    j.dest_dir = dest;
+    const id = try fx.dl.store.insert(&j);
+    try fx.dl.load();
+    fx.dl.reconcile();
+    try testing.expectEqual(model.Step.installing, fx.rec(id).job.step);
+    try testing.expect(std.mem.endsWith(u8, fx.rec(id).job.final_path.?, "game.bin"));
 }

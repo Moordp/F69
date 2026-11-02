@@ -37,6 +37,8 @@ pub const Engine = struct {
         cancel: *const fn (*anyopaque, ref: []const u8) errs.Error!void,
         finalPath: *const fn (*anyopaque, std.mem.Allocator, ref: []const u8) errs.Error!?[]u8,
         setLimits: *const fn (*anyopaque, policy.Plan) errs.Error!void,
+        /// Cheap check, no I/O and no spawn: is the engine's backend running?
+        isAlive: *const fn (*anyopaque) bool,
     };
 
     pub fn start(self: Engine, spec: StartSpec) errs.Error![]u8 {
@@ -60,6 +62,9 @@ pub const Engine = struct {
     pub fn setLimits(self: Engine, plan: policy.Plan) errs.Error!void {
         return self.vt.setLimits(self.ptr, plan);
     }
+    pub fn isAlive(self: Engine) bool {
+        return self.vt.isAlive(self.ptr);
+    }
 };
 
 /// Scripted engine for tests. `poll` returns `script[min(idx, len-1)]`
@@ -73,6 +78,8 @@ pub const FakeEngine = struct {
     paused: bool = false,
     cancelled: bool = false,
     last_plan: ?policy.Plan = null,
+    /// What `isAlive` reports.
+    alive: bool = true,
 
     pub fn engine(self: *FakeEngine) Engine {
         return .{ .ptr = self, .vt = &vtable };
@@ -86,6 +93,7 @@ pub const FakeEngine = struct {
         .cancel = cancelImpl,
         .finalPath = finalPathImpl,
         .setLimits = setLimitsImpl,
+        .isAlive = isAliveImpl,
     };
 
     fn cast(p: *anyopaque) *FakeEngine {
@@ -117,6 +125,9 @@ pub const FakeEngine = struct {
     }
     fn setLimitsImpl(p: *anyopaque, plan: policy.Plan) errs.Error!void {
         cast(p).last_plan = plan;
+    }
+    fn isAliveImpl(p: *anyopaque) bool {
+        return cast(p).alive;
     }
 };
 

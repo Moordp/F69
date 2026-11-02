@@ -142,6 +142,7 @@ pub const Aria2Engine = struct {
         .cancel = cancelImpl,
         .finalPath = finalPathImpl,
         .setLimits = setLimitsImpl,
+        .isAlive = isAliveImpl,
     };
 
     fn cast(p: *anyopaque) *Aria2Engine {
@@ -299,6 +300,10 @@ pub const Aria2Engine = struct {
         }
         for (dead.items) |k| self.forget(k);
         self.last_plan = plan;
+    }
+
+    fn isAliveImpl(p: *anyopaque) bool {
+        return cast(p).daemonAlive();
     }
 
     fn fmtLimit(buf: *[24]u8, n: u64) []const u8 {
