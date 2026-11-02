@@ -52,6 +52,8 @@ pub const Status = struct {
     seeder: bool = false,
     /// Set when status == "error".
     error_message: ?[]u8 = null,
+    /// aria2's numeric `errorCode` (sent as a string). Set when status == "error".
+    error_code: ?u32 = null,
 
     pub fn deinit(self: *Status, alloc: std.mem.Allocator) void {
         alloc.free(self.status);
@@ -79,8 +81,8 @@ pub const Daemon = struct {
     port: u16,
     /// Daemon-wide seed-ratio target. aria2 keeps every completed
     /// torrent seeding until uploaded ≥ `seed_ratio` × downloaded.
-    /// Clamped to ≥ 2.0 by the caller — anything below is below the
-    /// RPDL community "give back twice what you took" floor.
+    /// Floored to 1.0 in `init` — anything below is below the
+    /// "give back what you took" floor.
     seed_ratio: f32 = 5.0,
     /// Daemon-wide seed-time cap in minutes; 0 = no cap. Passed as
     /// `--seed-time` at spawn when non-zero.
@@ -125,7 +127,7 @@ pub const Daemon = struct {
             .download_dir = download_dir,
             .session_path = session_path,
             .port = if (port == 0) pickRandomPort(io) else port,
-            .seed_ratio = @max(seed_ratio, 2.0),
+            .seed_ratio = @max(seed_ratio, 1.0),
             .seed_time_min = seed_time_min,
             .secret = undefined,
         };
@@ -259,6 +261,10 @@ pub const Daemon = struct {
         /// which on a flaky CDN turns transient 5xx into a tight
         /// loop of mini-stalls; a 2-5 s delay smooths that out.
         retry_wait: ?u8 = null,
+        /// aria2 `dir`: where to write this download. Null = daemon default.
+        dir: ?[]const u8 = null,
+        /// aria2 `out`: output file name inside `dir`. Null = from the URL.
+        out: ?[]const u8 = null,
     };
 
     /// Add a URL to the download queue. Returns the aria2 GID, owned by
@@ -301,6 +307,8 @@ pub const Daemon = struct {
             const s = std.fmt.bufPrint(&n_buf, "{d}", .{n}) catch return errs.Error.OutOfMemory;
             try appendJsonOpt(&body, self.alloc, &first, "retry-wait", s);
         }
+        if (opts.dir) |d| try appendJsonOpt(&body, self.alloc, &first, "dir", d);
+        if (opts.out) |o| try appendJsonOpt(&body, self.alloc, &first, "out", o);
         body.appendSlice(self.alloc, "}]}") catch return errs.Error.OutOfMemory;
 
         const resp = try self.rpcRaw(body.items);
@@ -415,7 +423,7 @@ pub const Daemon = struct {
             "{{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"aria2.tellStatus\",\"params\":[\"token:{s}\",\"{s}\",[" ++
                 "\"gid\",\"status\",\"totalLength\",\"completedLength\",\"downloadSpeed\"," ++
                 "\"uploadSpeed\",\"uploadLength\",\"numSeeders\",\"connections\"," ++
-                "\"seeder\",\"bittorrent\",\"errorMessage\"]]}}",
+                "\"seeder\",\"bittorrent\",\"errorMessage\",\"errorCode\"]]}}",
             .{ self.secretSlice(), gid },
         ) catch return errs.Error.AriaInvalidResponse;
 
@@ -474,6 +482,7 @@ pub const Daemon = struct {
         if (ariaStr(r, "errorMessage")) |em| {
             out.error_message = self.alloc.dupe(u8, em) catch return errs.Error.OutOfMemory;
         }
+        if (ariaU64(r, "errorCode")) |c| out.error_code = @intCast(@min(c, std.math.maxInt(u32)));
         return out;
     }
 
@@ -718,9 +727,8 @@ pub const Daemon = struct {
             // ---- BitTorrent defaults ----
             // Seed each completed torrent until uploaded ≥ N× the
             // downloaded amount, where N comes from
-            // `<data_root>/aria2_seed_ratio` (default 5.0, min 2.0).
-            // 2.0 is the RPDL community floor ("give back twice what
-            // you took"); 5.0 is generous and gets a "good seeder"
+            // `<data_root>/aria2_seed_ratio` (default 5.0, min 1.0).
+            // 1.0 is the floor ("give back what you took"); 5.0 is generous and gets a "good seeder"
             // reputation, which helps for rare/old torrents.
             //
             // IMPORTANT: Do NOT pass `--seed-time=0`. The aria2 docs

@@ -47,6 +47,10 @@ pub const store = @import("store.zig");
 /// Downloader v2 bandwidth and slot policy.
 pub const policy = @import("policy.zig");
 
+/// Downloader v2 engine interface, fake engine and aria2 engine.
+pub const engine = @import("engine.zig");
+pub const engine_aria2 = @import("engine_aria2.zig");
+
 // Force `zig test` to discover the per-file `test {}` blocks. Without
 // these references the compiler only pulls in the symbols re-exported
 // above, so nested tests would silently no-op.
@@ -59,4 +63,6 @@ test {
     _ = model;
     _ = store;
     _ = policy;
+    _ = engine;
+    _ = engine_aria2;
 }
