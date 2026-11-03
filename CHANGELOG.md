@@ -2,6 +2,11 @@
 
 All notable, user-facing changes. Dates are YYYY-MM-DD.
 
+## [0.15.18] - 2026-11-03
+
+### Added
+- Hosts that need a click in the browser now work: f69 opens the page, watches your Downloads folder for the file (or you paste the final link / pick the file), then verifies, extracts and installs it. New 'Needs you' section on the Downloads page; watched-folder setting.
+
 ## [0.15.17] - 2026-11-03
 
 ### Added
