@@ -42,6 +42,7 @@ test {
     _ = @import("catalogue_view.zig");
     _ = @import("dl_rows.zig");
     _ = @import("threads/mailbox.zig");
+    _ = @import("threads/activity.zig");
     _ = @import("dl_controls.zig");
     _ = @import("screens/downloads.zig");
 }
