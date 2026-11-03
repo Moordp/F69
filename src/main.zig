@@ -430,11 +430,14 @@ pub fn main(init: std.process.Init) !void {
     // The resolver's HTTP goes through the shared F95 client (declared
     // above, so it outlives the downloader and its resolve workers).
     var dl_http: downloads.http_f95.F95Http = .{ .client = &f95_client };
+    // Hosts that need clicking: the page opens in the user's browser and
+    // the file comes back through the watched folder / paste / pick.
+    var browser_engine: downloads.engine_browser.BrowserEngine = .{ .alloc = gpa, .io = init.io };
     var dl = downloads.Downloader.init(
         gpa,
         init.io,
         dl_store,
-        .{ .aria2 = aria2_engine.engine() },
+        .{ .aria2 = aria2_engine.engine(), .browser = browser_engine.engine() },
         .{ .downloads_root = downloads_root, .library_root = library_root, .data_root = data_root },
         dl_settings,
         .{ .http = dl_http.http() },
@@ -442,6 +445,9 @@ pub fn main(init: std.process.Init) !void {
     // `deinit` stops the thread (no-op if the UI already did) and closes
     // the store.
     defer dl.deinit();
+    // Default watched folder (empty `watch_dir` setting) comes from the
+    // environment ($XDG_DOWNLOAD_DIR / ~/Downloads, %USERPROFILE%\Downloads).
+    dl.environ = init.minimal.environ;
 
     // Recipe repository — points at `<config>/f69/recipes/`. UI's
     // per-game Download button calls `findGameByThread` against this.

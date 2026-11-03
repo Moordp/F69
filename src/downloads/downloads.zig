@@ -35,6 +35,7 @@ pub const policy = @import("policy.zig");
 /// Downloader v2 engine interface, fake engine and aria2 engine.
 pub const engine = @import("engine.zig");
 pub const engine_aria2 = @import("engine_aria2.zig");
+pub const engine_browser = @import("engine_browser.zig");
 
 /// Downloader v2 thread: command queue, snapshot, events, step driver.
 pub const downloader = @import("downloader.zig");
@@ -65,6 +66,7 @@ test {
     _ = policy;
     _ = engine;
     _ = engine_aria2;
+    _ = engine_browser;
     _ = downloader;
     _ = workers;
     _ = resolve;

@@ -20,6 +20,7 @@ const archive = @import("archive.zig");
 const workers = @import("workers.zig");
 const resolve = @import("resolve.zig");
 const errs = @import("errors.zig");
+const watch = @import("watch.zig");
 const dl_classify = @import("f95").dl_classify;
 
 const Engine = engine_mod.Engine;
@@ -45,6 +46,11 @@ const BROWSER_STAGE2 = "This host needs the browser flow (coming in 0.15.18)";
 const RESOLVE_CACHE_S: i64 = 3600;
 /// At most one "sign in to F95" prompt per this many seconds.
 const SIGN_IN_EVENT_S: i64 = 60;
+/// The watched folder is listed at most this often (spec §3.5 watch.zig).
+const SCAN_EVERY_S: i64 = 2;
+/// `step_detail` of a job waiting in the browser; " · watching <dir>" is
+/// appended when the watched folder is known.
+const WAITING_BROWSER = "Waiting for you in the browser";
 
 /// `EnqueueUrl.host` for a pasted link. Resolved only when it points at a
 /// known file host or an F95 masked link (`needsResolve`).
@@ -263,6 +269,42 @@ const ResolveWorker = struct {
     }
 };
 
+/// Moves a file the user downloaded in the browser into the job's
+/// `dest_dir` (rename, or copy + delete across devices: slow on NTFS, so
+/// never on the downloader loop). Owns copies of its paths; the moved path
+/// in the result is taken by `reapMoves`, or freed by `destroy`.
+const MoveWorker = struct {
+    const Out = anyerror!watch.MovedPath;
+    w: workers.Worker(Out) = .{},
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    src: []u8,
+    dest_dir: []u8,
+
+    fn run(mw: *MoveWorker) Out {
+        return watch.moveIntoDir(mw.io, mw.alloc, mw.src, mw.dest_dir);
+    }
+
+    fn destroy(mw: *MoveWorker) void {
+        mw.w.join();
+        if (mw.w.take()) |out| {
+            if (out) |m| mw.alloc.free(m.path) else |_| {}
+        }
+        mw.alloc.free(mw.src);
+        mw.alloc.free(mw.dest_dir);
+        mw.alloc.destroy(mw);
+    }
+};
+
+/// A watched-folder file matched by size or as the only waiting job: shown
+/// as a prompt until the user answers `accept_match`. All owned.
+pub const PendingMatch = struct {
+    path: []u8,
+    size: u64,
+    /// "Found <name> (<size>) — use it?"
+    prompt: []u8,
+};
+
 /// One job as the downloader holds it.
 pub const Rec = struct {
     job: model.Job,
@@ -270,6 +312,15 @@ pub const Rec = struct {
     torrent_bytes: ?[]u8 = null,
     worker: ?*PostWorker = null,
     resolve_worker: ?*ResolveWorker = null,
+    /// Browser flow: a picked or matched file on its way into `dest_dir`.
+    move_worker: ?*MoveWorker = null,
+    /// When the job last entered `awaiting_user` (or the app restarted
+    /// with it there); watched-folder files older than this are ignored.
+    awaiting_since: i64 = 0,
+    pending_match: ?PendingMatch = null,
+    /// Watched-folder files the user said "no" to (owned paths). They are
+    /// not offered again, to this job or any other.
+    rejected: std.ArrayList([]u8) = .empty,
     /// step/detail/fail/etc. changed since the last `store.update`.
     dirty: bool = false,
     bytes_dirty: bool = false,
@@ -295,7 +346,18 @@ pub const Downloader = struct {
     /// Workers whose job was removed while they ran; freed once done.
     orphans: std.ArrayList(*PostWorker) = .empty,
     resolve_orphans: std.ArrayList(*ResolveWorker) = .empty,
+    move_orphans: std.ArrayList(*MoveWorker) = .empty,
     loaded: bool = false,
+    /// Process environment, for the default watched folder when
+    /// `settings.watch_dir` is empty. Set by main before `start`; null
+    /// (tests) = no default folder.
+    environ: ?std.process.Environ = null,
+    /// Watched-folder scanner, created on first use while a job waits in
+    /// the browser; dropped when `reload_settings` changes the folder.
+    scanner: ?watch.Scanner = null,
+    /// The scanner's folder (owned; `Scanner.dir` borrows it).
+    scanner_dir: ?[]u8 = null,
+    last_scan_at: ?i64 = null,
     /// When the last `sign_in_needed = .f95` event went out.
     sign_in_at: ?i64 = null,
 
@@ -359,6 +421,9 @@ pub const Downloader = struct {
         self.orphans.deinit(self.alloc);
         for (self.resolve_orphans.items) |rw| rw.destroy();
         self.resolve_orphans.deinit(self.alloc);
+        for (self.move_orphans.items) |mw| mw.destroy();
+        self.move_orphans.deinit(self.alloc);
+        self.dropScanner();
         for (self.cmds.items) |*q| q.arena.deinit();
         self.cmds.deinit(self.alloc);
         for (self.events.items) |e| freeEvent(self.alloc, e);
@@ -490,6 +555,8 @@ pub const Downloader = struct {
         self.pollEngines(now);
         self.reapWorkers(now);
         self.reapResolves(now);
+        self.reapMoves(now);
+        self.scanWatched(now);
         self.tickRetries(now);
         self.schedule(now);
         self.persist(now);
@@ -562,7 +629,10 @@ pub const Downloader = struct {
                 self.cancelEngine(r);
                 self.apply(r, .{ .step = .done, .attempts = r.job.attempts }, now);
             },
-            .paste_link, .pick_file, .accept_match, .open_again => log.warn("{s} not implemented yet (stage 3); dropped", .{@tagName(q.cmd)}),
+            .paste_link => |p| if (self.awaiting(p.job_id)) |r| self.pasteLink(r, p.url, now),
+            .pick_file => |p| if (self.awaiting(p.job_id)) |r| self.adoptFile(r, p.path, now),
+            .accept_match => |m| if (self.awaiting(m.job_id)) |r| self.acceptMatch(r, m.accept, now),
+            .open_again => |id| if (self.awaiting(id)) |r| self.pushEvent(.{ .open_url = browserUrl(&r.job) }),
             .install_ack => |id| if (self.find(id)) |r| {
                 self.transition(r, .install_ack, now, null);
                 // A re-install of a finished torrent has no transfer left
@@ -608,6 +678,8 @@ pub const Downloader = struct {
             log.warn("reload_settings dropped: out of memory", .{});
             return;
         };
+        // Compare before the old strings are freed with their arena.
+        if (!std.mem.eql(u8, self.settings.watch_dir, copy.watch_dir)) self.dropScanner();
         if (self.settings_arena) |*old| old.deinit();
         self.settings_arena = arena;
         self.settings = copy;
@@ -816,6 +888,9 @@ pub const Downloader = struct {
     /// than an hour ago is reused (spec §3.6). Otherwise a worker resolves
     /// it; `reapResolves` reads the result.
     fn startResolve(self: *Downloader, r: *Rec, now: i64) void {
+        // Already known to need the browser (retried, or resolving at a
+        // restart): straight back to waiting for the user.
+        if (r.job.engine == .browser) return self.transition(r, .needs_browser, now, null);
         const identity: model.Input = .{ .resolved = .{ .engine = r.job.engine } };
         const rc = self.resolver orelse return self.transition(r, identity, now, null);
         if (!needsResolve(&r.job)) return self.transition(r, identity, now, null);
@@ -824,9 +899,14 @@ pub const Downloader = struct {
                 if (now - at < RESOLVE_CACHE_S) return self.transition(r, identity, now, null);
             }
         }
+        self.spawnResolve(r, rc, r.job.source_href, now);
+    }
+
+    /// Resolve `href` on a worker for a job in `resolving`.
+    fn spawnResolve(self: *Downloader, r: *Rec, rc: ResolverCtx, href: []const u8, now: i64) void {
         const rw = self.alloc.create(ResolveWorker) catch
             return self.resolveFailed(r, error.OutOfMemory, now);
-        rw.* = .{ .alloc = self.alloc, .http = rc.http, .href = self.alloc.dupe(u8, r.job.source_href) catch {
+        rw.* = .{ .alloc = self.alloc, .http = rc.http, .href = self.alloc.dupe(u8, href) catch {
             self.alloc.destroy(rw);
             return self.resolveFailed(r, error.OutOfMemory, now);
         } };
@@ -918,19 +998,26 @@ pub const Downloader = struct {
         errdefer self.alloc.free(new_url);
         const new_headers = try dupeList(self.alloc, headers);
         errdefer freeList(self.alloc, new_headers);
-        if (engine != j.engine) {
-            const dir = try std.fmt.allocPrint(self.alloc, "{s}" ++ sep ++ "{s}" ++ sep ++ "{d}" ++ sep, .{
-                self.roots.downloads_root, @tagName(engine), j.id,
-            });
-            freeStr(self.alloc, j.dest_dir);
-            j.dest_dir = dir;
-            j.engine = engine;
-        }
+        try self.switchEngine(r, engine);
         if (j.resolved_url) |old| freeStr(self.alloc, old);
         j.resolved_url = new_url;
         freeList(self.alloc, j.resolved_headers);
         j.resolved_headers = new_headers;
         j.resolved_at = now;
+        r.dirty = true;
+    }
+
+    /// A changed engine moves the job's (still empty) download folder under
+    /// the new engine's name.
+    fn switchEngine(self: *Downloader, r: *Rec, engine: model.EngineKind) !void {
+        const j = &r.job;
+        if (engine == j.engine) return;
+        const dir = try std.fmt.allocPrint(self.alloc, "{s}" ++ sep ++ "{s}" ++ sep ++ "{d}" ++ sep, .{
+            self.roots.downloads_root, @tagName(engine), j.id,
+        });
+        freeStr(self.alloc, j.dest_dir);
+        j.dest_dir = dir;
+        j.engine = engine;
         r.dirty = true;
     }
 
@@ -1076,6 +1163,7 @@ pub const Downloader = struct {
         const fail_changed = !std.meta.eql(j.fail, t.fail);
         const other_changed = !std.meta.eql(j.next_retry_at, t.next_retry_at) or j.attempts != t.attempts or !std.meta.eql(j.resume_step, t.resume_step);
         if (!step_changed and !detail_changed and !fail_changed and !other_changed) return;
+        if (step_changed and j.step == .awaiting_user) self.clearPending(r);
 
         if (detail_changed) self.setStr(&j.step_detail, t.detail);
         j.step = t.step;
@@ -1130,13 +1218,13 @@ pub const Downloader = struct {
             .open_browser => {
                 // Stage 2 has no browser engine: the job cannot wait for
                 // a browser download that nothing would pick up.
-                if (self.engines.browser == null) return self.apply(r, .{
+                const eng = self.engines.browser orelse return self.apply(r, .{
                     .step = .failed,
                     .fail = .unknown,
                     .detail = BROWSER_STAGE2,
                     .attempts = r.job.attempts,
                 }, now);
-                self.pushEvent(.{ .open_url = r.job.source_href });
+                self.openBrowser(r, eng, now);
             },
         }
     }
@@ -1277,6 +1365,259 @@ pub const Downloader = struct {
         self.pushEvent(.{ .install_ready = ev });
     }
 
+    // ------------------------------------------------------------ browser flow
+
+    /// The job, when it is waiting for the user; otherwise null (logged:
+    /// a late click on a row that has moved on).
+    fn awaiting(self: *Downloader, id: u64) ?*Rec {
+        const r = self.find(id) orelse return null;
+        if (r.job.step == .awaiting_user) return r;
+        log.info("job {d}: browser command ignored in step {s}", .{ id, @tagName(r.job.step) });
+        return null;
+    }
+
+    /// `open_browser` effect: the job now belongs to the browser engine.
+    /// Raises `open_url` once; the watched folder takes over from here.
+    fn openBrowser(self: *Downloader, r: *Rec, eng: Engine, now: i64) void {
+        const j = &r.job;
+        self.cancelEngine(r);
+        self.switchEngine(r, .browser) catch log.warn("job {d}: out of memory switching to the browser engine", .{j.id});
+        j.engine_ref = eng.start(.{
+            .job_id = j.id,
+            .url = browserUrl(j),
+            .headers = &.{},
+            .dest_dir = j.dest_dir,
+            .out_name = null,
+            .torrent_bytes = null,
+        }) catch |e| blk: {
+            log.warn("job {d}: browser engine start failed: {s}", .{ j.id, @errorName(e) });
+            break :blk null;
+        };
+        r.awaiting_since = now;
+        r.dirty = true;
+        self.clearPending(r);
+        self.pushEvent(.{ .open_url = browserUrl(j) });
+        var buf: [1024]u8 = undefined;
+        const detail = if (self.watchDir()) |d|
+            std.fmt.bufPrint(&buf, WAITING_BROWSER ++ " · watching {s}", .{d}) catch WAITING_BROWSER
+        else
+            WAITING_BROWSER;
+        self.apply(r, .{ .step = .awaiting_user, .detail = detail, .attempts = j.attempts }, now);
+    }
+
+    /// The watched folder (`settings.watch_dir`, else the OS default), or
+    /// null when neither is known. Creates the scanner on first use.
+    fn watchDir(self: *Downloader) ?[]const u8 {
+        if (self.scanner_dir) |d| return d;
+        const dir: []u8 = if (self.settings.watch_dir.len > 0)
+            self.alloc.dupe(u8, self.settings.watch_dir) catch return null
+        else if (self.environ) |env|
+            watch.defaultWatchDir(self.alloc, self.io, env) catch |e| {
+                log.warn("no default watched folder: {s}", .{@errorName(e)});
+                return null;
+            }
+        else
+            return null;
+        self.scanner_dir = dir;
+        self.scanner = watch.Scanner.init(self.alloc, self.io, dir);
+        return dir;
+    }
+
+    fn dropScanner(self: *Downloader) void {
+        if (self.scanner) |*s| s.deinit();
+        self.scanner = null;
+        if (self.scanner_dir) |d| self.alloc.free(d);
+        self.scanner_dir = null;
+        self.last_scan_at = null;
+    }
+
+    /// `paste_link`: a direct link switches the job to aria2 (or MEGAcmd)
+    /// and starts it; an F95 masked link goes through the resolver first.
+    fn pasteLink(self: *Downloader, r: *Rec, raw: []const u8, now: i64) void {
+        const url = std.mem.trim(u8, raw, " \t\r\n");
+        const is_url = std.mem.startsWith(u8, url, "http://") or
+            std.mem.startsWith(u8, url, "https://") or
+            std.mem.startsWith(u8, url, "magnet:");
+        if (!is_url) return self.toast("That is not a link");
+        const p = dl_classify.parseHref(url);
+        if (p.wrapper == .masked) {
+            const rc = self.resolver orelse return self.toast("That link cannot be resolved here — paste the final download link");
+            self.cancelEngine(r);
+            self.apply(r, .{ .step = .resolving, .attempts = r.job.attempts }, now);
+            return self.spawnResolve(r, rc, url, now);
+        }
+        const kind: model.EngineKind = if (p.host == .mega) .megacmd else engineKindForUrl(url);
+        // Drop the browser ref while the job still names the browser engine.
+        self.cancelEngine(r);
+        self.setResolved(r, url, &.{}, kind, now) catch return self.toast("Could not use the link (out of memory)");
+        self.transition(r, .{ .resolved = .{ .engine = kind } }, now, null);
+    }
+
+    /// Move `src` into the job's folder on a worker; `reapMoves` continues
+    /// at `file_arrived`. One move per job at a time.
+    fn adoptFile(self: *Downloader, r: *Rec, src: []const u8, now: i64) void {
+        if (r.move_worker != null) return;
+        const mw = self.alloc.create(MoveWorker) catch return self.moveFailed(r, error.OutOfMemory, now);
+        mw.* = .{ .alloc = self.alloc, .io = self.io, .src = undefined, .dest_dir = undefined };
+        mw.src = self.alloc.dupe(u8, src) catch {
+            self.alloc.destroy(mw);
+            return self.moveFailed(r, error.OutOfMemory, now);
+        };
+        mw.dest_dir = self.alloc.dupe(u8, r.job.dest_dir) catch {
+            self.alloc.free(mw.src);
+            self.alloc.destroy(mw);
+            return self.moveFailed(r, error.OutOfMemory, now);
+        };
+        mw.w.spawn(MoveWorker.run, .{mw}) catch |e| {
+            log.err("job {d}: move worker spawn failed: {s}", .{ r.job.id, @errorName(e) });
+            mw.destroy();
+            return self.moveFailed(r, e, now);
+        };
+        r.move_worker = mw;
+        self.clearPending(r);
+        self.touched = true;
+    }
+
+    fn moveFailed(self: *Downloader, r: *Rec, e: anyerror, now: i64) void {
+        var buf: [96]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Could not move the file: {s}", .{@errorName(e)}) catch "Could not move the file";
+        self.apply(r, .{ .step = .failed, .fail = .unknown, .detail = msg, .attempts = r.job.attempts }, now);
+    }
+
+    fn orphanMove(self: *Downloader, mw: *MoveWorker) void {
+        self.move_orphans.append(self.alloc, mw) catch mw.destroy();
+    }
+
+    fn reapMoves(self: *Downloader, now: i64) void {
+        for (self.recs.items) |r| {
+            const mw = r.move_worker orelse continue;
+            const out = mw.w.take() orelse continue;
+            r.move_worker = null;
+            mw.destroy();
+            const moved = out catch |e| {
+                log.warn("job {d}: moving the file failed: {s}", .{ r.job.id, @errorName(e) });
+                if (r.job.step == .awaiting_user) self.moveFailed(r, e, now);
+                continue;
+            };
+            if (r.job.step != .awaiting_user) {
+                // Cancelled while the file moved: it stays in dest_dir.
+                log.info("job {d}: file moved to '{s}' after the job left awaiting_user", .{ r.job.id, moved.path });
+                self.alloc.free(moved.path);
+                continue;
+            }
+            if (r.job.final_path) |old| freeStr(self.alloc, old);
+            r.job.final_path = moved.path;
+            r.dirty = true;
+            self.cancelEngine(r);
+            self.transition(r, .{ .file_arrived = moved.path }, now, null);
+        }
+        var i: usize = 0;
+        while (i < self.move_orphans.items.len) {
+            const mw = self.move_orphans.items[i];
+            if (mw.w.phase.load(.acquire) == @backingInt(workers.Phase.done)) {
+                mw.destroy();
+                _ = self.move_orphans.swapRemove(i);
+            } else i += 1;
+        }
+    }
+
+    fn acceptMatch(self: *Downloader, r: *Rec, accept: bool, now: i64) void {
+        const pm = r.pending_match orelse return;
+        if (accept) {
+            // `adoptFile` copies the path, then clears the prompt.
+            self.adoptFile(r, pm.path, now);
+            self.clearPending(r);
+            return;
+        }
+        r.rejected.append(self.alloc, pm.path) catch self.alloc.free(pm.path);
+        self.alloc.free(pm.prompt);
+        r.pending_match = null;
+        self.touched = true;
+    }
+
+    fn proposeMatch(self: *Downloader, r: *Rec, c: watch.Candidate) void {
+        const path = self.alloc.dupe(u8, c.path) catch return;
+        var buf: [32]u8 = undefined;
+        const prompt = std.fmt.allocPrint(self.alloc, "Found {s} ({s}) — use it?", .{ c.name, humanSize(&buf, c.size) }) catch {
+            self.alloc.free(path);
+            return;
+        };
+        self.clearPending(r);
+        r.pending_match = .{ .path = path, .size = c.size, .prompt = prompt };
+        self.touched = true;
+    }
+
+    fn clearPending(self: *Downloader, r: *Rec) void {
+        const pm = r.pending_match orelse return;
+        self.alloc.free(pm.path);
+        self.alloc.free(pm.prompt);
+        r.pending_match = null;
+        self.touched = true;
+    }
+
+    /// A file that is already proposed, moving, or rejected.
+    fn candidateTaken(self: *Downloader, path: []const u8) bool {
+        for (self.recs.items) |r| {
+            if (r.pending_match) |pm| if (std.mem.eql(u8, pm.path, path)) return true;
+            if (r.move_worker) |mw| if (std.mem.eql(u8, mw.src, path)) return true;
+            for (r.rejected.items) |p| if (std.mem.eql(u8, p, path)) return true;
+        }
+        return false;
+    }
+
+    /// List the watched folder (at most every `SCAN_EVERY_S`, only while a
+    /// job waits in the browser) and match ready files to waiting jobs:
+    /// a name match is adopted at once, a size / only-one match becomes a
+    /// prompt. Runs on the downloader thread, never the UI thread.
+    fn scanWatched(self: *Downloader, now: i64) void {
+        var any = false;
+        for (self.recs.items) |r| {
+            if (r.job.step == .awaiting_user) any = true;
+        }
+        if (!any) return;
+        if (self.last_scan_at) |at| if (now - at < SCAN_EVERY_S) return;
+        self.last_scan_at = now;
+        _ = self.watchDir() orelse return;
+        const sc = if (self.scanner) |*s| s else return;
+        const cands = sc.scan(now) catch |e| {
+            log.warn("watched folder scan failed: {s}", .{@errorName(e)});
+            return;
+        };
+        defer watch.freeCandidates(self.alloc, cands);
+        if (cands.len == 0) return;
+
+        var free_cands: std.ArrayList(watch.Candidate) = .empty;
+        defer free_cands.deinit(self.alloc);
+        for (cands) |c| {
+            if (self.candidateTaken(c.path)) continue;
+            free_cands.append(self.alloc, c) catch return;
+        }
+        var waiting: std.ArrayList(watch.Waiting) = .empty;
+        defer waiting.deinit(self.alloc);
+        for (self.recs.items) |r| {
+            if (r.job.step != .awaiting_user or r.move_worker != null or r.pending_match != null) continue;
+            waiting.append(self.alloc, .{
+                .job_id = r.job.id,
+                .expected_name = expectedName(r.job.resolved_url orelse r.job.source_href),
+                .expected_size = r.job.bytes_total,
+                .since = r.awaiting_since,
+            }) catch return;
+        }
+        while (watch.matchFile(free_cands.items, waiting.items)) |m| {
+            const c = free_cands.orderedRemove(m.candidate_idx);
+            for (waiting.items, 0..) |w, i| {
+                if (w.job_id != m.job_id) continue;
+                _ = waiting.orderedRemove(i);
+                break;
+            }
+            const r = self.find(m.job_id) orelse continue;
+            switch (m.confidence) {
+                .name => self.adoptFile(r, c.path, now),
+                .size, .only_one => self.proposeMatch(r, c),
+            }
+        }
+    }
+
     // ------------------------------------------------------------ reconcile
 
     fn reconcileOne(self: *Downloader, r: *Rec, now: i64) void {
@@ -1286,7 +1627,14 @@ pub const Downloader = struct {
             .installing => self.raiseInstall(r),
             .verifying => self.startVerify(r, now),
             .extracting => self.startExtract(r, now),
-            .awaiting_user => if (j.engine != .browser) self.apply(r, .{ .step = .queued, .attempts = j.attempts }, now),
+            // Browser jobs keep waiting; the page is not opened again (the
+            // row offers "Open page again"). Files downloaded while f69
+            // was closed are older than `awaiting_since` and not matched.
+            .awaiting_user => if (j.engine != .browser) {
+                self.apply(r, .{ .step = .queued, .attempts = j.attempts }, now);
+            } else {
+                r.awaiting_since = now;
+            },
             .resolving => self.apply(r, .{ .step = .queued, .attempts = j.attempts }, now),
             .fetching_metadata, .finding_peers, .downloading, .paused, .seeding => {
                 const ref = j.engine_ref orelse return self.apply(r, .{ .step = .queued, .attempts = j.attempts }, now);
@@ -1421,7 +1769,7 @@ pub const Downloader = struct {
         for (self.recs.items, views) |r, *v| {
             var j = try cloneJob(a, r.job);
             j.resolved_headers = &.{};
-            v.* = .{ .job = j };
+            v.* = .{ .job = j, .awaiting_prompt = if (r.pending_match) |pm| try a.dupe(u8, pm.prompt) else null };
             totals.dl_speed += r.job.dl_speed;
             totals.ul_speed += r.job.ul_speed;
             switch (r.job.step) {
@@ -1466,6 +1814,10 @@ pub const Downloader = struct {
     fn freeRec(self: *Downloader, r: *Rec) void {
         if (r.worker) |pw| self.orphan(pw);
         if (r.resolve_worker) |rw| self.orphanResolve(rw);
+        if (r.move_worker) |mw| self.orphanMove(mw);
+        self.clearPending(r);
+        for (r.rejected.items) |p| self.alloc.free(p);
+        r.rejected.deinit(self.alloc);
         freeJobStrings(self.alloc, &r.job);
         if (r.torrent_bytes) |b| self.alloc.free(b);
         self.alloc.destroy(r);
@@ -1486,6 +1838,32 @@ fn needsResolve(j: *const model.Job) bool {
         if (std.mem.eql(u8, j.host, h.label())) return true;
     }
     return false;
+}
+
+/// What the browser opens: the resolver's link when there is one, else
+/// what the user clicked.
+fn browserUrl(j: *const model.Job) []const u8 {
+    return j.resolved_url orelse j.source_href;
+}
+
+/// The last path segment of `href` when it looks like a file name (has a
+/// '.', no query string); else null. Used for watched-folder name matches.
+fn expectedName(href: []const u8) ?[]const u8 {
+    if (std.mem.indexOfAny(u8, href, "?#") != null) return null;
+    const slash = std.mem.lastIndexOfScalar(u8, href, '/') orelse return null;
+    const name = href[slash + 1 ..];
+    if (name.len == 0 or std.mem.indexOfScalar(u8, name, '.') == null) return null;
+    return name;
+}
+
+/// "512 B", "1.5 KB", "700.0 MB", "2.3 GB".
+fn humanSize(buf: []u8, n: u64) []const u8 {
+    if (n < 1024) return std.fmt.bufPrint(buf, "{d} B", .{n}) catch "?";
+    const units = [_][]const u8{ "KB", "MB", "GB", "TB" };
+    var v: f64 = @as(f64, @floatFromInt(n)) / 1024.0;
+    var i: usize = 0;
+    while (v >= 1024.0 and i < units.len - 1) : (i += 1) v /= 1024.0;
+    return std.fmt.bufPrint(buf, "{d:.1} {s}", .{ v, units[i] }) catch "?";
 }
 
 /// "Win", "Linux", "Mac", "Android" for the set flags joined by "/";
@@ -1749,10 +2127,12 @@ fn freeEvent(a: std.mem.Allocator, ev: UiEvent) void {
 
 const testing = std.testing;
 const test_env = @import("util_test_env");
+const engine_browser = @import("engine_browser.zig");
 
 const Fx = struct {
     env: test_env.TestEnv,
     fake: engine_mod.FakeEngine,
+    browser: engine_browser.BrowserEngine,
     dl: Downloader,
     dl_root: []u8,
     lib_root: []u8,
@@ -1763,11 +2143,21 @@ const Fx = struct {
     }
 
     fn createWith(settings: policy.Settings, resolver: ?ResolverCtx) !*Fx {
+        return createFull(settings, resolver, false);
+    }
+
+    /// With a `BrowserEngine` wired in (stage 3).
+    fn createBrowser(settings: policy.Settings, resolver: ?ResolverCtx) !*Fx {
+        return createFull(settings, resolver, true);
+    }
+
+    fn createFull(settings: policy.Settings, resolver: ?ResolverCtx, with_browser: bool) !*Fx {
         const a = testing.allocator;
         const fx = try a.create(Fx);
         errdefer a.destroy(fx);
         fx.env = try test_env.TestEnv.init(a, "downloader");
         fx.fake = .{ .alloc = a, .script = &.{} };
+        fx.browser = .{ .alloc = a, .io = fx.env.io };
         fx.dl_root = try fx.env.path("dl");
         fx.lib_root = try fx.env.path("lib");
         fx.data_root = try fx.env.path("data");
@@ -1775,7 +2165,7 @@ const Fx = struct {
             a,
             fx.env.io,
             try store_mod.Store.openMemory(a),
-            .{ .aria2 = fx.fake.engine() },
+            .{ .aria2 = fx.fake.engine(), .browser = if (with_browser) fx.browser.engine() else null },
             .{ .downloads_root = fx.dl_root, .library_root = fx.lib_root, .data_root = fx.data_root },
             settings,
             resolver,
@@ -2638,4 +3028,255 @@ test "downloader: resolve worker errors fail as network with a retry; cancel/rem
     try settle(fx, 1003);
     try testing.expectEqual(model.Step.cancelled, a.job.step);
     try testing.expectEqual(@as(?*Rec, null), fx.dl.find(b_id));
+}
+
+// ---------------------------------------------------------------- browser flow tests
+
+/// Queue a Workupload catalogue link (the resolver says needs-browser
+/// without any HTTP) and settle it into `awaiting_user`. Returns the id.
+fn awaitBrowser(fx: *Fx, ord: i64, href: []const u8) !u64 {
+    try seedCatalogue(fx, 9, ord, href, "Workupload", "");
+    fx.dl.send(.{ .enqueue_catalogue = .{ .game_thread_id = 9, .href = href, .title = "G" } });
+    try settle(fx, 1000);
+    for (fx.dl.recs.items) |r| {
+        if (std.mem.eql(u8, r.job.source_href, href)) return r.job.id;
+    }
+    return error.JobNotFound;
+}
+
+/// Tick until no job has a move worker; gives up after 5 s.
+fn waitMoves(fx: *Fx, now: i64) !void {
+    fx.dl.stepOnce(now);
+    var waited_ms: u32 = 0;
+    while (blk: {
+        for (fx.dl.recs.items) |r| if (r.move_worker != null) break :blk true;
+        break :blk false;
+    }) {
+        if (waited_ms >= 5000) return error.MoveWorkerTimeout;
+        fx.env.io.sleep(std.Io.Duration.fromMilliseconds(5), .real) catch {};
+        waited_ms += 5;
+        fx.dl.stepOnce(now);
+    }
+}
+
+/// The snapshot prompt of job `id` (copied into `buf`), or null.
+fn snapPrompt(fx: *Fx, id: u64, buf: []u8) ?[]const u8 {
+    const snap = fx.dl.snapshot();
+    defer fx.dl.releaseSnapshot();
+    for (snap.jobs) |v| {
+        if (v.job.id != id) continue;
+        const p = v.awaiting_prompt orelse return null;
+        @memcpy(buf[0..p.len], p);
+        return buf[0..p.len];
+    }
+    return null;
+}
+
+fn fileExists(fx: *Fx, path: []const u8) bool {
+    _ = std.Io.Dir.cwd().statFile(fx.env.io, path, .{}) catch return false;
+    return true;
+}
+
+test "browser: needs_browser → awaiting_user + open_url event once; open_again raises again" {
+    var stub: ResolveStub = .{ .routes = &.{} };
+    var fx = try Fx.createBrowser(.{}, stub.ctx());
+    defer fx.destroy();
+    const href = "https://workupload.com/file/xyz";
+    const id = try awaitBrowser(fx, 0, href);
+
+    const j = fx.rec(id).job;
+    try testing.expectEqual(model.Step.awaiting_user, j.step);
+    try testing.expectEqual(model.EngineKind.browser, j.engine);
+    var ref_buf: [32]u8 = undefined;
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&ref_buf, "browser:{d}", .{id}), j.engine_ref.?);
+    try testing.expectEqualStrings(WAITING_BROWSER, j.step_detail);
+    try testing.expect(std.mem.indexOf(u8, j.dest_dir, "browser") != null);
+    try testing.expectEqual(@as(i64, 1000), fx.rec(id).awaiting_since);
+    try testing.expectEqual(@as(usize, 0), fx.fake.started);
+    {
+        const evs = fx.dl.drainEvents(testing.allocator);
+        defer Downloader.freeEvents(testing.allocator, evs);
+        try testing.expectEqual(@as(usize, 1), countEvents(evs, .open_url));
+        for (evs) |e| if (e == .open_url) try testing.expectEqualStrings(href, e.open_url);
+    }
+
+    // Waiting holds no slot and raises nothing more on later ticks.
+    fx.dl.stepOnce(1001);
+    fx.dl.stepOnce(1005);
+    {
+        const evs = fx.dl.drainEvents(testing.allocator);
+        defer Downloader.freeEvents(testing.allocator, evs);
+        try testing.expectEqual(@as(usize, 0), countEvents(evs, .open_url));
+    }
+    try testing.expectEqual(@as(u32, 0), fx.dl.activeCounts().files_downloading);
+    {
+        const snap = fx.dl.snapshot();
+        defer fx.dl.releaseSnapshot();
+        try testing.expectEqual(@as(u32, 1), snap.totals.waiting_for_user);
+    }
+
+    fx.dl.send(.{ .open_again = id });
+    fx.dl.stepOnce(1006);
+    const evs = fx.dl.drainEvents(testing.allocator);
+    defer Downloader.freeEvents(testing.allocator, evs);
+    try testing.expectEqual(@as(usize, 1), countEvents(evs, .open_url));
+    try testing.expectEqual(model.Step.awaiting_user, fx.rec(id).job.step);
+}
+
+test "browser: paste_link direct → aria2 engine started" {
+    var stub: ResolveStub = .{ .routes = &.{} };
+    var fx = try Fx.createBrowser(.{}, stub.ctx());
+    defer fx.destroy();
+    const id = try awaitBrowser(fx, 0, "https://workupload.com/file/xyz");
+
+    fx.dl.send(.{ .paste_link = .{ .job_id = id, .url = "  https://cdn.example.invalid/Game.zip\n" } });
+    fx.dl.stepOnce(1001);
+    const j = fx.rec(id).job;
+    try testing.expectEqual(@as(usize, 1), fx.fake.started);
+    try testing.expectEqual(model.Step.downloading, j.step);
+    try testing.expectEqual(model.EngineKind.aria2_http, j.engine);
+    try testing.expectEqualStrings("https://cdn.example.invalid/Game.zip", j.resolved_url.?);
+    try testing.expectEqual(@as(?i64, 1001), j.resolved_at);
+    try testing.expect(std.mem.indexOf(u8, j.dest_dir, "aria2_http") != null);
+    try testing.expectEqualStrings("fake-1", j.engine_ref.?);
+}
+
+test "browser: paste_link non-URL → toast and still awaiting" {
+    var stub: ResolveStub = .{ .routes = &.{} };
+    var fx = try Fx.createBrowser(.{}, stub.ctx());
+    defer fx.destroy();
+    const id = try awaitBrowser(fx, 0, "https://workupload.com/file/xyz");
+    Downloader.freeEvents(testing.allocator, fx.dl.drainEvents(testing.allocator));
+
+    fx.dl.send(.{ .paste_link = .{ .job_id = id, .url = "just some words" } });
+    fx.dl.stepOnce(1001);
+    try testing.expectEqual(model.Step.awaiting_user, fx.rec(id).job.step);
+    try testing.expectEqual(@as(usize, 0), fx.fake.started);
+    const evs = fx.dl.drainEvents(testing.allocator);
+    defer Downloader.freeEvents(testing.allocator, evs);
+    try testing.expectEqual(@as(usize, 1), evs.len);
+    try testing.expectEqualStrings("That is not a link", evs[0].toast);
+}
+
+test "browser: pick_file → verifying (file moved into dest_dir)" {
+    var stub: ResolveStub = .{ .routes = &.{} };
+    var fx = try Fx.createBrowser(.{}, stub.ctx());
+    defer fx.destroy();
+    const id = try awaitBrowser(fx, 0, "https://workupload.com/file/xyz");
+    try fx.env.writeFile("picked/My Game.bin", "payload");
+    const src = try fx.env.path("picked/My Game.bin");
+    defer testing.allocator.free(src);
+
+    fx.dl.send(.{ .pick_file = .{ .job_id = id, .path = src } });
+    try waitMoves(fx, 1001);
+
+    const j = fx.rec(id).job;
+    try testing.expect(j.step != .awaiting_user and j.step != .failed);
+    const fp = j.final_path.?;
+    try testing.expect(std.mem.startsWith(u8, fp, j.dest_dir));
+    try testing.expect(std.mem.endsWith(u8, fp, "My Game.bin"));
+    try testing.expect(fileExists(fx, fp));
+    try testing.expect(!fileExists(fx, src));
+    try testing.expectEqual(@as(?[]const u8, null), j.engine_ref);
+
+    const logged = try fx.dl.store.listEvents(testing.allocator, id);
+    defer store_mod.Store.freeEvents(testing.allocator, logged);
+    var saw_verifying = false;
+    for (logged) |e| {
+        if (e.step == .verifying) saw_verifying = true;
+    }
+    try testing.expect(saw_verifying);
+}
+
+test "browser: scanner name match adopts; only_one match sets prompt; accept=false keeps waiting and rejects the file; accept=true adopts" {
+    var stub: ResolveStub = .{ .routes = &.{} };
+    var fx = try Fx.createBrowser(.{}, stub.ctx());
+    defer fx.destroy();
+    try fx.env.mkdirP("watch");
+    const wd = try fx.env.path("watch");
+    defer testing.allocator.free(wd);
+    fx.dl.send(.{ .reload_settings = .{ .watch_dir = wd } });
+    fx.dl.stepOnce(900);
+
+    const a = try awaitBrowser(fx, 0, "https://workupload.com/file/Game.bin");
+    const b = try awaitBrowser(fx, 1, "https://workupload.com/file/xyz");
+    try testing.expect(std.mem.indexOf(u8, fx.rec(b).job.step_detail, " · watching ") != null);
+    try testing.expect(std.mem.endsWith(u8, fx.rec(b).job.step_detail, wd));
+
+    // Name match: adopted at once, no prompt.
+    try fx.env.writeFile("watch/Game.bin", "aaaa");
+    fx.dl.stepOnce(1002); // first seen
+    try waitMoves(fx, 1005); // stable for 3 s → matched → moved
+    {
+        const ja = fx.rec(a).job;
+        try testing.expect(ja.step != .awaiting_user and ja.step != .failed);
+        try testing.expect(std.mem.startsWith(u8, ja.final_path.?, ja.dest_dir));
+        try testing.expect(std.mem.endsWith(u8, ja.final_path.?, "Game.bin"));
+    }
+    var pbuf: [128]u8 = undefined;
+    try testing.expectEqual(model.Step.awaiting_user, fx.rec(b).job.step);
+    try testing.expectEqual(@as(?[]const u8, null), snapPrompt(fx, b, &pbuf));
+
+    // Only one job waits: an unknown file becomes a prompt.
+    try fx.env.writeFile("watch/other.bin", "bbbbbb");
+    fx.dl.stepOnce(1008);
+    fx.dl.stepOnce(1011);
+    try testing.expectEqualStrings("Found other.bin (6 B) — use it?", snapPrompt(fx, b, &pbuf).?);
+
+    // No: the prompt goes away, the job keeps waiting, the file is not offered again.
+    fx.dl.send(.{ .accept_match = .{ .job_id = b, .accept = false } });
+    fx.dl.stepOnce(1012);
+    try testing.expectEqual(@as(?[]const u8, null), snapPrompt(fx, b, &pbuf));
+    try testing.expectEqual(@as(usize, 1), fx.rec(b).rejected.items.len);
+    fx.dl.stepOnce(1014);
+    fx.dl.stepOnce(1017);
+    try testing.expectEqual(model.Step.awaiting_user, fx.rec(b).job.step);
+    try testing.expectEqual(@as(?[]const u8, null), snapPrompt(fx, b, &pbuf));
+
+    // Yes: the proposed file is adopted.
+    try fx.env.writeFile("watch/third.bin", "cc");
+    fx.dl.stepOnce(1020);
+    fx.dl.stepOnce(1023);
+    try testing.expectEqualStrings("Found third.bin (2 B) — use it?", snapPrompt(fx, b, &pbuf).?);
+    fx.dl.send(.{ .accept_match = .{ .job_id = b, .accept = true } });
+    try waitMoves(fx, 1024);
+    const jb = fx.rec(b).job;
+    try testing.expect(jb.step != .awaiting_user and jb.step != .failed);
+    try testing.expect(std.mem.endsWith(u8, jb.final_path.?, "third.bin"));
+    try testing.expectEqual(@as(?[]const u8, null), snapPrompt(fx, b, &pbuf));
+    const other = try fx.env.path("watch/other.bin");
+    defer testing.allocator.free(other);
+    try testing.expect(fileExists(fx, other));
+}
+
+test "browser: reconcile keeps awaiting_user without re-opening" {
+    var fx = try Fx.createBrowser(.{}, null);
+    defer fx.destroy();
+    var j = storedJob(.awaiting_user);
+    j.engine = .browser;
+    j.engine_ref = "browser:1";
+    j.step_detail = WAITING_BROWSER;
+    const id = try fx.dl.store.insert(&j);
+
+    try fx.dl.load();
+    fx.dl.reconcile();
+    try testing.expectEqual(model.Step.awaiting_user, fx.rec(id).job.step);
+    try testing.expect(fx.rec(id).awaiting_since > 1000);
+    const evs = fx.dl.drainEvents(testing.allocator);
+    defer Downloader.freeEvents(testing.allocator, evs);
+    try testing.expectEqual(@as(usize, 0), evs.len);
+
+    fx.dl.stepOnce(2000);
+    try testing.expectEqual(model.Step.awaiting_user, fx.rec(id).job.step);
+}
+
+test "browser: expectedName and humanSize" {
+    try testing.expectEqualStrings("Game.zip", expectedName("https://x.invalid/a/Game.zip").?);
+    try testing.expectEqual(@as(?[]const u8, null), expectedName("https://x.invalid/file/xyz"));
+    try testing.expectEqual(@as(?[]const u8, null), expectedName("https://x.invalid/a.zip?dl=1"));
+    try testing.expectEqual(@as(?[]const u8, null), expectedName("https://x.invalid/"));
+    var buf: [32]u8 = undefined;
+    try testing.expectEqualStrings("512 B", humanSize(&buf, 512));
+    try testing.expectEqualStrings("1.5 KB", humanSize(&buf, 1536));
+    try testing.expectEqualStrings("2.0 GB", humanSize(&buf, 2 * 1024 * 1024 * 1024));
 }
