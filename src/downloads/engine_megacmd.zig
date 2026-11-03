@@ -31,6 +31,12 @@ const STDOUT_MAX = 64 * 1024;
 const LINE_MAX = 1024;
 /// `ensureServer` waits this long for `whoami` to answer.
 const SERVER_PROBE_MS = 2000;
+/// After f69 started the server itself, it re-probes for up to this long.
+const SERVER_START_WAIT_MS: i64 = 10_000;
+/// Pause between those re-probes.
+const SERVER_REPROBE_PAUSE_MS = 250;
+/// Bound for the one warm-up `whoami` before the first piped client.
+const WARM_UP_MS = 10_000;
 const NO_SERVER_MSG = "MEGAcmdServer.exe not found next to MegaClient.exe";
 
 pub const LoginResult = enum { ok, already_logged_in, needs_auth_code, bad_credentials, not_installed };
@@ -202,16 +208,36 @@ const Probe = struct {
     alloc: Allocator,
     io: Io,
     argv: []const []const u8,
+    /// No pipes: stdin/stdout/stderr all ignored (the warm-up run, so a
+    /// server the client auto-starts inherits null handles, never ours).
+    quiet: bool = false,
     /// 0 running, 1 done, 2 abandoned.
     state: std.atomic.Value(u8) = .init(0),
     answered: bool = false,
 
     fn run(p: *Probe) void {
-        if (util_proc.run(p.alloc, p.io, p.argv, .{ .stderr = .ignore })) |res| {
+        if (p.quiet) {
+            p.answered = runQuiet(p.io, p.argv);
+        } else if (util_proc.run(p.alloc, p.io, p.argv, .{ .stderr = .ignore })) |res| {
             p.answered = res.exit_code == 0 or res.exit_code == megacmd.EXIT_NOT_LOGGED_IN;
             p.alloc.free(res.stdout);
         } else |_| {}
         if (p.state.cmpxchgStrong(0, 1, .acq_rel, .acquire) != null) p.destroy();
+    }
+
+    fn runQuiet(io: Io, argv: []const []const u8) bool {
+        var child = std.process.spawn(io, .{
+            .argv = argv,
+            .stdin = .ignore,
+            .stdout = .ignore,
+            .stderr = .ignore,
+            .create_no_window = true,
+        }) catch return false;
+        const term = child.wait(io) catch return false;
+        return switch (term) {
+            .exited => |c| c == 0 or c == megacmd.EXIT_NOT_LOGGED_IN,
+            else => false,
+        };
     }
     fn destroy(p: *Probe) void {
         megacmd.freeArgv(p.alloc, p.argv);
@@ -225,6 +251,8 @@ pub const MegaEngine = struct {
     /// Owned; freed by `deinit`.
     located: megacmd.Located,
     runs: std.AutoHashMapUnmanaged(u64, *Run) = .empty,
+    /// Warm-up `whoami`: 0 not run, 1 running, 2 done (see `warmUp`).
+    warm: std.atomic.Value(u8) = .init(0),
     /// Download cap (bytes/s, 0 = unlimited) last sent to `mega-speedlimit`.
     last_limit: ?u64 = null,
     /// Cap from the latest plan; applied only while a run exists, so an
@@ -286,12 +314,20 @@ pub const MegaEngine = struct {
     }
 
     /// `ensureServer`, and false on Windows when there is no server binary
-    /// to start: then no MEGAcmd client may run (its own auto-start would
-    /// hold our pipes open and hang the reader). Always true on Linux.
+    /// to start, or when the server f69 started does not answer within
+    /// `SERVER_START_WAIT_MS`: then no MEGAcmd client may run (its own
+    /// auto-start would hold our pipes open and hang the reader). On every
+    /// OS the first call also runs the pipe-less warm-up `whoami`.
     fn serverReady(self: *MegaEngine) bool {
-        if (builtin.os.tag != .windows) return true;
+        if (builtin.os.tag != .windows) {
+            self.warmUp();
+            return true;
+        }
         const server = self.located.server orelse return false;
-        if (self.probeServer()) return true;
+        if (self.probeServer()) {
+            self.warmUp();
+            return true;
+        }
         log.info("MEGAcmd server not answering; starting {s}", .{server});
         var child = std.process.spawn(self.io, .{
             .argv = &.{server},
@@ -309,15 +345,60 @@ pub const MegaEngine = struct {
             std.os.windows.CloseHandle(child.thread_handle);
             child.id = null;
         }
+        // Only a server that answers is ready: a client run before that
+        // could auto-start a second server holding our pipes.
+        if (!waitForServer(LiveProbe{ .eng = self }, SERVER_START_WAIT_MS)) {
+            log.warn("MEGAcmd server started but did not answer within {d} s", .{@divTrunc(SERVER_START_WAIT_MS, 1000)});
+            return false;
+        }
+        self.warmUp();
         return true;
+    }
+
+    /// `waitForServer` context for the real server.
+    const LiveProbe = struct {
+        eng: *MegaEngine,
+        fn probe(c: LiveProbe) bool {
+            return c.eng.probeServer();
+        }
+        fn nowMs(c: LiveProbe) i64 {
+            return Io.Clock.Timestamp.now(c.eng.io, .awake).raw.toMilliseconds();
+        }
+        fn pause(c: LiveProbe) void {
+            c.eng.io.sleep(Io.Duration.fromMilliseconds(SERVER_REPROBE_PAUSE_MS), .real) catch {};
+        }
+    };
+
+    /// Once per process, before the first piped client: one `whoami` with
+    /// every std handle ignored, so a server the client auto-starts
+    /// inherits null handles, not a later `mega-get`'s pipes (which would
+    /// then never reach EOF and hang cancel / quit). Bounded by
+    /// `WARM_UP_MS`; a second caller waits for the first.
+    fn warmUp(self: *MegaEngine) void {
+        if (self.warm.load(.acquire) == 2) return;
+        if (self.warm.cmpxchgStrong(0, 1, .acq_rel, .acquire) == null) {
+            if (!self.probeWith(WARM_UP_MS, true)) log.info("MEGAcmd warm-up whoami did not answer", .{});
+            self.warm.store(2, .release);
+            return;
+        }
+        var waited: u32 = 0;
+        while (self.warm.load(.acquire) != 2 and waited < WARM_UP_MS) : (waited += 50) {
+            self.io.sleep(Io.Duration.fromMilliseconds(50), .real) catch return;
+        }
     }
 
     /// True when `whoami` answered (signed in or out) within 2 s.
     fn probeServer(self: *MegaEngine) bool {
+        return self.probeWith(SERVER_PROBE_MS, false);
+    }
+
+    /// `whoami` on a detached thread, waited for at most `max_ms`.
+    fn probeWith(self: *MegaEngine, max_ms: u32, quiet: bool) bool {
         const p = self.alloc.create(Probe) catch return false;
         p.* = .{
             .alloc = self.alloc,
             .io = self.io,
+            .quiet = quiet,
             .argv = megacmd.argv(self.alloc, self.located, "whoami", &.{}) catch {
                 self.alloc.destroy(p);
                 return false;
@@ -329,7 +410,7 @@ pub const MegaEngine = struct {
         };
         t.detach();
         var waited: u32 = 0;
-        while (waited < SERVER_PROBE_MS) : (waited += 50) {
+        while (waited < max_ms) : (waited += 50) {
             if (p.state.load(.acquire) == 1) {
                 const ok = p.answered;
                 p.destroy();
@@ -650,6 +731,17 @@ pub const MegaEngine = struct {
     }
 };
 
+/// Probe until `ctx.probe()` answers or `max_ms` (by `ctx.nowMs()`) have
+/// passed since the first try, pausing `ctx.pause()` between tries.
+fn waitForServer(ctx: anytype, max_ms: i64) bool {
+    const start = ctx.nowMs();
+    while (true) {
+        if (ctx.probe()) return true;
+        if (ctx.nowMs() - start >= max_ms) return false;
+        ctx.pause();
+    }
+}
+
 /// `path` is `dir` or inside it (a separator follows the prefix).
 fn underDir(path: []const u8, dir: []const u8) bool {
     const d = std.mem.trimEnd(u8, dir, "/\\");
@@ -812,6 +904,7 @@ const FakeMega = struct {
         try f.tmp.dir.writeFile(io, .{ .sub_path = "mega-get", .data = fake_script, .flags = .{ .permissions = .executable_file } });
         try f.tmp.dir.symLink(io, "mega-get", "mega-transfers", .{});
         try f.tmp.dir.symLink(io, "mega-get", "mega-speedlimit", .{});
+        try f.tmp.dir.symLink(io, "mega-get", "mega-whoami", .{});
         if (opts.exit_code) |c| try f.tmp.dir.writeFile(io, .{ .sub_path = "exit_code", .data = c });
         if (opts.hang) try f.tmp.dir.writeFile(io, .{ .sub_path = "hang", .data = "" });
         if (opts.bigout) try f.tmp.dir.writeFile(io, .{ .sub_path = "bigout", .data = "" });
@@ -875,6 +968,10 @@ test "mega engine: progress parsed, exit 0 → transfer_done with final_path" {
     const lg = try f.argvLog();
     defer testing.allocator.free(lg);
     try testing.expect(std.mem.indexOf(u8, lg, "mega-get https://mega.nz/file/abc#key ") != null);
+    // The pipe-less warm-up whoami runs once, before the first mega-get.
+    const w = std.mem.indexOf(u8, lg, "mega-whoami").?;
+    try testing.expect(w < std.mem.indexOf(u8, lg, "mega-get ").?);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, lg, "mega-whoami"));
     // A finished run is not looked up in mega-transfers on cancel.
     try testing.expect(std.mem.indexOf(u8, lg, "mega-transfers") == null);
 }
@@ -998,6 +1095,31 @@ test "mega engine: a run without a server binary fails engine_missing" {
     try testing.expectEqualStrings(NO_SERVER_MSG, p.msg);
     try testing.expectEqual(@as(?[]u8, null), try e.finalPath(testing.allocator, "mega:7"));
     try e.cancel("mega:7");
+}
+
+test "mega engine: waitForServer re-probes until the server answers, and gives up at the deadline" {
+    const Fake = struct {
+        now: i64 = 0,
+        tries: u32 = 0,
+        answer_on: u32 = 0, // 0 = never
+        fn probe(c: *@This()) bool {
+            c.tries += 1;
+            return c.answer_on != 0 and c.tries >= c.answer_on;
+        }
+        fn nowMs(c: *@This()) i64 {
+            return c.now;
+        }
+        fn pause(c: *@This()) void {
+            c.now += 1000;
+        }
+    };
+    var never: Fake = .{};
+    try testing.expect(!waitForServer(&never, 10_000));
+    // Tries at t = 0, 1 s … 10 s, then the deadline has passed.
+    try testing.expectEqual(@as(u32, 11), never.tries);
+    var third: Fake = .{ .answer_on = 3 };
+    try testing.expect(waitForServer(&third, 10_000));
+    try testing.expectEqual(@as(u32, 3), third.tries);
 }
 
 test "mega engine: underDir needs a separator after the prefix" {
