@@ -377,6 +377,7 @@ fn renderBannerHero(frame: *Frame, game: *const library.Game) void {
             var acts = dvui.box(@src(), .{ .dir = .horizontal }, .{ .gravity_y = 1.0 });
             defer acts.deinit();
             renderHeroUpdate(frame, game);
+            renderHeroConvert(frame, game);
             renderHeroPlay(frame, game);
         }
     }
@@ -413,6 +414,28 @@ fn renderHeroUpdate(frame: *Frame, game: *const library.Game) void {
         }
     }
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
+}
+
+/// Hero "Convert" — shown next to Play after a Play attempt found only a
+/// Windows build for this game (`state.last_play_needs_convert`). Greyed
+/// while a tool runs for the game; a click then only toasts.
+fn renderHeroConvert(frame: *Frame, game: *const library.Game) void {
+    const tid = game.f95_thread_id;
+    if (frame.state.last_play_needs_convert != tid) return;
+    if (actions.installDotState(frame, game) == .none) return;
+    var opts: dvui.Options = if (frame.book.liveForGame(tid)) toolBusyOpts() else .{};
+    opts.gravity_y = 0.5;
+    opts.tag = "hero-convert";
+    if (components.iconButton(@src(), "Convert", entypo.cycle, opts)) {
+        actions.doConvertGame(frame, game);
+    }
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
+}
+
+/// Grey `.control` look for a tool button while a tool runs for the game
+/// (same as the busy Download button).
+fn toolBusyOpts() dvui.Options {
+    return .{ .style = .control, .color_text = .{ .color = .{ .r = 0x80, .g = 0x80, .b = 0x80 } } };
 }
 
 fn renderHeroPlay(frame: *Frame, game: *const library.Game) void {
@@ -2463,7 +2486,9 @@ fn renderEngineTools(frame: *Frame, game: *library.Game) void {
         .padding = .{ .x = 0, .y = 0, .w = 0, .h = 4 },
     });
     defer row.deinit();
-    if (components.iconButton(@src(), "Convert (Win\u{2192}Linux)", entypo.cycle, .{})) {
+    var convert_opts: dvui.Options = if (frame.book.liveForGame(game.f95_thread_id)) toolBusyOpts() else .{};
+    convert_opts.tag = "tools-convert";
+    if (components.iconButton(@src(), "Convert (Win\u{2192}Linux)", entypo.cycle, convert_opts)) {
         actions.doConvertGame(frame, game);
     }
     if (components.iconOnly(@src(), "Help", entypo.help, .{
@@ -2845,6 +2870,22 @@ fn renderDetailInstallButton(frame: *Frame, game: *const library.Game) void {
 fn renderDetailStatusLine(frame: *Frame, game: *const library.Game) void {
     const state = frame.state;
 
+    // A per-game tool (Convert, …) on the compute thread: title, phase,
+    // progress and Cancel. Task 12 polishes this strip.
+    if (actions.liveViewForGame(frame, dvui.currentWindow().arena(), game.f95_thread_id)) |v| {
+        var msg_buf: [240]u8 = undefined;
+        const msg = toolStripText(&msg_buf, v.title, v.phase, v.status == .queued);
+        renderStatusStrip(frame, .{
+            .id = @truncate(game.f95_thread_id ^ 0xC0),
+            .text = msg,
+            .accent = tokens.toDvui(tokens.active.acc, dvui.Color),
+            .progress = if (v.total > 0) @as(u32, downloads.progress.percent(v.done, v.total)) else null,
+            .view_link = false,
+            .cancel_id = v.id,
+        });
+        return;
+    }
+
     if (state.pending_rpdl_download != null) {
         renderStatusStrip(frame, .{
             .id = @intCast(game.f95_thread_id ^ 0xA0),
@@ -2938,7 +2979,23 @@ const StatusStripArgs = struct {
     accent: dvui.Color,
     progress: ?u32,
     view_link: bool,
+    /// Activity id: shows a Cancel button (tag `tools-cancel`).
+    cancel_id: ?u64 = null,
 };
+
+/// "Convert · Game — Copying runtime file 3 / 10" / "… — waiting".
+pub fn toolStripText(buf: []u8, title: []const u8, phase: []const u8, queued: bool) []const u8 {
+    if (queued) return std.fmt.bufPrint(buf, "{s} \u{2014} waiting", .{title}) catch title;
+    if (phase.len == 0) return title;
+    return std.fmt.bufPrint(buf, "{s} \u{2014} {s}", .{ title, phase }) catch title;
+}
+
+test "toolStripText" {
+    var buf: [96]u8 = undefined;
+    try std.testing.expectEqualStrings("Convert \u{2014} waiting", toolStripText(&buf, "Convert", "", true));
+    try std.testing.expectEqualStrings("Convert", toolStripText(&buf, "Convert", "", false));
+    try std.testing.expectEqualStrings("Convert \u{2014} Writing launcher", toolStripText(&buf, "Convert", "Writing launcher", false));
+}
 
 fn renderStatusStrip(frame: *Frame, args: StatusStripArgs) void {
     var wrap = dvui.box(@src(), .{ .dir = .vertical }, .{
@@ -2974,6 +3031,17 @@ fn renderStatusStrip(frame: *Frame, args: StatusStripArgs) void {
                 .padding = .{ .x = 6, .y = 2, .w = 6, .h = 2 },
             })) {
                 frame.state.screen = .downloads;
+            }
+        }
+        if (args.cancel_id) |aid| {
+            if (components.iconButton(@src(), "Cancel", entypo.cross, .{
+                .id_extra = args.id,
+                .style = .control,
+                .gravity_y = 0.5,
+                .padding = .{ .x = 6, .y = 2, .w = 6, .h = 2 },
+                .tag = "tools-cancel",
+            })) {
+                frame.book.requestCancel(aid);
             }
         }
     }

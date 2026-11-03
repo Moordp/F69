@@ -18,4 +18,5 @@ test {
     _ = activity;
     _ = events;
     _ = work_thread;
+    _ = @import("jobs/convert.zig");
 }

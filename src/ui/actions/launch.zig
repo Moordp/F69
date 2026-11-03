@@ -22,6 +22,8 @@ const job_mod = @import("../job.zig");
 const mods_act = @import("mods.zig");
 const common = @import("common.zig");
 const saves_link = @import("saves_link.zig");
+const threads_act = @import("threads.zig");
+const threads = types.threads;
 
 const Frame = types.Frame;
 const State = types.State;
@@ -185,10 +187,12 @@ pub fn doLaunchGame(frame: *Frame, game: *const library.Game) void {
                 var buf: [320]u8 = undefined;
                 const msg = std.fmt.bufPrint(
                     &buf,
-                    "Found Windows binary ({s}) — click Convert to translate it for Linux first.",
+                    "Found a Windows build ({s}). Click Convert (hero row or Tools tab) to make it run on Linux.",
                     .{win_exe},
-                ) catch "Windows build — click Convert first.";
+                ) catch "Found a Windows build. Click Convert (hero row or Tools tab) to make it run on Linux.";
                 state.notifyErr(msg);
+                // Shows the hero Convert button until a convert finishes.
+                state.last_play_needs_convert = game.f95_thread_id;
             } else {
                 var nbuf: [384]u8 = undefined;
                 state.notifyErr(noRunnableMsg(&nbuf, install_path));
@@ -1307,7 +1311,7 @@ pub fn findLinuxLauncher(io: std.Io, alloc: std.mem.Allocator, install_path: []c
 /// Same shape as `findLinuxLauncher`, but for `.exe`. Used to give
 /// the user an actionable "needs conversion" message instead of just
 /// "nothing runnable found".
-fn findWindowsExe(io: std.Io, alloc: std.mem.Allocator, install_path: []const u8, buf: []u8) ?[]const u8 {
+pub fn findWindowsExe(io: std.Io, alloc: std.mem.Allocator, install_path: []const u8, buf: []u8) ?[]const u8 {
     _ = alloc;
     var root = std.Io.Dir.cwd().openDir(io, install_path, .{ .iterate = true }) catch return null;
     defer root.close(io);
@@ -1560,184 +1564,99 @@ fn installHasAny(io: std.Io, install_path: []const u8, names: []const []const u8
 /// /usr/share/f69/... without falling back to a stale portable tree.
 /// Returns the dir slice (written into `buf`) when the binary inside
 /// it exists, null otherwise.
-fn mkxpZBundled(frame: *Frame, exe_dir: []const u8, buf: []u8) ?[]const u8 {
+pub fn mkxpZBundled(io: std.Io, exe_dir: []const u8, buf: []u8) ?[]const u8 {
     // FHS path first — /usr/bin/f69 → /usr/share/f69/data/mkxp-z/.
     if (std.fmt.bufPrint(buf, "{s}/../share/f69/data/mkxp-z", .{exe_dir})) |dir| {
         var bin_buf: [640]u8 = undefined;
         if (std.fmt.bufPrint(&bin_buf, "{s}/mkxp-z.x86_64", .{dir})) |bin| {
-            if (std.Io.Dir.cwd().access(frame.io, bin, .{})) |_| return dir else |_| {}
+            if (std.Io.Dir.cwd().access(io, bin, .{})) |_| return dir else |_| {}
         } else |_| {}
     } else |_| {}
     // Portable path — <exe_dir>/data/mkxp-z/.
     const portable = std.fmt.bufPrint(buf, "{s}/data/mkxp-z", .{exe_dir}) catch return null;
     var bin_buf: [640]u8 = undefined;
     const bin = std.fmt.bufPrint(&bin_buf, "{s}/mkxp-z.x86_64", .{portable}) catch return null;
-    std.Io.Dir.cwd().access(frame.io, bin, .{}) catch return null;
+    std.Io.Dir.cwd().access(io, bin, .{}) catch return null;
     return portable;
 }
 
 /// Probe the mkxp-z FHS-libs bundle dir. Same portable-vs-FHS dual
 /// check as `mkxpZBundled`. Empty (returns null) on non-NixOS builds
 /// where the bundle wasn't materialised.
-fn mkxpZExtraLibsDir(frame: *Frame, exe_dir: []const u8, buf: []u8) ?[]const u8 {
+pub fn mkxpZExtraLibsDir(io: std.Io, exe_dir: []const u8, buf: []u8) ?[]const u8 {
     if (std.fmt.bufPrint(buf, "{s}/../share/f69/data/compat-resources/mkxp-z-fhs-libs/lib", .{exe_dir})) |dir| {
-        if (std.Io.Dir.cwd().access(frame.io, dir, .{})) |_| return dir else |_| {}
+        if (std.Io.Dir.cwd().access(io, dir, .{})) |_| return dir else |_| {}
     } else |_| {}
     const portable = std.fmt.bufPrint(buf, "{s}/data/compat-resources/mkxp-z-fhs-libs/lib", .{exe_dir}) catch return null;
-    std.Io.Dir.cwd().access(frame.io, portable, .{}) catch return null;
+    std.Io.Dir.cwd().access(io, portable, .{}) catch return null;
     return portable;
 }
 
+/// Convert (Win→Linux) for the game's latest install, on the compute
+/// thread. The UI thread only reads the install row and the compat rows
+/// already recorded for it (one query each, on click) and copies them
+/// into the job; root peel, engine detection, preset match, the convert
+/// and the compat file work all run in `threads/jobs/convert.zig`. The
+/// result arrives as `.work_done` and is toasted by `handleWorkDone`.
 pub fn doConvertGame(frame: *Frame, game: *const library.Game) void {
     const state = frame.state;
+    const tid = game.f95_thread_id;
+    const alloc = frame.lib.alloc;
 
-    // Convert operates against whatever the *latest* install is. If
-    // there's no DB row yet, fall back to the legacy placeholder dir.
+    var title_buf: [128]u8 = undefined;
+    const title = std.fmt.bufPrint(&title_buf, "Convert \u{00B7} {s}", .{game.name}) catch "Convert";
+    const a = threads_act.startTool(frame, .convert, tid, title) orelse return;
+
+    // No DB row yet → the legacy placeholder dir.
     var fallback_buf: [640]u8 = undefined;
-    const install_opt = frame.lib.latestInstallForGame(game.f95_thread_id) catch null;
+    const install_opt = frame.lib.latestInstallForGame(tid) catch null;
     defer if (install_opt) |i| frame.lib.freeInstall(i);
     const raw_install_path: []const u8 = if (install_opt) |i|
         i.install_path
     else
-        std.fmt.bufPrint(&fallback_buf, "{s}/{d}", .{ frame.info.library_root, game.f95_thread_id }) catch {
-            state.setConvertMsg("Install path buffer overflow.");
+        std.fmt.bufPrint(&fallback_buf, "{s}/{d}", .{ frame.info.library_root, tid }) catch {
+            failTool(frame, a, "Install path buffer overflow.");
             return;
         };
 
-    // Peel a wrapper folder if present. F95 archives commonly ship
-    // their content one level deep (`<install>/Game v1.0d/www/...`);
-    // without this peel `detectEngine` looks at the shallow path,
-    // finds no markers, and Convert spuriously bails as "engine not
-    // supported." `resolveGameRoot` no-ops when the install dir is
-    // already the real game root.
-    const install_path = mods_act.resolveGameRoot(frame.io, raw_install_path, frame.lib.alloc) catch {
-        state.setConvertMsg("Convert: failed to resolve game root.");
-        return;
-    };
-    defer frame.lib.alloc.free(install_path);
-    if (!std.mem.eql(u8, install_path, raw_install_path)) {
-        log.info("Convert: peeled wrapper {s} → {s}", .{ raw_install_path, install_path });
-    }
-
-    // Convert spec from the preset matcher — engine-keyed dispatch
-    // over the merged built-in + `<data_root>/convert-presets/` pool.
-    const spec = mods_act.resolveConvertSpec(frame, install_path);
-    if (spec == .none) {
-        // Disambiguate "already Linux" from "Windows-only, no
-        // converter exists." Look for tell-tale files to figure
-        // out which side of the line the install sits on.
-        var probe_buf: [512]u8 = undefined;
-        const has_lin_launcher = (findLinuxLauncher(frame.io, frame.lib.alloc, install_path, &probe_buf) != null);
-        const has_win_exe = (findWindowsExe(frame.io, frame.lib.alloc, install_path, &probe_buf) != null);
-        // Use the convert/rpgm marker table directly so both the engine
-        // detection AND the Convert dispatch share one source of truth.
-        // The flat probes that used to live here missed VX Ace installs
-        // whose RGSS300.dll sits in `System/` (the canonical layout when
-        // a game ships unencrypted with `Game.rvproj2`).
-        const rgss_variant = convert_mod.rpgm.detectRgssVariant(frame.io, install_path);
-        const looks_like_vx_ace = rgss_variant == .vx_ace;
-        const looks_like_vx = rgss_variant == .vx;
-        const looks_like_xp = rgss_variant == .xp;
-
-        // Vendored mkxp-z covers RGSS1/2/3 — try it for any RGSS variant.
-        // On success the launcher lands in the game dir and we report
-        // converted; on missing-bundle (e.g. non-Linux build of f69) we
-        // fall through to the WINE message below.
-        if (looks_like_vx_ace or looks_like_vx or looks_like_xp) {
-            var bin_buf: [640]u8 = undefined;
-            var libs_buf: [640]u8 = undefined;
-            if (mkxpZBundled(frame, frame.info.exe_dir, &bin_buf)) |mkxp_dir| {
-                const extra_libs = mkxpZExtraLibsDir(frame, frame.info.exe_dir, &libs_buf);
-                // Per-install zoom override (file at `<install>/.mkxp-zoom`);
-                // falls back to the global default the UI dropdown ships with.
-                const zoom = convert_mod.rpgm.readMkxpZoom(frame.io, install_path) orelse convert_mod.rpgm.MKXP_ZOOM_DEFAULT;
-                const mkxp_spec: convert_mod.ConvertSpec = .{ .mkxp_z = .{
-                    .mkxp_z_dir = mkxp_dir,
-                    .extra_libs_dir = extra_libs,
-                    .zoom = zoom,
-                } };
-                // force=true: manual Convert clicks always re-write the
-                // launcher even if `alreadyConverted` would otherwise
-                // skip — iterating on launcher templates (FONTCONFIG_FILE
-                // injection, env tweaks) is the main reason to click
-                // Convert on an already-converted install.
-                if (frame.convert_svc.convert(install_path, mkxp_spec, true, .none)) |_| {
-                    const compat_msg = maybeAutoApplyCompatPostConvert(frame, install_opt, install_path);
-                    setConvertOk(state, "Converted via bundled mkxp-z.", compat_msg);
-                    return;
-                } else |e| {
-                    log.warn("mkxp-z convert failed: {s}", .{@errorName(e)});
-                    var ebuf: [256]u8 = undefined;
-                    const m = std.fmt.bufPrint(&ebuf, "mkxp-z convert failed: {s}", .{@errorName(e)}) catch "mkxp-z convert failed";
-                    state.setConvertMsg(m);
-                    return;
-                }
-            }
+    const auto_compat = state.auto_apply_compat and install_opt != null;
+    const applied: []library.Library.AppliedCompatRow = if (auto_compat)
+        frame.lib.listAppliedCompat(install_opt.?.id[0..]) catch |e| blk: {
+            log.warn("convert: list applied compat failed: {s}", .{@errorName(e)});
+            break :blk &.{};
         }
+    else
+        &.{};
+    defer if (applied.len > 0) frame.lib.freeAppliedCompatList(applied);
 
-        const msg = if (has_lin_launcher)
-            "No convert needed — a Linux launcher (.sh / .AppImage) is already in the install."
-        else if (looks_like_vx_ace)
-            "RPG Maker VX Ace: bundled mkxp-z is missing from this build of f69. Rebuild with the third_party/mkxp-z/ tree in place, or use WINE/Proton."
-        else if (looks_like_vx)
-            "RPG Maker VX: bundled mkxp-z is missing from this build of f69. Rebuild with the third_party/mkxp-z/ tree in place, or use WINE/Proton."
-        else if (looks_like_xp)
-            "RPG Maker XP: bundled mkxp-z is missing from this build of f69. Rebuild with the third_party/mkxp-z/ tree in place, or use WINE/Proton."
-        else if (has_win_exe)
-            "Can't convert: only Ren'Py and RPG Maker MV/MZ have Linux runtimes f69 can install. Other Windows-only engines need WINE or Proton."
-        else
-            "No convert needed: no engine detected at this install path. Check the install folder contents.";
-        state.setConvertMsg(msg);
-        return;
-    }
-
-    // force=true on manual Convert clicks; see comment above for the
-    // mkxp-z dispatch on the same rationale (re-write launcher + any
-    // sidecar configs every time, the user explicitly asked for it).
-    frame.convert_svc.convert(install_path, spec, true, .none) catch |e| {
-        var buf: [256]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "Convert failed: {s}", .{@errorName(e)}) catch "Convert failed";
-        state.setConvertMsg(msg);
+    const job = threads.work_thread.ConvertJob.create(alloc, .{
+        .tid = tid,
+        .raw_install_path = raw_install_path,
+        .game_name = game.name,
+        .engine = game.engine,
+        // A manual Convert always re-writes the launcher (and the
+        // mkxp-z sidecars): iterating on launcher templates is the main
+        // reason to click it on an already-converted install.
+        .force = true,
+        .auto_compat = auto_compat,
+        .install_id = if (install_opt) |i| i.id else null,
+        .convert_presets_dir = frame.info.convert_presets_dir,
+        .applied = applied,
+    }) catch {
+        failTool(frame, a, "Out of memory.");
         return;
     };
-
-    const compat_msg = maybeAutoApplyCompatPostConvert(frame, install_opt, install_path);
-    setConvertOk(state, "Converted.", compat_msg);
-}
-
-/// Run `autoApplyCompatAfterConvert` if the install has a DB id and
-/// the user hasn't disabled the toggle. Returns a slice into a
-/// thread-local-ish buffer suitable for embedding in a toast string.
-/// Empty string when nothing fired (toggle off or no install).
-const COMPAT_SUFFIX_LEN = 96;
-var compat_suffix_buf: [COMPAT_SUFFIX_LEN]u8 = undefined;
-
-fn maybeAutoApplyCompatPostConvert(
-    frame: *Frame,
-    install_opt: ?library.Install,
-    install_path: []const u8,
-) []const u8 {
-    if (!frame.state.auto_apply_compat) return "";
-    const install = install_opt orelse return "";
-
-    const res = autoApplyCompatAfterConvert(frame, &install.id, install_path);
-    if (res.applied == 0 and res.reapplied == 0 and res.failed == 0) return "";
-
-    const written = std.fmt.bufPrint(
-        &compat_suffix_buf,
-        " Compat: {d} applied, {d} re-applied, {d} failed.",
-        .{ res.applied, res.reapplied, res.failed },
-    ) catch return "";
-    return written;
-}
-
-fn setConvertOk(state: *State, head: []const u8, compat_tail: []const u8) void {
-    var buf: [320]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, "{s}{s} Try Launch.", .{ head, compat_tail }) catch {
-        state.setConvertMsg("Converted. Try Launch.");
+    frame.work.submit(.{ .convert = job }, a) catch {
+        failTool(frame, a, "Out of memory.");
         return;
     };
-    state.setConvertMsg(msg);
+}
+
+/// Ends an activity that never reached the worker, with an error toast.
+fn failTool(frame: *Frame, a: *threads.Activity, msg: []const u8) void {
+    const now = std.Io.Clock.Timestamp.now(frame.io, .real).raw.toSeconds();
+    frame.book.finish(a, .err, msg, now);
+    frame.state.notifyErr(msg);
 }
 
 // `RunningGamesMap` aliased from `owned.zig` at the top of the file.

@@ -3,11 +3,75 @@
 //! other drain so results from the compute and I/O threads land first.
 
 const std = @import("std");
+const compat_mod = @import("compat");
 const types = @import("../types.zig");
 const state_mod = @import("../state.zig");
+const common = @import("common.zig");
+const convert_job = @import("../threads/jobs/convert.zig");
 
 const threads = types.threads;
 const Frame = types.Frame;
+const Kind = threads.activity.Kind;
+
+const log = std.log.scoped(.ui_threads);
+
+/// Plain-language name of a tool, for toasts ("Convert is already
+/// running for this game").
+pub fn kindLabel(k: Kind) []const u8 {
+    return switch (k) {
+        .convert => "Convert",
+        .decrypt => "Decrypt",
+        .compat_fix => "Compat fix",
+        .rpa_extract => "Extract .rpa",
+        .hash => "Hashing",
+        .reanalyse => "Re-analyse",
+        .plan_sim => "Mod plan check",
+        .folder_scan => "Folder scan",
+        .mod_install => "Mod install",
+        .mod_uninstall => "Mod uninstall",
+        .sign_in => "Sign-in",
+        .launch_probe => "Launch check",
+    };
+}
+
+/// Starts an activity for a per-game tool. Returns null (after a toast)
+/// when a tool already runs for `tid`, or when the book is out of memory.
+/// The caller must submit the activity or `book.finish` it.
+pub fn startTool(frame: *Frame, kind: Kind, tid: u64, title: []const u8) ?*threads.Activity {
+    if (frame.book.liveForGame(tid)) {
+        const running = liveKindForGame(frame, tid) orelse kind;
+        var buf: [96]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "{s} is already running for this game", .{kindLabel(running)}) catch "A tool is already running for this game";
+        frame.state.pushToast(.warn, msg);
+        return null;
+    }
+    return frame.book.start(kind, tid, title) catch {
+        frame.state.notifyErr("Out of memory.");
+        return null;
+    };
+}
+
+/// Kind of the live activity for `tid`, if any.
+fn liveKindForGame(frame: *Frame, tid: u64) ?Kind {
+    var arena = std.heap.ArenaAllocator.init(frame.lib.alloc);
+    defer arena.deinit();
+    const views = frame.book.snapshot(arena.allocator()) catch return null;
+    for (views) |v| {
+        if (v.game_thread_id != tid) continue;
+        if (v.status == .queued or v.status == .running) return v.kind;
+    }
+    return null;
+}
+
+/// The live (queued or running) activity for `tid`, copied into `arena`.
+pub fn liveViewForGame(frame: *Frame, arena: std.mem.Allocator, tid: u64) ?threads.activity.View {
+    const views = frame.book.snapshot(arena) catch return null;
+    for (views) |v| {
+        if (v.game_thread_id != tid) continue;
+        if (v.status == .queued or v.status == .running) return v;
+    }
+    return null;
+}
 
 /// Maps the thread-side toast kind onto the State toast kind.
 fn kindMap(k: threads.events.ToastKind) state_mod.ToastKind {
@@ -38,14 +102,63 @@ pub fn drainThreads(frame: *Frame) void {
     }
 }
 
-/// Applies a finished compute job's outcome on the UI thread. The
-/// current outcomes own no memory; later tasks add arms that do.
+fn resultToast(k: threads.activity.ResultKind) state_mod.ToastKind {
+    return switch (k) {
+        .ok => .success,
+        .warn => .warn,
+        .err => .err,
+    };
+}
+
+/// Applies a finished compute job's outcome on the UI thread, frees what
+/// the outcome owns, and toasts the result of a per-game tool.
 fn handleWorkDone(frame: *Frame, activity_id: u64, outcome: threads.work_thread.WorkOutcome) void {
-    _ = frame;
-    _ = activity_id;
     switch (outcome) {
         .none, .mod_queue, .fake => {},
+        .convert => |c| applyConvertOutcome(frame, c),
     }
+
+    var arena = std.heap.ArenaAllocator.init(frame.lib.alloc);
+    defer arena.deinit();
+    const views = frame.book.snapshot(arena.allocator()) catch return;
+    for (views) |v| {
+        if (v.id != activity_id) continue;
+        if (v.kind != .convert) return;
+        frame.state.pushToast(resultToast(v.result_kind), v.result);
+        // A finished convert (not a cancel, not a failure) answers the
+        // "Found a Windows build" Play error: drop the hero button.
+        if (v.status == .done and v.result_kind != .err) {
+            if (frame.state.last_play_needs_convert == v.game_thread_id) frame.state.last_play_needs_convert = null;
+        }
+        return;
+    }
+}
+
+/// DB part of the post-convert compat step: drop the rows of fixes the
+/// job undid, write the new ones (same as `launch.applyCompatFix`), then
+/// refresh the installed set.
+fn applyConvertOutcome(frame: *Frame, c: threads.work_thread.ConvertOutcome) void {
+    defer convert_job.freeOutcome(frame.compat_svc, c);
+    if (c.install_id) |*id| {
+        const id_slice: []const u8 = id[0..];
+        for (c.compat_undone) |rid| {
+            frame.lib.deleteAppliedCompat(id_slice, rid) catch |e| {
+                log.warn("convert: delete compat row {s} failed: {s}", .{ rid, @errorName(e) });
+            };
+        }
+        for (c.compat_applied) |fix| {
+            const json = compat_mod.serializeBackups(frame.lib.alloc, fix.backups) catch |e| {
+                log.warn("convert: serialize compat {s} failed: {s}", .{ fix.recipe_id, @errorName(e) });
+                continue;
+            };
+            defer frame.lib.alloc.free(json);
+            frame.lib.upsertAppliedCompat(id_slice, fix.recipe_id, fix.recipe_sha256, fix.applied_at, json) catch |e| {
+                log.warn("convert: save compat {s} failed: {s}", .{ fix.recipe_id, @errorName(e) });
+                frame.state.notifyErr("Convert: a compat fix was applied but could not be saved.");
+            };
+        }
+    }
+    if (c.converted) common.refreshInstalledSet(frame);
 }
 
 test "kindMap covers every toast kind" {

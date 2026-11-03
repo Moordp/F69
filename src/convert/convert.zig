@@ -5,6 +5,7 @@ pub const errors = @import("errors.zig");
 
 pub const Engine = dom.Engine;
 pub const ConvertSpec = dom.ConvertSpec;
+pub const Progress = dom.Progress;
 pub const Distro = dom.Distro;
 pub const Service = @import("service.zig").Service;
 pub const detectEngine = @import("detect.zig").detectEngine;

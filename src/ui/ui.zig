@@ -28,7 +28,6 @@ const dvui = @import("dvui");
 
 const state_mod = @import("state.zig");
 const types = @import("types.zig");
-const threads = types.threads;
 const actions = @import("actions.zig");
 const screens = @import("screens.zig");
 const mod_job_queue = @import("mod_job_queue.zig");
@@ -47,6 +46,7 @@ test {
     _ = @import("threads/events.zig");
     _ = @import("threads/work_thread.zig");
     _ = @import("threads/threads.zig");
+    _ = @import("threads/jobs/convert.zig");
     _ = @import("dl_controls.zig");
     _ = @import("screens/downloads.zig");
 }
@@ -67,6 +67,8 @@ pub const setImageCpuLimit = actions.setImageCpuLimit;
 pub const persistUiScaleIfDirty = actions.persistUiScaleIfDirty;
 pub const Filters = state_mod.Filters;
 pub const Screen = state_mod.Screen;
+/// Thread pieces (activity views/status) for the integration tests.
+pub const threads = types.threads;
 pub const startSyncAll = actions.startSyncAll;
 pub const syncGame = actions.syncGame;
 pub const doLogin = actions.doLogin;

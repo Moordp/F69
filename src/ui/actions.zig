@@ -74,6 +74,9 @@ const threads_act = @import("actions/threads.zig");
 
 // ---- Threads: worker-to-UI event drain ----
 pub const drainThreads = threads_act.drainThreads;
+pub const startTool = threads_act.startTool;
+pub const liveViewForGame = threads_act.liveViewForGame;
+pub const toolKindLabel = threads_act.kindLabel;
 
 // ---- Public type aliases (kept identical to pre-R9 names) ----
 pub const ModsTabCounts = mods.ModsTabCounts;

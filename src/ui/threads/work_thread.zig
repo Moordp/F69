@@ -12,6 +12,7 @@ const job_mod = @import("../job.zig");
 const Mailbox = @import("mailbox.zig").Mailbox;
 const activity_mod = @import("activity.zig");
 const events_mod = @import("events.zig");
+const convert_job = @import("jobs/convert.zig");
 
 const Activity = activity_mod.Activity;
 const Book = activity_mod.Book;
@@ -26,6 +27,8 @@ const log = std.log.scoped(.work_thread);
 pub const WorkOutcome = union(enum) {
     none: void,
     mod_queue: void,
+    /// Owns compat records; `handleWorkDone` frees them.
+    convert: ConvertOutcome,
     /// Tests only.
     fake: struct { steps: u32 },
 };
@@ -42,8 +45,21 @@ pub const FakeJob = struct {
 /// One unit of compute work. Later tasks add the real variants.
 pub const WorkJob = union(enum) {
     mod_queue: void,
+    convert: ConvertJob,
     fake: FakeJob,
 };
+
+pub const ConvertJob = convert_job.ConvertJob;
+pub const ConvertOutcome = convert_job.ConvertOutcome;
+
+/// Frees what a job owns. Called once per job: after it ran, or when it
+/// is dropped without running.
+fn freeJob(job: WorkJob) void {
+    switch (job) {
+        .convert => |c| c.deinit(),
+        .mod_queue, .fake => {},
+    }
+}
 
 pub const Deps = struct {
     alloc: std.mem.Allocator,
@@ -94,6 +110,10 @@ fn errorResult(e: anyerror) struct { kind: ResultKind, msg: []const u8 } {
 fn run(deps: Deps, job: WorkJob, a: *Activity, buf: []u8) anyerror!Done {
     return switch (job) {
         .mod_queue => .{ .outcome = .mod_queue, .msg = "Done." },
+        .convert => |c| blk: {
+            const r = try convert_job.run(deps, c, a, buf);
+            break :blk .{ .outcome = .{ .convert = r.outcome }, .kind = r.kind, .msg = r.msg };
+        },
         .fake => |f| runFake(deps.io, f, a, buf),
     };
 }
@@ -184,7 +204,7 @@ pub const Worker = struct {
         if (already) return;
 
         self.mb.close();
-        while (self.mb.tryPop()) |e| self.finishUnstarted(e.activity);
+        while (self.mb.tryPop()) |e| self.finishUnstarted(e);
 
         const t = self.thread orelse return;
         self.thread = null;
@@ -202,16 +222,24 @@ pub const Worker = struct {
         }
     }
 
-    /// Queues one job. `activity` must already be `queued` in `book`. If
-    /// the worker is stopped the activity is finished as failed.
+    /// Queues one job and takes ownership of it. `activity` must already
+    /// be `queued` in `book`. If the worker is stopped the activity is
+    /// finished as failed and the job freed; on `OutOfMemory` the job is
+    /// freed and the activity is left for the caller to finish.
     pub fn submit(self: *Worker, job: WorkJob, activity: *Activity) !void {
         self.lock.lockUncancelable(self.io);
         const stopping = self.stopping;
         self.lock.unlock(self.io);
-        if (stopping) return self.book.finish(activity, .err, "Not running.", nowSeconds(self.io));
-        self.mb.push(.{ .job = job, .activity = activity }) catch |e| switch (e) {
-            error.Closed => self.book.finish(activity, .err, "Not running.", nowSeconds(self.io)),
-            error.OutOfMemory => return e,
+        if (stopping) {
+            freeJob(job);
+            return self.book.finish(activity, .err, "Not running.", nowSeconds(self.io));
+        }
+        self.mb.push(.{ .job = job, .activity = activity }) catch |e| {
+            freeJob(job);
+            switch (e) {
+                error.Closed => self.book.finish(activity, .err, "Not running.", nowSeconds(self.io)),
+                error.OutOfMemory => return e,
+            }
         };
     }
 
@@ -223,7 +251,9 @@ pub const Worker = struct {
         return me.current != null;
     }
 
-    fn finishUnstarted(self: *Worker, a: *Activity) void {
+    fn finishUnstarted(self: *Worker, e: Entry) void {
+        freeJob(e.job);
+        const a = e.activity;
         a.cancel.store(true, .release);
         self.book.finish(a, .warn, "Stopped before it started.", nowSeconds(self.io));
         self.events.push(.{ .work_done = .{ .activity_id = a.id, .outcome = .none } });
@@ -236,7 +266,7 @@ pub const Worker = struct {
             self.lock.lockUncancelable(self.io);
             if (self.stopping) {
                 self.lock.unlock(self.io);
-                self.finishUnstarted(e.activity);
+                self.finishUnstarted(e);
                 continue;
             }
             self.current = e.activity;
@@ -251,6 +281,7 @@ pub const Worker = struct {
     }
 
     fn runOne(self: *Worker, e: Entry) void {
+        defer freeJob(e.job);
         const a = e.activity;
         a.markRunning(nowSeconds(self.io));
         var buf: [192]u8 = undefined;

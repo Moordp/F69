@@ -2183,6 +2183,228 @@ test "threads: Harness.deinit cancels a running 100-step job within 3 s" {
     try std.testing.expect(elapsed_ms < 3000);
 }
 
+/// Ren'Py-looking Windows install for game `tid` plus a pre-seeded SDK
+/// cache (`<root>/cache/convert/sdks/renpy-8.1.0/`) so Convert needs no
+/// network. `extra_files` small files go into the SDK runtime dir.
+/// Returns the install path (caller frees).
+fn seedConvertGame(h: *ui.Harness, env: *TestEnv, tid: u64, extra_files: usize) ![]u8 {
+    var rel_buf: [128]u8 = undefined;
+    const base = try std.fmt.bufPrint(&rel_buf, "library/{d}/final", .{tid});
+    var p_buf: [256]u8 = undefined;
+    for ([_]struct { []const u8, []const u8 }{
+        .{ "game/script.rpy", "label start:\n    return\n" },
+        .{ "Game.exe", "MZ fake pe" },
+        .{ "lib/py3-windows-x86_64/python.exe", "MZ" },
+        .{ "renpy/vc_version.py", "version = u'8.1.0.23051307'\n" },
+    }) |f| try env.writeFile(try std.fmt.bufPrint(&p_buf, "{s}/{s}", .{ base, f[0] }), f[1]);
+
+    const sdk = "cache/convert/sdks/renpy-8.1.0";
+    try env.writeFile(sdk ++ "/renpy.sh", "#!/bin/sh\n");
+    try env.writeFile(sdk ++ "/lib/py3-linux-x86_64/renpy", "ELF");
+    const filler: [512]u8 = @splat('x');
+    var i: usize = 0;
+    while (i < extra_files) : (i += 1) {
+        try env.writeFile(try std.fmt.bufPrint(&p_buf, "{s}/lib/py3-linux-x86_64/f{d}.so", .{ sdk, i }), &filler);
+    }
+
+    const install_path = try env.path(base);
+    errdefer std.testing.allocator.free(install_path);
+    _ = try h.lib.insertIfMissing(&.{ .f95_thread_id = tid, .name = "Convert Game", .developer = "Dev", .engine = .renpy });
+    try h.lib.upsertInstall(&.{
+        .id = "33333333-4444-5555-6666-777777777777".*,
+        .game_thread_id = tid,
+        .version = "1.0",
+        .install_path = install_path,
+        .recipe_id = "",
+        .installed_at = 0,
+        .source = .manual,
+    });
+    try h.reloadGames();
+    return install_path;
+}
+
+fn toastContains(state: *const ui.State, needle: []const u8) bool {
+    for (state.toasts[0..state.toast_count]) |*t| {
+        if (std.mem.indexOf(u8, t.msg(), needle) != null) return true;
+    }
+    return false;
+}
+
+/// The newest convert activity for `tid`.
+fn convertView(fr: *ui.Frame, arena: std.mem.Allocator, tid: u64) ?ui.threads.activity.View {
+    const views = fr.book.snapshot(arena) catch return null;
+    var best: ?ui.threads.activity.View = null;
+    for (views) |v| {
+        if (v.kind != .convert or v.game_thread_id != tid) continue;
+        if (best == null or v.id > best.?.id) best = v;
+    }
+    return best;
+}
+
+fn isTerminal(s: ui.threads.activity.Status) bool {
+    return s == .done or s == .failed or s == .cancelled;
+}
+
+/// Steps frames until the newest convert for `tid` ends (bounded, ~10 s).
+/// Returns its final status; `saw_running` turns true when a frame saw it
+/// running.
+fn stepUntilConvertEnds(fr: *ui.Frame, io: std.Io, tid: u64, min_id: u64, saw_running: *bool) !ui.threads.activity.Status {
+    var i: usize = 0;
+    while (i < 2000) : (i += 1) {
+        _ = try dvui.testing.step(threadsRender);
+        var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena_state.deinit();
+        if (convertView(fr, arena_state.allocator(), tid)) |v| if (v.id >= min_id) {
+            if (v.status == .running) saw_running.* = true;
+            if (isTerminal(v.status)) {
+                // Two more frames: drain `.work_done` and show the toast.
+                _ = try dvui.testing.step(threadsRender);
+                _ = try dvui.testing.step(threadsRender);
+                return v.status;
+            }
+        };
+        std.Io.sleep(io, .fromMilliseconds(5), .awake) catch {};
+    }
+    return error.ConvertDidNotEnd;
+}
+
+/// The detail page opens on Overview (first visit resets the tab), so
+/// click the Tools tab like a user.
+fn openToolsTab(h: *ui.Harness) !void {
+    try dvui.testing.moveTo("Tools");
+    try dvui.testing.click(.left);
+    _ = try dvui.testing.step(threadsRender);
+    _ = try dvui.testing.step(threadsRender);
+    try std.testing.expect(h.state.detail_tab == .tools);
+}
+
+fn launcherExists(io: std.Io, install_path: []const u8) bool {
+    var buf: [512]u8 = undefined;
+    const p = std.fmt.bufPrint(&buf, "{s}/Game.sh", .{install_path}) catch return false;
+    std.Io.Dir.cwd().access(io, p, .{}) catch return false;
+    return true;
+}
+
+test "threads: Tools-tab Convert runs on the compute thread, writes Game.sh and toasts" {
+    tlog("START: threads-convert", .{});
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(8) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var env = try TestEnv.init(gpa, "threads-convert");
+    defer env.deinit();
+    var t = try dvui.testing.init(.{ .allocator = gpa, .io = io, .window_size = .{ .w = 1280, .h = 1600 } });
+    defer t.deinit();
+    var h = try ui.Harness.init(gpa, io, t.window, env.root);
+    defer h.deinit();
+
+    const tid: u64 = 50;
+    const install_path = try seedConvertGame(h, &env, tid, 400);
+    defer gpa.free(install_path);
+
+    var fr = h.frame();
+    threads_frame = &fr;
+    defer threads_frame = null;
+    h.state.screen = .detail;
+    h.state.selected_thread = tid;
+    h.state.last_play_needs_convert = tid;
+
+    _ = try dvui.testing.step(threadsRender);
+    _ = try dvui.testing.step(threadsRender);
+    try openToolsTab(h);
+    try dvui.testing.expectVisible("hero-convert");
+    try dvui.testing.moveTo("tools-convert");
+    try dvui.testing.click(.left);
+    var saw_running = false;
+    const st = try stepUntilConvertEnds(&fr, io, tid, 0, &saw_running);
+    try std.testing.expectEqual(ui.threads.activity.Status.done, st);
+    try std.testing.expect(saw_running);
+    try std.testing.expect(launcherExists(io, install_path));
+    try std.testing.expect(toastContains(&h.state, "Converted."));
+    try std.testing.expect(toastContains(&h.state, "Play is ready."));
+    // A finished convert drops the hero Convert button.
+    try std.testing.expectEqual(@as(?u64, null), h.state.last_play_needs_convert);
+    tlog("threads-convert: OK", .{});
+}
+
+test "threads: Cancel stops a running Convert; a second Convert then completes" {
+    tlog("START: threads-convert-cancel", .{});
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(8) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var env = try TestEnv.init(gpa, "threads-convert-cancel");
+    defer env.deinit();
+    var t = try dvui.testing.init(.{ .allocator = gpa, .io = io, .window_size = .{ .w = 1280, .h = 1600 } });
+    defer t.deinit();
+    var h = try ui.Harness.init(gpa, io, t.window, env.root);
+    defer h.deinit();
+
+    const tid: u64 = 51;
+    const install_path = try seedConvertGame(h, &env, tid, 3000);
+    defer gpa.free(install_path);
+
+    var fr = h.frame();
+    threads_frame = &fr;
+    defer threads_frame = null;
+    h.state.screen = .detail;
+    h.state.selected_thread = tid;
+
+    _ = try dvui.testing.step(threadsRender);
+    _ = try dvui.testing.step(threadsRender);
+    try openToolsTab(h);
+    try dvui.testing.moveTo("tools-convert");
+    try dvui.testing.click(.left);
+    _ = try dvui.testing.step(threadsRender); // click lands, job queued
+    // A new widget gets its size on the frame after it first shows, so
+    // step until the strip's Cancel button is on screen.
+    {
+        var k: usize = 0;
+        while (true) : (k += 1) {
+            if (k > 20) return error.CancelNotVisible;
+            _ = try dvui.testing.step(threadsRender);
+            const td = dvui.tagGet("tools-cancel") orelse continue;
+            if (td.visible) break;
+        }
+    }
+
+    // Wait (no frames, so the Cancel button keeps its place) for the
+    // first "Copying" phase, then click Cancel.
+    {
+        var waited: usize = 0;
+        while (true) : (waited += 1) {
+            if (waited > 10_000) return error.NoCopyingPhase;
+            var arena_state = std.heap.ArenaAllocator.init(gpa);
+            defer arena_state.deinit();
+            const v = convertView(&fr, arena_state.allocator(), tid) orelse return error.NoActivity;
+            if (isTerminal(v.status)) return error.FinishedBeforeCancel;
+            if (std.mem.startsWith(u8, v.phase, "Copying")) break;
+            std.Io.sleep(io, .fromMilliseconds(1), .awake) catch {};
+        }
+    }
+    try dvui.testing.moveTo("tools-cancel");
+    try dvui.testing.click(.left);
+    var saw_running = false;
+    const st = try stepUntilConvertEnds(&fr, io, tid, 0, &saw_running);
+    try std.testing.expectEqual(ui.threads.activity.Status.cancelled, st);
+    try std.testing.expect(!launcherExists(io, install_path));
+    try std.testing.expect(toastContains(&h.state, "Stopped."));
+
+    // The game is free again: a second Convert runs to the end.
+    var first_id: u64 = 0;
+    {
+        var arena_state = std.heap.ArenaAllocator.init(gpa);
+        defer arena_state.deinit();
+        first_id = (convertView(&fr, arena_state.allocator(), tid) orelse return error.NoActivity).id;
+    }
+    try dvui.testing.moveTo("tools-convert");
+    try dvui.testing.click(.left);
+    const st2 = try stepUntilConvertEnds(&fr, io, tid, first_id + 1, &saw_running);
+    try std.testing.expectEqual(ui.threads.activity.Status.done, st2);
+    try std.testing.expect(launcherExists(io, install_path));
+    tlog("threads-convert-cancel: OK", .{});
+}
+
 /// Resolver for the browser-flow tests: Workupload pages resolve to
 /// `needs_browser` without any request; every request fails.
 const NoHttp = struct {

@@ -1453,6 +1453,10 @@ pub const State = struct {
     /// `<data_root>/auto_apply_compat`.
     auto_apply_compat: bool = true,
     auto_apply_compat_persisted: bool = true,
+    /// Thread id of the game whose last Play found only a Windows build.
+    /// The detail hero shows a Convert button for it; cleared when a
+    /// convert for that game finishes.
+    last_play_needs_convert: ?u64 = null,
     /// Global default for "sandbox on launch". Each game's per-game
     /// `SandboxOverride` (always / never / use_default) wins over this;
     /// only `use_default` consults the value here. Default on — the
