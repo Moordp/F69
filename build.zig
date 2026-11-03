@@ -52,6 +52,7 @@ pub fn build(b: *std.Build) void {
     const util_crash_mod = mod(b, "util_crash", "src/util/crash.zig", target, optimize);
     util_crash_mod.addImport("util_paths", util_paths_mod);
     const util_version_mod = mod(b, "util_version", "src/util/version.zig", target, optimize);
+    const util_thread_owner_mod = mod(b, "util_thread_owner", "src/util/thread_owner.zig", target, optimize);
     const util_renpy_mod = mod(b, "util_renpy", "src/util/renpy.zig", target, optimize);
     const util_atomic_io_mod = mod(b, "util_atomic_io", "src/util/atomic_io.zig", target, optimize);
     util_crash_mod.addImport("util_atomic_io", util_atomic_io_mod);
@@ -172,6 +173,7 @@ pub fn build(b: *std.Build) void {
     const library_mod = mod(b, "library", "src/library/library.zig", target, optimize);
     library_mod.addImport("util_db", util_db_mod);
     library_mod.addImport("util_version", util_version_mod);
+    library_mod.addImport("util_thread_owner", util_thread_owner_mod);
     library_mod.addImport("util_domain", util_domain_mod);
 
     const recipe_mod = mod(b, "recipe", "src/recipe/recipe.zig", target, optimize);
@@ -251,6 +253,7 @@ pub fn build(b: *std.Build) void {
     const convert_mod = mod(b, "convert", "src/convert/convert.zig", target, optimize);
     convert_mod.addImport("util_renpy", util_renpy_mod);
     convert_mod.addImport("util_atomic_io", util_atomic_io_mod);
+    convert_mod.addImport("util_thread_owner", util_thread_owner_mod);
     convert_mod.addImport("util_domain", util_domain_mod);
     convert_mod.addImport("util_http", util_http_mod);
     convert_mod.addImport("util_proc", util_proc_mod);
@@ -259,6 +262,7 @@ pub fn build(b: *std.Build) void {
 
     const compat_mod = mod(b, "compat", "src/compat/compat.zig", target, optimize);
     compat_mod.addImport("util_version", util_version_mod);
+    compat_mod.addImport("util_thread_owner", util_thread_owner_mod);
     compat_mod.addImport("util_renpy", util_renpy_mod);
     compat_mod.addImport("util_domain", util_domain_mod);
     compat_mod.addImport("util_test_env", util_test_env_mod);
@@ -287,6 +291,7 @@ pub fn build(b: *std.Build) void {
     ui_mod.addImport("importers", importers_mod);
     ui_mod.addImport("image", image_mod);
     ui_mod.addImport("util_version", util_version_mod);
+    ui_mod.addImport("util_thread_owner", util_thread_owner_mod);
     ui_mod.addImport("util_paths", util_paths_mod);
     ui_mod.addImport("util_file_picker", file_picker_mod);
     ui_mod.addImport("util_atomic_io", util_atomic_io_mod);
@@ -614,6 +619,7 @@ pub fn build(b: *std.Build) void {
         ui_test_mod.addImport("importers", importers_mod);
         ui_test_mod.addImport("image", image_mod);
         ui_test_mod.addImport("util_version", util_version_mod);
+        ui_test_mod.addImport("util_thread_owner", util_thread_owner_mod);
         ui_test_mod.addImport("util_file_picker", file_picker_mod);
         ui_test_mod.addImport("util_atomic_io", util_atomic_io_mod);
         ui_test_mod.addImport("build_options", build_opts_mod);
@@ -653,6 +659,7 @@ pub fn build(b: *std.Build) void {
         integration_mod.addImport("util_file_picker", file_picker_mod);
         integration_mod.addImport("importers", importers_mod);
         integration_mod.addImport("util_version", util_version_mod);
+        integration_mod.addImport("util_thread_owner", util_thread_owner_mod);
         integration_mod.addImport("util_argv", util_argv_mod);
         integration_mod.addImport("util_archive", util_archive_mod);
         integration_mod.addImport("resolver", resolver_mod);
@@ -741,7 +748,7 @@ pub fn build(b: *std.Build) void {
         image_mod,         importers_mod,       compat_mod,         util_paths_mod,     util_kahn_mod,
         util_db_mod,       util_crash_mod,      util_version_mod,   util_renpy_mod,     util_atomic_io_mod,
         util_domain_mod,   util_http_mod,       util_proc_mod,      util_setting_mod,   util_test_env_mod,
-        file_picker_mod,   util_archive_mod,
+        file_picker_mod,   util_archive_mod,   util_thread_owner_mod,
     };
     const test_step = b.step("test", "Run unit tests");
     for (test_targets) |m| {
