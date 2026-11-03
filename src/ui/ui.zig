@@ -361,7 +361,22 @@ pub fn runMainLoop(
         .exe_dir = info.exe_dir,
         .data_root = info.data_root,
     });
-    defer worker.deinit();
+    // A job that outlives the 3 s stop budget leaves the thread detached
+    // and still using `book`, `ui_events` and the services main frees
+    // later. Then exit at once, on every path out of this function (quit,
+    // `guiFrame` returning false, an error), like the downloader's defer
+    // in main.zig. Stop the downloader first so its thread does not die
+    // mid-write; the remaining defers (state, mod queue, window, main's
+    // SQLite close) are skipped, as on the downloader's hard exit.
+    defer {
+        worker.stop();
+        if (worker.detached) {
+            std.log.warn("quit: compute job still running after 3 s; exiting without the remaining cleanup", .{});
+            dl.stop();
+            std.process.exit(0);
+        }
+        worker.deinit();
+    }
     worker.start() catch |e| std.log.err("compute thread failed to start: {s}", .{@errorName(e)});
 
     var interrupted = false;
@@ -485,9 +500,7 @@ pub fn runMainLoop(
                 actions.drainModJobs(&shutdown_frame);
                 io.sleep(std.Io.Duration.fromMilliseconds(50), .real) catch {};
             }
-            // A detached compute thread may still touch `book` and
-            // `ui_events`, which the defers would free: hard-exit too.
-            if (actions.workersBusy(&state) or worker.detached) {
+            if (actions.workersBusy(&state)) {
                 // A worker is still running and we've run out of patience.
                 // Letting `main`'s defers run from here would tear down
                 // `init.io` / `f95_client.http` / `gpa` while the worker
