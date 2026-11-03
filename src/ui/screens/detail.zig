@@ -2500,7 +2500,9 @@ fn renderEngineTools(frame: *Frame, game: *library.Game) void {
     })) {
         state.convert_help_open = !state.convert_help_open;
     }
-    if (components.iconButton(@src(), "Fix Compat", entypo.tools, .{})) {
+    var compat_opts: dvui.Options = if (busy) toolBusyOpts() else .{};
+    compat_opts.tag = "tools-compat";
+    if (components.iconButton(@src(), "Fix Compat", entypo.tools, compat_opts)) {
         doCompatFixForActiveInstall(frame, game);
     }
     if (game.engine == .rpgm_mv or game.engine == .rpgm_mz) {
@@ -2595,17 +2597,18 @@ fn renderMkxpZSettingsRow(frame: *Frame, game: *library.Game) void {
     }
 }
 
+/// Fix Compat on the selected install: the UI thread reads the install
+/// list (one query) and `startCompatFix` reads the applied rows; the scan
+/// and every apply run on the compute thread. The result is a toast.
 fn doCompatFixForActiveInstall(frame: *Frame, game: *const library.Game) void {
     const state = frame.state;
-    const alloc = frame.lib.alloc;
-
     const installs = frame.lib.listInstalls(game.f95_thread_id) catch {
-        state.setLaunchMsg("Compat fix: can't list installs.");
+        state.notifyErr("Compat fix: can't list installs.");
         return;
     };
     defer frame.lib.freeInstalls(installs);
     if (installs.len == 0) {
-        state.setLaunchMsg("Compat fix: no installs for this game.");
+        state.notifyErr("Compat fix: no installs for this game.");
         return;
     }
     const picked: *const library.Install = blk: {
@@ -2614,38 +2617,7 @@ fn doCompatFixForActiveInstall(frame: *Frame, game: *const library.Game) void {
         }
         break :blk &installs[0];
     };
-
-    const issues = actions.scanCompatForInstall(frame, &picked.id, picked.install_path) catch |e| {
-        var buf: [200]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "Compat scan failed: {s}", .{@errorName(e)}) catch "Compat scan failed";
-        state.setLaunchMsg(msg);
-        return;
-    };
-    defer actions.freeCompatIssues(frame, issues);
-
-    var applied: usize = 0;
-    var failed: usize = 0;
-    var last_err_buf: [128]u8 = undefined;
-    var last_err: []const u8 = "";
-    for (issues) |is| {
-        if (is.status != .unfixed) continue;
-        actions.applyCompatFix(frame, &picked.id, picked.install_path, is.recipe_id) catch |e| {
-            failed += 1;
-            last_err = std.fmt.bufPrint(&last_err_buf, "{s}: {s}", .{ is.recipe_id, @errorName(e) }) catch "apply failed";
-            continue;
-        };
-        applied += 1;
-    }
-    _ = alloc;
-
-    var msg_buf: [256]u8 = undefined;
-    const msg = if (failed > 0)
-        std.fmt.bufPrint(&msg_buf, "Compat: {d} fix(es) applied, {d} failed ({s}).", .{ applied, failed, last_err }) catch "Compat: partial."
-    else if (applied > 0)
-        std.fmt.bufPrint(&msg_buf, "Compat: {d} fix(es) applied. Re-launch the game.", .{applied}) catch "Compat applied."
-    else
-        std.fmt.bufPrint(&msg_buf, "Compat: nothing to fix on this install.", .{}) catch "Compat: nothing to fix.";
-    state.setLaunchMsg(msg);
+    _ = actions.startCompatFix(frame, game.f95_thread_id, &picked.id, picked.install_path, &.{});
 }
 
 /// "Saves" row of the Launch & updates group: which game's sandbox HOME

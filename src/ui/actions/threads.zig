@@ -8,6 +8,8 @@ const types = @import("../types.zig");
 const state_mod = @import("../state.zig");
 const common = @import("common.zig");
 const convert_job = @import("../threads/jobs/convert.zig");
+const compat_job = @import("../threads/jobs/compat.zig");
+const launch_act = @import("launch.zig");
 
 const threads = types.threads;
 const Frame = types.Frame;
@@ -132,6 +134,7 @@ fn handleWorkDone(frame: *Frame, activity_id: u64, outcome: threads.work_thread.
         // Decrypt and RPA extract own nothing: the toast below is all.
         .none, .mod_queue, .fake, .decrypt, .rpa => {},
         .convert => |c| applyConvertOutcome(frame, c),
+        .compat => |c| applyCompatOutcome(frame, c),
     }
 
     var arena = std.heap.ArenaAllocator.init(frame.lib.alloc);
@@ -140,7 +143,7 @@ fn handleWorkDone(frame: *Frame, activity_id: u64, outcome: threads.work_thread.
     for (views) |v| {
         if (v.id != activity_id) continue;
         switch (v.kind) {
-            .convert, .decrypt, .rpa_extract => {},
+            .convert, .decrypt, .rpa_extract, .compat_fix => {},
             else => return,
         }
         frame.state.pushToast(resultToast(v.result_kind), v.result);
@@ -165,19 +168,30 @@ fn applyConvertOutcome(frame: *Frame, c: threads.work_thread.ConvertOutcome) voi
                 log.warn("convert: delete compat row {s} failed: {s}", .{ rid, @errorName(e) });
             };
         }
-        for (c.compat_applied) |fix| {
-            const json = compat_mod.serializeBackups(frame.lib.alloc, fix.backups) catch |e| {
-                log.warn("convert: serialize compat {s} failed: {s}", .{ fix.recipe_id, @errorName(e) });
-                continue;
-            };
-            defer frame.lib.alloc.free(json);
-            frame.lib.upsertAppliedCompat(id_slice, fix.recipe_id, fix.recipe_sha256, fix.applied_at, json) catch |e| {
-                log.warn("convert: save compat {s} failed: {s}", .{ fix.recipe_id, @errorName(e) });
-                frame.state.notifyErr("Convert: a compat fix was applied but could not be saved.");
-            };
-        }
+        if (recordCompatFixes(frame, id_slice, c.compat_applied) > 0)
+            frame.state.notifyErr("Convert: a compat fix was applied but could not be saved.");
     }
     if (c.converted) common.refreshInstalledSet(frame);
+}
+
+/// DB part of Fix Compat: write each FixRecord the job applied on disk.
+fn applyCompatOutcome(frame: *Frame, c: compat_job.CompatOutcome) void {
+    defer compat_job.freeOutcome(frame.compat_svc, c);
+    if (recordCompatFixes(frame, c.install_id[0..], c.records) > 0)
+        frame.state.notifyErr("Compat: a fix was applied but could not be saved.");
+}
+
+/// Writes every record with `launch.recordCompatFix`. Does not free
+/// them. Returns how many could not be saved (each is logged).
+fn recordCompatFixes(frame: *Frame, install_id: []const u8, records: []const compat_mod.FixRecord) u32 {
+    var failed: u32 = 0;
+    for (records) |fix| {
+        launch_act.recordCompatFix(frame, install_id, fix) catch |e| {
+            log.warn("compat: save {s} failed: {s}", .{ fix.recipe_id, @errorName(e) });
+            failed += 1;
+        };
+    }
+    return failed;
 }
 
 test "kindMap covers every toast kind" {

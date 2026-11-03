@@ -625,10 +625,14 @@ pub fn renderLaunchDiagPopup(frame: *Frame) void {
                         if (state.launch_diag_install_id_set and state.launch_diag_compat_recipe_len > 0) {
                             const rid = state.launch_diag_compat_recipe_buf[0..state.launch_diag_compat_recipe_len];
                             const install_id_ptr = &state.launch_diag_install_id_buf;
+                            // Starts the compat job; its result is a toast.
+                            // `NotStarted` already toasted why.
                             actions.applyCompatFixForGame(frame, state.launch_diag_thread_id, install_id_ptr, rid) catch |e| {
-                                var buf: [192]u8 = undefined;
-                                const msg = std.fmt.bufPrint(&buf, "Apply compat fix failed: {s}", .{@errorName(e)}) catch "Apply compat fix failed.";
-                                state.notifyErr(msg);
+                                if (e != error.NotStarted) {
+                                    var buf: [192]u8 = undefined;
+                                    const msg = std.fmt.bufPrint(&buf, "Apply compat fix failed: {s}", .{@errorName(e)}) catch "Apply compat fix failed.";
+                                    state.notifyErr(msg);
+                                }
                                 apply_ok = false;
                             };
                         }

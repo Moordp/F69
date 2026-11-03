@@ -938,14 +938,12 @@ pub fn freeCompatIssues(frame: *Frame, issues: []compat_mod.Issue) void {
     frame.compat_svc.freeIssues(issues);
 }
 
-/// Apply one fix and persist the FixRecord. Errors propagate from
-/// the service (resource missing, snapshot failure, etc.). Caller is
-/// responsible for surfacing the error message in the UI.
-/// Convenience wrapper for the launch-diag Fix button. Looks up the
-/// install row for `thread_id` to recover `install_path`, then calls
-/// `applyCompatFix`. Returns `error.InstallNotFound` when the game
-/// has no installs (rare — the diag wouldn't have been raised in
-/// that case).
+/// The launch-diag Fix button. Looks up the install row for
+/// `thread_id` to recover `install_path`, then starts the compat job
+/// for that one recipe (`startCompatFix`). Returns
+/// `error.InstallNotFound` when the game has no installs (rare — the
+/// diag wouldn't have been raised in that case) and `error.NotStarted`
+/// when the job did not start (a toast already says why).
 pub fn applyCompatFixForGame(
     frame: *Frame,
     thread_id: u64,
@@ -954,7 +952,51 @@ pub fn applyCompatFixForGame(
 ) !void {
     const inst = (frame.lib.latestInstallForGame(thread_id) catch null) orelse return error.InstallNotFound;
     defer frame.lib.freeInstall(inst);
-    try applyCompatFix(frame, install_id, inst.install_path, recipe_id);
+    const ids = [_][]const u8{recipe_id};
+    if (!startCompatFix(frame, thread_id, install_id, inst.install_path, &ids)) return error.NotStarted;
+}
+
+/// Starts "Fix Compat" for one install on the compute thread. The UI
+/// thread reads only the applied-compat rows (one query) and copies them
+/// into the job; the scan and every `compat_svc.apply` run in
+/// `threads/jobs/compat.zig`, and `handleWorkDone` writes the records.
+/// `recipe_ids` empty: apply every unfixed issue the scan finds.
+/// Returns true when the job was submitted.
+pub fn startCompatFix(
+    frame: *Frame,
+    tid: u64,
+    install_id: *const [36]u8,
+    install_root: []const u8,
+    recipe_ids: []const []const u8,
+) bool {
+    const name = threads_act.gameNameFor(frame, tid);
+    var title_buf: [128]u8 = undefined;
+    const title = std.fmt.bufPrint(&title_buf, "Compat fix \u{00B7} {s}", .{name}) catch "Compat fix";
+    const a = threads_act.startTool(frame, .compat_fix, tid, title) orelse return false;
+
+    const applied = frame.lib.listAppliedCompat(install_id[0..]) catch |e| {
+        var buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Compat: can't read the applied fixes ({s}).", .{@errorName(e)}) catch "Compat: can't read the applied fixes.";
+        failTool(frame, a, msg);
+        return false;
+    };
+    defer frame.lib.freeAppliedCompatList(applied);
+
+    const job = threads.work_thread.CompatJob.create(frame.lib.alloc, .{
+        .tid = tid,
+        .install_id = install_id.*,
+        .install_root = install_root,
+        .recipe_ids = recipe_ids,
+        .applied = applied,
+    }) catch {
+        failTool(frame, a, "Out of memory.");
+        return false;
+    };
+    frame.work.submit(.{ .compat_fix = job }, a) catch {
+        failTool(frame, a, "Out of memory.");
+        return false;
+    };
+    return true;
 }
 
 /// Result of `autoApplyCompatAfterConvert`. `applied` counts both
@@ -1045,6 +1087,12 @@ pub fn autoApplyCompatAfterConvert(
     return res;
 }
 
+/// Apply one fix and persist the FixRecord, both on the calling thread.
+/// Used by the post-install auto-apply path; the Fix Compat button runs
+/// the file part on the compute thread instead (`startCompatFix`).
+/// Errors propagate from the service (resource missing, snapshot
+/// failure, etc.). Caller is responsible for surfacing the error
+/// message in the UI.
 pub fn applyCompatFix(
     frame: *Frame,
     install_id: *const [36]u8,
@@ -1061,9 +1109,16 @@ pub fn applyCompatFix(
         for (fix.backups) |b| frame.compat_svc.backups.freeRecord(b);
         if (fix.backups.len > 0) alloc.free(fix.backups);
     }
+    try recordCompatFix(frame, id_slice, fix);
+}
+
+/// DB part of a compat fix (UI thread): writes the FixRecord the file
+/// part returned. Does not free `fix`; the caller owns it.
+pub fn recordCompatFix(frame: *Frame, install_id: []const u8, fix: compat_mod.FixRecord) !void {
+    const alloc = frame.lib.alloc;
     const backups_json = try compat_mod.serializeBackups(alloc, fix.backups);
     defer alloc.free(backups_json);
-    try frame.lib.upsertAppliedCompat(id_slice, fix.recipe_id, fix.recipe_sha256, fix.applied_at, backups_json);
+    try frame.lib.upsertAppliedCompat(install_id, fix.recipe_id, fix.recipe_sha256, fix.applied_at, backups_json);
 }
 
 /// Reverse an applied fix and remove its row from the DB. Errors

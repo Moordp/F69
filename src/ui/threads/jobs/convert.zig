@@ -117,7 +117,7 @@ pub fn freeOutcome(svc: *compat_mod.Service, o: ConvertOutcome) void {
     if (o.compat_undone.len > 0) svc.alloc.free(o.compat_undone);
 }
 
-fn freeFixRecord(svc: *compat_mod.Service, fix: compat_mod.FixRecord) void {
+pub fn freeFixRecord(svc: *compat_mod.Service, fix: compat_mod.FixRecord) void {
     svc.alloc.free(fix.recipe_id);
     svc.alloc.free(fix.recipe_sha256);
     for (fix.backups) |b| svc.backups.freeRecord(b);

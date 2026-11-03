@@ -1,0 +1,21 @@
+// Test-only compat recipe for the integration test
+// "threads: Tools-tab Fix Compat ...". It matches any install that has
+// the marker file the test seeds, on every OS, and applies one env-only
+// action, so no resource bundle or symlink support is needed.
+.{
+    .id = "test.compat.marker-fix",
+    .title = "Test: marker file present",
+    .explain =
+        \\Test recipe. Matches an install that has f69-compat-test.marker
+        \\and records an env-only fix.
+    ,
+    .severity = .warn,
+    .reversible = true,
+    .detect = .{ .file_exists = "f69-compat-test.marker" },
+    .apply = .{
+        .{ .env_set = .{
+            .name = "F69_COMPAT_TEST",
+            .value = "1",
+        } },
+    },
+}

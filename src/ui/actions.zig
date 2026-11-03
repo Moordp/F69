@@ -271,6 +271,7 @@ pub const doLaunchGame = launch.doLaunchGame;
 pub const scanCompatForInstall = launch.scanCompatForInstall;
 pub const freeCompatIssues = launch.freeCompatIssues;
 pub const applyCompatFix = launch.applyCompatFix;
+pub const startCompatFix = launch.startCompatFix;
 pub const shouldAutoUpdate = launch.shouldAutoUpdate;
 pub const hasAutoFetchableSource = launch.hasAutoFetchableSource;
 pub const lookupVersionFromArchiveSha = launch.lookupVersionFromArchiveSha;

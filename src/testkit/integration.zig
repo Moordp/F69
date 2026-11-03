@@ -2600,6 +2600,66 @@ test "threads: two quick Decrypt clicks start one activity only" {
     tlog("threads-decrypt-dup: OK", .{});
 }
 
+test "threads: Tools-tab Fix Compat applies on the compute thread; the UI drain writes the record and toasts" {
+    tlog("START: threads-compat", .{});
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(8) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var env = try TestEnv.init(gpa, "threads-compat");
+    defer env.deinit();
+    var t = try dvui.testing.init(.{ .allocator = gpa, .io = io, .window_size = .{ .w = 1280, .h = 1600 } });
+    defer t.deinit();
+    var h = try ui.Harness.init(gpa, io, t.window, env.root);
+    defer h.deinit();
+
+    // The test recipe goes in the harness's user compat-recipes dir. An
+    // HTML game has no engine fingerprint, so no bundled recipe matches
+    // and the test recipe is the only issue the scan finds.
+    try env.writeFile("compat-recipes/test-fix.compat.zon", @embedFile("testdata/compat/test-fix.compat.zon"));
+    try h.compat_repo.load();
+    try std.testing.expect(h.compat_repo.byId("test.compat.marker-fix") != null);
+
+    const tid: u64 = 62;
+    const install_id = "55555555-6666-7777-8888-999999999999";
+    try env.writeFile("library/62/final/index.html", "<html></html>");
+    try env.writeFile("library/62/final/f69-compat-test.marker", "x");
+    const install_path = try env.path("library/62/final");
+    defer gpa.free(install_path);
+    _ = try h.lib.insertIfMissing(&.{ .f95_thread_id = tid, .name = "Compat Game", .developer = "Dev", .engine = .html });
+    try h.lib.upsertInstall(&.{
+        .id = install_id.*,
+        .game_thread_id = tid,
+        .version = "1.0",
+        .install_path = install_path,
+        .recipe_id = "",
+        .installed_at = 0,
+        .source = .manual,
+    });
+    try h.reloadGames();
+
+    var fr = h.frame();
+    threads_frame = &fr;
+    defer threads_frame = null;
+    h.state.screen = .detail;
+    h.state.selected_thread = tid;
+
+    _ = try dvui.testing.step(threadsRender);
+    _ = try dvui.testing.step(threadsRender);
+    try openToolsTab(h);
+    try dvui.testing.moveTo("tools-compat");
+    try dvui.testing.click(.left);
+    const st = try stepUntilToolEnds(&fr, io, .compat_fix, tid);
+    try std.testing.expectEqual(ui.threads.activity.Status.done, st);
+
+    const rows = try h.lib.listAppliedCompat(install_id);
+    defer h.lib.freeAppliedCompatList(rows);
+    try std.testing.expectEqual(@as(usize, 1), rows.len);
+    try std.testing.expectEqualStrings("test.compat.marker-fix", rows[0].recipe_id);
+    try std.testing.expect(toastContains(&h.state, "Compat: 1 fix(es) applied. Re-launch the game."));
+    tlog("threads-compat: OK", .{});
+}
+
 /// Resolver for the browser-flow tests: Workupload pages resolve to
 /// `needs_browser` without any request; every request fails.
 const NoHttp = struct {
