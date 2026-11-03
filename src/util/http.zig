@@ -288,9 +288,11 @@ const OneShotServer = struct {
     server: std.Io.net.Server,
     port: u16,
     body: []const u8,
+    accepted: std.atomic.Value(bool) = .init(false),
 
     fn serve(self: *OneShotServer) void {
         var stream = self.server.accept(self.io) catch return;
+        self.accepted.store(true, .release);
         defer stream.close(self.io);
         var rbuf: [8192]u8 = undefined;
         var wbuf: [8192]u8 = undefined;
@@ -323,6 +325,16 @@ test "fetchToFile: streams a 300 KiB body to disk with monotonic ticks ending at
     srv.port = srv.server.socket.address.getPort();
     const thr = try std.Thread.spawn(.{}, OneShotServer.serve, .{&srv});
     defer thr.join();
+    // Runs before the join: if fetchToFile failed before it connected,
+    // wake the parked accept() so the join cannot hang the test.
+    defer if (!srv.accepted.load(.acquire)) {
+        if (Io.net.IpAddress.parseIp4("127.0.0.1", srv.port)) |wake| {
+            if (wake.connect(io, .{ .mode = .stream })) |c| {
+                var st = c;
+                st.close(io);
+            } else |_| {}
+        } else |_| {}
+    };
 
     const Ticks = struct {
         last: u64 = 0,
@@ -341,9 +353,14 @@ test "fetchToFile: streams a 300 KiB body to disk with monotonic ticks ending at
 
     var url_buf: [64]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/sdk.tar.gz", .{srv.port});
-    var path_buf: [96]u8 = undefined;
-    const dest = try std.fmt.bufPrint(&path_buf, "/tmp/f69-test-fetchToFile-{d}.part", .{srv.port});
-    defer std.Io.Dir.cwd().deleteFile(io, dest) catch {};
+    // std.testing.tmpDir (under .zig-cache/tmp) rather than /tmp, so the
+    // test also runs on the Windows VM.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_root = try tmp.dir.realPathFileAlloc(io, ".", testing.allocator);
+    defer testing.allocator.free(tmp_root);
+    const dest = try std.fs.path.join(testing.allocator, &.{ tmp_root, "sdk.tar.gz.part" });
+    defer testing.allocator.free(dest);
 
     const status = try fetchToFile(testing.allocator, io, url, dest, .{}, Ticks.cb, &ticks);
     try testing.expectEqual(@as(u16, 200), status);

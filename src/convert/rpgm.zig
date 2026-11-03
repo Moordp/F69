@@ -343,10 +343,14 @@ fn setCopyPhase(prog: dom.Progress, i: u64, n: u64) void {
 /// Remove `<install_dir>/<name>.sh` if present. Called right before a
 /// (re-)convert starts overwriting the runtime: a launcher must never
 /// point at a runtime that a cancelled or failed copy left half-done.
-/// The new launcher is written as the last step.
+/// The new launcher is written as the last step. Shared by the Ren'Py
+/// path in service.zig.
 pub fn dropLauncher(io: Io, install_dir: []const u8, name: []const u8) void {
     var buf: [512]u8 = undefined;
-    const sh_path = std.fmt.bufPrint(&buf, "{s}/{s}.sh", .{ install_dir, name }) catch return;
+    const sh_path = std.fmt.bufPrint(&buf, "{s}/{s}.sh", .{ install_dir, name }) catch {
+        log.warn("dropLauncher: launcher path too long; old {s}.sh left in place", .{name});
+        return;
+    };
     std.Io.Dir.cwd().deleteFile(io, sh_path) catch {};
 }
 

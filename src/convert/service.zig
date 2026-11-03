@@ -140,10 +140,7 @@ pub const Service = struct {
         // failure mid-copy must not leave one pointing at a half-copied
         // runtime. The launcher is written last.
         if (prog.stop()) return errs.Error.Cancelled;
-        var sh_buf: [512]u8 = undefined;
-        if (std.fmt.bufPrint(&sh_buf, "{s}/{s}.sh", .{ install_dir, launcher })) |sh_path| {
-            std.Io.Dir.cwd().deleteFile(self.io, sh_path) catch {};
-        } else |_| {}
+        rpgm.dropLauncher(self.io, install_dir, launcher);
         try renpy.installLinuxLibs(self.alloc, self.io, install_dir, sdk_path, prog);
 
         // ---- launcher ----
