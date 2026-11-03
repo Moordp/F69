@@ -2,6 +2,11 @@
 
 All notable, user-facing changes. Dates are YYYY-MM-DD.
 
+## [0.15.20] - 2026-11-03
+
+### Added
+- Downloads page: controls panel (slots, speed caps, torrent share, upload caps, seeding, watched folder, MEGA status), step trail per job, history with failure reasons, Open folder.
+
 ## [0.15.19] - 2026-11-03
 
 ### Added
