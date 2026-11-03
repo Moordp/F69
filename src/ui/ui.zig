@@ -44,6 +44,7 @@ test {
     _ = @import("threads/mailbox.zig");
     _ = @import("threads/activity.zig");
     _ = @import("threads/events.zig");
+    _ = @import("threads/work_thread.zig");
     _ = @import("dl_controls.zig");
     _ = @import("screens/downloads.zig");
 }

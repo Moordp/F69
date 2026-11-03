@@ -1,0 +1,354 @@
+//! Compute thread: runs one `WorkJob` at a time. Each job carries an
+//! `Activity` (title, phase, progress, cancel flag, result) that the UI
+//! reads through `Book.snapshot`. When a job ends the thread finishes the
+//! activity and pushes `.work_done` to the UI event mailbox.
+
+const std = @import("std");
+const convert = @import("convert");
+const compat = @import("compat");
+const recipe = @import("recipe");
+const mod_job_queue = @import("../mod_job_queue.zig");
+const job_mod = @import("../job.zig");
+const Mailbox = @import("mailbox.zig").Mailbox;
+const activity_mod = @import("activity.zig");
+const events_mod = @import("events.zig");
+
+const Activity = activity_mod.Activity;
+const Book = activity_mod.Book;
+const ResultKind = activity_mod.ResultKind;
+const Events = events_mod.Events;
+
+const log = std.log.scoped(.work_thread);
+
+/// What a finished job hands back to the UI thread. Later tasks add the
+/// real variants (convert, decrypt, rpa, compat, reanalyse, plan_sim,
+/// folder_scan).
+pub const WorkOutcome = union(enum) {
+    none: void,
+    mod_queue: void,
+    /// Tests only.
+    fake: struct { steps: u32 },
+};
+
+/// Tests only: reports phase "step i / n" and progress; honours cancel.
+pub const FakeJob = struct { steps: u32, sleep_ms: u32 };
+
+/// One unit of compute work. Later tasks add the real variants.
+pub const WorkJob = union(enum) {
+    mod_queue: void,
+    fake: FakeJob,
+};
+
+pub const Deps = struct {
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    convert_svc: ?*convert.Service = null,
+    compat_svc: ?*compat.Service = null,
+    recipe_repo: ?*recipe.Repo = null,
+    mod_jobs: ?*mod_job_queue.Queue = null,
+    library_root: []const u8 = "",
+    exe_dir: []const u8 = "",
+    data_root: []const u8 = "",
+};
+
+const Entry = struct { job: WorkJob, activity: *Activity };
+
+/// What `run` hands back when a job ends without an error.
+const Done = struct {
+    outcome: WorkOutcome,
+    kind: ResultKind = .ok,
+    msg: []const u8,
+};
+
+fn nowSeconds(io: std.Io) i64 {
+    return std.Io.Clock.Timestamp.now(io, .real).raw.toSeconds();
+}
+
+/// Plain-language text for a job error. `error.Cancelled` is handled by
+/// the caller.
+fn errorText(e: anyerror) []const u8 {
+    return switch (e) {
+        error.InstallNotFound => "The install folder is gone",
+        error.NetworkError => "No network",
+        else => @errorName(e),
+    };
+}
+
+/// `anyerror`: each job kind has its own error set; `runOne` maps them.
+fn run(deps: Deps, job: WorkJob, a: *Activity, buf: []u8) anyerror!Done {
+    return switch (job) {
+        .mod_queue => .{ .outcome = .mod_queue, .msg = "Done." },
+        .fake => |f| runFake(deps.io, f, a, buf),
+    };
+}
+
+fn runFake(io: std.Io, job: FakeJob, a: *Activity, buf: []u8) !Done {
+    var i: u32 = 1;
+    while (i <= job.steps) : (i += 1) {
+        if (a.cancelled()) return error.Cancelled;
+        var pbuf: [32]u8 = undefined;
+        const phase = std.fmt.bufPrint(&pbuf, "step {d} / {d}", .{ i, job.steps }) catch unreachable;
+        a.setPhase(io, phase);
+        a.report(i, job.steps);
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(job.sleep_ms), .awake) catch {};
+    }
+    const msg = std.fmt.bufPrint(buf, "Finished {d} steps.", .{job.steps}) catch "Finished.";
+    return .{ .outcome = .{ .fake = .{ .steps = job.steps } }, .msg = msg };
+}
+
+/// The compute thread. `Worker` must not move after `start`: the thread
+/// holds a pointer to it.
+pub const Worker = struct {
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    book: *Book,
+    events: *Events,
+    deps: Deps,
+    mb: Mailbox(Entry),
+    thread: ?std.Thread = null,
+    /// Set by the thread as its last action; `stop` polls it.
+    done: std.atomic.Value(bool) = .init(false),
+    /// Guards `current` and `stopping`.
+    lock: std.Io.Mutex = .init,
+    current: ?*Activity = null,
+    stopping: bool = false,
+    /// The thread did not exit in time and was detached; it may still
+    /// touch `mb`, so `deinit` must not free it.
+    detached: bool = false,
+
+    pub fn init(alloc: std.mem.Allocator, io: std.Io, book: *Book, events: *Events, deps: Deps) Worker {
+        return .{
+            .alloc = alloc,
+            .io = io,
+            .book = book,
+            .events = events,
+            .deps = deps,
+            .mb = Mailbox(Entry).init(alloc, io),
+        };
+    }
+
+    /// Stops the thread (if any) and frees the queue.
+    pub fn deinit(self: *Worker) void {
+        self.stop();
+        if (!self.detached) self.mb.deinit();
+        self.* = undefined;
+    }
+
+    /// Spawns the thread. Calling it again, or after `stop`, does nothing.
+    pub fn start(self: *Worker) !void {
+        if (self.thread != null) return;
+        self.lock.lockUncancelable(self.io);
+        const stopping = self.stopping;
+        self.lock.unlock(self.io);
+        if (stopping) return;
+        self.thread = try std.Thread.spawn(.{}, threadMain, .{self});
+    }
+
+    /// Sets cancel on the running activity, closes the queue, finishes
+    /// every queued entry as cancelled, then waits up to 3 s for the
+    /// thread to exit. If it does not, the thread is detached.
+    pub fn stop(self: *Worker) void {
+        self.lock.lockUncancelable(self.io);
+        const already = self.stopping;
+        self.stopping = true;
+        if (self.current) |a| a.cancel.store(true, .release);
+        self.lock.unlock(self.io);
+        if (already) return;
+
+        self.mb.close();
+        while (self.mb.tryPop()) |e| self.finishUnstarted(e.activity);
+
+        const t = self.thread orelse return;
+        self.thread = null;
+        var waited_ms: u32 = 0;
+        while (!self.done.load(.acquire) and waited_ms < 3000) : (waited_ms += 50) {
+            std.Io.sleep(self.io, std.Io.Duration.fromMilliseconds(50), .awake) catch {};
+        }
+        if (self.done.load(.acquire)) {
+            t.join();
+        } else {
+            log.warn("compute thread did not stop within 3 s; detaching it", .{});
+            self.detached = true;
+            t.detach();
+        }
+    }
+
+    /// Queues one job. `activity` must already be `queued` in `book`. If
+    /// the worker is stopped the activity is finished as failed.
+    pub fn submit(self: *Worker, job: WorkJob, activity: *Activity) !void {
+        self.lock.lockUncancelable(self.io);
+        const stopping = self.stopping;
+        self.lock.unlock(self.io);
+        if (stopping) return self.book.finish(activity, .err, "Not running.", nowSeconds(self.io));
+        self.mb.push(.{ .job = job, .activity = activity }) catch |e| switch (e) {
+            error.Closed => self.book.finish(activity, .err, "Not running.", nowSeconds(self.io)),
+            error.OutOfMemory => return e,
+        };
+    }
+
+    /// True while a job is running.
+    pub fn busy(self: *const Worker) bool {
+        const me: *Worker = @constCast(self);
+        me.lock.lockUncancelable(me.io);
+        defer me.lock.unlock(me.io);
+        return me.current != null;
+    }
+
+    fn finishUnstarted(self: *Worker, a: *Activity) void {
+        a.cancel.store(true, .release);
+        self.book.finish(a, .warn, "Stopped before it started.", nowSeconds(self.io));
+        self.events.push(.{ .work_done = .{ .activity_id = a.id, .outcome = .none } });
+    }
+
+    fn threadMain(self: *Worker) void {
+        defer self.done.store(true, .release);
+        job_mod.lowerWorkerPriority();
+        while (self.mb.popWait()) |e| {
+            self.lock.lockUncancelable(self.io);
+            if (self.stopping) {
+                self.lock.unlock(self.io);
+                self.finishUnstarted(e.activity);
+                continue;
+            }
+            self.current = e.activity;
+            self.lock.unlock(self.io);
+
+            self.runOne(e);
+
+            self.lock.lockUncancelable(self.io);
+            self.current = null;
+            self.lock.unlock(self.io);
+        }
+    }
+
+    fn runOne(self: *Worker, e: Entry) void {
+        const a = e.activity;
+        a.markRunning(nowSeconds(self.io));
+        var buf: [192]u8 = undefined;
+        var outcome: WorkOutcome = .none;
+        if (run(self.deps, e.job, a, &buf)) |d| {
+            outcome = d.outcome;
+            self.book.finish(a, d.kind, d.msg, nowSeconds(self.io));
+        } else |err| switch (err) {
+            // The cancel flag is set, so `finish` records `cancelled`.
+            error.Cancelled => self.book.finish(a, .warn, "Stopped.", nowSeconds(self.io)),
+            else => self.book.finish(a, .err, errorText(err), nowSeconds(self.io)),
+        }
+        self.events.push(.{ .work_done = .{ .activity_id = a.id, .outcome = outcome } });
+    }
+};
+
+test "errorText maps known errors to plain language" {
+    try std.testing.expectEqualStrings("The install folder is gone", errorText(error.InstallNotFound));
+    try std.testing.expectEqualStrings("No network", errorText(error.NetworkError));
+    try std.testing.expectEqualStrings("AccessDenied", errorText(error.AccessDenied));
+}
+
+fn waitWorkDone(ev: *Events, id: u64) !WorkOutcome {
+    // Bounded: every job in these tests finishes or is cancelled quickly.
+    var n: usize = 0;
+    while (n < 16) : (n += 1) {
+        const e = ev.mb.popWait() orelse return error.TestUnexpectedResult;
+        switch (e) {
+            .work_done => |d| if (d.activity_id == id) return d.outcome,
+            else => {},
+        }
+        events_mod.freeEvent(std.testing.allocator, e);
+    }
+    return error.TestUnexpectedResult;
+}
+
+fn waitPhase(a: *Activity) !void {
+    var i: usize = 0;
+    while (i < 2000) : (i += 1) {
+        if (a.phaseLen(std.testing.io) > 0) return;
+        std.Io.sleep(std.testing.io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    return error.TestUnexpectedResult;
+}
+
+fn phaseText(a: *Activity, buf: []u8) []const u8 {
+    a.phase_lock.lockUncancelable(std.testing.io);
+    defer a.phase_lock.unlock(std.testing.io);
+    @memcpy(buf[0..a.phase_len], a.phase[0..a.phase_len]);
+    return buf[0..a.phase_len];
+}
+
+test "Worker: fake job runs to done with phase, progress and result" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var book = Book.init(alloc, io);
+    defer book.deinit();
+    var ev = Events.init(alloc, io, null);
+    defer ev.deinit();
+    var w = Worker.init(alloc, io, &book, &ev, .{ .alloc = alloc, .io = io });
+    defer w.deinit();
+    try w.start();
+    const a = try book.start(.hash, 1, "fake");
+    try w.submit(.{ .fake = .{ .steps = 5, .sleep_ms = 1 } }, a);
+    const out = try waitWorkDone(&ev, a.id);
+    try std.testing.expectEqual(@as(u32, 5), out.fake.steps);
+    try std.testing.expectEqual(activity_mod.Status.done, a.statusGet());
+    try std.testing.expectEqualStrings("Finished 5 steps.", a.result[0..a.result_len]);
+    var buf: [96]u8 = undefined;
+    try std.testing.expectEqualStrings("step 5 / 5", phaseText(a, &buf));
+    const p = a.prog.get();
+    try std.testing.expectEqual(@as(u64, 5), p.done);
+    try std.testing.expectEqual(@as(u64, 5), p.total);
+    try std.testing.expect(a.started_at.load(.acquire) > 0);
+}
+
+test "Worker: requestCancel stops a running fake job; status cancelled" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var book = Book.init(alloc, io);
+    defer book.deinit();
+    var ev = Events.init(alloc, io, null);
+    defer ev.deinit();
+    var w = Worker.init(alloc, io, &book, &ev, .{ .alloc = alloc, .io = io });
+    defer w.deinit();
+    try w.start();
+    const a = try book.start(.hash, 1, "long");
+    try w.submit(.{ .fake = .{ .steps = 100, .sleep_ms = 20 } }, a);
+    try waitPhase(a);
+    try std.testing.expect(w.busy());
+    book.requestCancel(a.id);
+    _ = try waitWorkDone(&ev, a.id);
+    try std.testing.expectEqual(activity_mod.Status.cancelled, a.statusGet());
+    try std.testing.expectEqualStrings("Stopped.", a.result[0..a.result_len]);
+}
+
+test "Worker: stop cancels the running job and the queued one never starts; returns within 3 s" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var book = Book.init(alloc, io);
+    defer book.deinit();
+    var ev = Events.init(alloc, io, null);
+    defer ev.deinit();
+    var w = Worker.init(alloc, io, &book, &ev, .{ .alloc = alloc, .io = io });
+    defer w.deinit();
+    try w.start();
+    const run_a = try book.start(.hash, 1, "running");
+    const queued = try book.start(.hash, 1, "queued");
+    try w.submit(.{ .fake = .{ .steps = 100, .sleep_ms = 20 } }, run_a);
+    try w.submit(.{ .fake = .{ .steps = 5, .sleep_ms = 1 } }, queued);
+    try waitPhase(run_a);
+    const t0 = std.Io.Clock.Timestamp.now(io, .awake).raw.toMilliseconds();
+    w.stop();
+    const t1 = std.Io.Clock.Timestamp.now(io, .awake).raw.toMilliseconds();
+    try std.testing.expect(t1 - t0 < 3000);
+    try std.testing.expectEqual(activity_mod.Status.cancelled, run_a.statusGet());
+    try std.testing.expectEqual(activity_mod.Status.cancelled, queued.statusGet());
+    try std.testing.expectEqualStrings("Stopped before it started.", queued.result[0..queued.result_len]);
+    try std.testing.expectEqual(@as(i64, 0), queued.started_at.load(.acquire));
+    // Submitting after stop fails the activity instead of hanging it.
+    const late = try book.start(.hash, 1, "late");
+    try w.submit(.{ .fake = .{ .steps = 1, .sleep_ms = 1 } }, late);
+    try std.testing.expectEqual(activity_mod.Status.failed, late.statusGet());
+    try std.testing.expectEqualStrings("Not running.", late.result[0..late.result_len]);
+    // Drop leftover events (all work_done; nothing owned).
+    var left: std.ArrayList(events_mod.UiEvent) = .empty;
+    defer left.deinit(alloc);
+    ev.drain(alloc, &left);
+    for (left.items) |e| events_mod.freeEvent(alloc, e);
+}

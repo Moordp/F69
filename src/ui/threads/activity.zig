@@ -42,6 +42,13 @@ pub const Activity = struct {
         self.phase_len = copyTrunc(&self.phase, text);
     }
 
+    /// Length of the phase text, read under `phase_lock`.
+    pub fn phaseLen(self: *Activity, io: std.Io) u8 {
+        self.phase_lock.lockUncancelable(io);
+        defer self.phase_lock.unlock(io);
+        return self.phase_len;
+    }
+
     pub fn report(self: *Activity, done: u64, total: u64) void {
         self.prog.sink().report(done, total);
     }

@@ -8,8 +8,8 @@ const job_mod = @import("../job.zig");
 
 const log = std.log.scoped(.ui_events);
 
-/// Placeholder: Task 4 moves/extends this with the real outcomes.
-pub const WorkOutcome = union(enum) { none: void };
+const work_thread = @import("work_thread.zig");
+pub const WorkOutcome = work_thread.WorkOutcome;
 
 pub const ToastKind = enum { ok, warn, err, info };
 
