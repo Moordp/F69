@@ -267,7 +267,13 @@ pub fn moveIntoDir(io: std.Io, alloc: Allocator, src: []const u8, dest_dir: []co
 fn uniqueDest(io: std.Io, alloc: Allocator, dir: []const u8, base: []const u8) ![]u8 {
     const cwd = std.Io.Dir.cwd();
     const first = try std.fs.path.join(alloc, &.{ dir, base });
-    if (cwd.statFile(io, first, .{ .follow_symlinks = false })) |_| {} else |_| return first;
+    if (cwd.statFile(io, first, .{ .follow_symlinks = false })) |_| {} else |e| switch (e) {
+        error.FileNotFound => return first,
+        else => {
+            alloc.free(first);
+            return e;
+        },
+    }
     alloc.free(first);
     const ext = std.fs.path.extension(base);
     const stem = base[0 .. base.len - ext.len];
@@ -278,17 +284,32 @@ fn uniqueDest(io: std.Io, alloc: Allocator, dir: []const u8, base: []const u8) !
         const next = try std.fs.path.join(alloc, &.{ dir, name });
         if (cwd.statFile(io, next, .{ .follow_symlinks = false })) |_| {
             alloc.free(next);
-        } else |_| return next;
+        } else |e| switch (e) {
+            error.FileNotFound => return next,
+            else => {
+                alloc.free(next);
+                return e;
+            },
+        }
     }
     return error.PathAlreadyExists;
 }
 
+/// Copy `src` to a new file `dst`. On failure the partial `dst` is removed
+/// after it is closed (Windows cannot delete an open file).
 fn copyFile(io: std.Io, src: []const u8, dst: []const u8) !void {
     var in = try std.Io.Dir.cwd().openFile(io, src, .{ .mode = .read_only });
     defer in.close(io);
     var out = try std.Io.Dir.cwd().createFile(io, dst, .{ .exclusive = true });
-    defer out.close(io);
-    errdefer std.Io.Dir.cwd().deleteFile(io, dst) catch {};
+    copyContents(io, &in, &out) catch |e| {
+        out.close(io);
+        std.Io.Dir.cwd().deleteFile(io, dst) catch {};
+        return e;
+    };
+    out.close(io);
+}
+
+fn copyContents(io: std.Io, in: *std.Io.File, out: *std.Io.File) !void {
     var chunk: [64 * 1024]u8 = undefined;
     var fr_buf: [4096]u8 = undefined;
     var fw_buf: [4096]u8 = undefined;
@@ -409,7 +430,7 @@ test "Scanner: file stable across two scans 3 s apart" {
     try testing.expect(std.mem.endsWith(u8, c4[0].path, "Game.zip"));
 }
 
-test "defaultWatchDirFromEnv: Linux user-dirs.dirs" {
+test "defaultWatchDirFromEnv linux prefers XDG_DOWNLOAD_DIR" {
     const a = testing.allocator;
     const t1 = try defaultWatchDirFromEnv(a, "/home/u", null,
         \\# comment
@@ -435,10 +456,50 @@ test "defaultWatchDirFromEnv: Linux user-dirs.dirs" {
     try testing.expectError(error.NoHomeDir, defaultWatchDirFromEnv(a, null, null, null, .linux));
 }
 
-test "defaultWatchDirFromEnv: Windows" {
+test "defaultWatchDirFromEnv windows uses USERPROFILE" {
     const t = try defaultWatchDirFromEnv(testing.allocator, null, "C:\\Users\\u", null, .windows);
     defer testing.allocator.free(t);
     try testing.expectEqualStrings("C:\\Users\\u\\Downloads", t);
+}
+
+test "uniqueDest: only FileNotFound means the name is free" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "afile", .data = "x" });
+    // A free name in an existing dir is returned as is.
+    const free = try uniqueDest(testing.io, testing.allocator, root, "new.zip");
+    defer testing.allocator.free(free);
+    try testing.expect(std.mem.endsWith(u8, free, "new.zip"));
+    // "afile/x.zip": stat fails with NotDir, not FileNotFound; must be an error.
+    const bad_dir = try std.fs.path.join(testing.allocator, &.{ root, "afile" });
+    defer testing.allocator.free(bad_dir);
+    try testing.expect(std.meta.isError(uniqueDest(testing.io, testing.allocator, bad_dir, "x.zip")));
+}
+
+test "copyFile: copies content and refuses an existing destination" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "a", .data = "abc" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "taken", .data = "old" });
+    const a = try std.fs.path.join(testing.allocator, &.{ root, "a" });
+    defer testing.allocator.free(a);
+    const b = try std.fs.path.join(testing.allocator, &.{ root, "b" });
+    defer testing.allocator.free(b);
+    const taken = try std.fs.path.join(testing.allocator, &.{ root, "taken" });
+    defer testing.allocator.free(taken);
+    try copyFile(testing.io, a, b);
+    const got = try tmp.dir.readFileAlloc(testing.io, "b", testing.allocator, .limited(10));
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("abc", got);
+    try testing.expect(std.meta.isError(copyFile(testing.io, a, taken)));
+    // The pre-existing file must survive the failed copy.
+    const old = try tmp.dir.readFileAlloc(testing.io, "taken", testing.allocator, .limited(10));
+    defer testing.allocator.free(old);
+    try testing.expectEqualStrings("old", old);
 }
 
 test "moveIntoDir: same-filesystem rename" {
