@@ -2450,12 +2450,13 @@ pub fn spawnXdgOpen(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !voi
         fn run(a: *ReaperArgs) void {
             defer a.alloc.free(a.path);
             defer a.alloc.destroy(a);
-            // Per-OS file-manager / opener: Windows opens Explorer (or the
-            // default handler) via `start`, macOS via `open`, Linux via
-            // `xdg-open`. Shared with the browser/URL opener so the two
+            // Per-OS opener, no shell: a folder goes to the file manager
+            // (Windows `explorer.exe`), a link to the browser (Windows
+            // `rundll32 url.dll`); macOS `open`, Linux `xdg-open`. Shared with the browser/URL opener so the two
             // don't drift — see `common.systemOpenArgv`.
             var argv_buf: [5][]const u8 = undefined;
-            const open_argv = common.systemOpenArgv("", a.path, &argv_buf);
+            const kind: common.OpenKind = if (std.mem.startsWith(u8, a.path, "http://") or std.mem.startsWith(u8, a.path, "https://")) .url else .folder;
+            const open_argv = common.systemOpenArgvKind("", a.path, kind, &argv_buf);
             var child = std.process.spawn(a.io, .{
                 .argv = open_argv,
                 .stdin = .ignore,

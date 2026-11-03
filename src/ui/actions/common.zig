@@ -110,6 +110,7 @@ const BrowserJob = struct {
     io: std.Io,
     exe: []u8,
     url: []u8,
+    kind: OpenKind = .url,
 };
 
 pub fn openInBrowser(frame: *Frame, thread_id: u64) void {
@@ -158,15 +159,19 @@ pub fn openExternalUrl(frame: *Frame, url: []const u8) void {
 }
 
 /// Open a folder in the OS file manager: always the system opener
-/// (`xdg-open` / `open` / `cmd /c start "" <dir>`), never the custom
-/// browser chosen in Settings. Fire-and-forget worker, as `openExternalUrl`.
+/// (`xdg-open` / `open` / `explorer.exe <dir>`), never the custom browser
+/// chosen in Settings. Fire-and-forget worker, as `openExternalUrl`.
 pub fn openFolder(frame: *Frame, path: []const u8) void {
-    spawnOpener(frame, "xdg-open", path);
+    spawnOpenerKind(frame, "xdg-open", path, .folder);
 }
 
 /// Run `systemOpenArgv(exe_src, url)` on a detached worker. "xdg-open"
 /// means the OS default opener.
 fn spawnOpener(frame: *Frame, exe_src: []const u8, url: []const u8) void {
+    spawnOpenerKind(frame, exe_src, url, .url);
+}
+
+fn spawnOpenerKind(frame: *Frame, exe_src: []const u8, url: []const u8, kind: OpenKind) void {
     const alloc = frame.lib.alloc;
     const io = frame.io;
 
@@ -180,7 +185,7 @@ fn spawnOpener(frame: *Frame, exe_src: []const u8, url: []const u8) void {
         alloc.destroy(job);
         return;
     };
-    job.* = .{ .alloc = alloc, .io = io, .exe = exe_owned, .url = url_owned };
+    job.* = .{ .alloc = alloc, .io = io, .exe = exe_owned, .url = url_owned, .kind = kind };
 
     const thr = std.Thread.spawn(.{}, browserWorker, .{job}) catch {
         alloc.free(exe_owned);
@@ -202,7 +207,7 @@ fn browserWorker(job: *BrowserJob) void {
         external_open_hook.record(job.url);
         return;
     }
-    const argv = systemOpenArgv(job.exe, job.url, &argv_buf);
+    const argv = systemOpenArgvKind(job.exe, job.url, job.kind, &argv_buf);
     var child = std.process.spawn(job.io, .{
         .argv = argv,
         .stdin = .ignore,
@@ -216,9 +221,11 @@ fn browserWorker(job: *BrowserJob) void {
 /// `custom_exe` is a real user-chosen browser/opener it's used verbatim
 /// (`{exe, target}`); the sentinel "xdg-open" (the cross-platform default)
 /// and the empty string both map to the OS's native opener instead —
-/// Windows `cmd /c start "" <t>`, macOS `open <t>`, Linux `xdg-open <t>`.
-/// Without this, every open-in-external-app action spawned a literal
-/// `xdg-open` that doesn't exist on Windows/macOS. `buf` backs the result.
+/// Windows `rundll32.exe url.dll,FileProtocolHandler <t>` (a link or
+/// file) or `explorer.exe <t>` (a folder), macOS `open <t>`, Linux
+/// `xdg-open <t>`. No shell on any OS: the target is one argv element, so
+/// `&`, `|`, `^` or `%` in a forum link are passed through, never run.
+/// `buf` backs the result.
 
 // --- external-open test seam ---------------------------------------------
 // Opening a URL or a folder spawns a REAL browser / file manager. In an
@@ -263,23 +270,40 @@ pub const external_open_hook = struct {
     }
 };
 
+/// What `target` is: picks the Windows opener (links and files go to
+/// their registered handler, folders to Explorer).
+pub const OpenKind = enum { url, folder };
+
+/// `systemOpenArgvKind` for a link or file (`.url`).
 pub fn systemOpenArgv(custom_exe: []const u8, target: []const u8, buf: *[5][]const u8) []const []const u8 {
+    return systemOpenArgvKind(custom_exe, target, .url, buf);
+}
+
+pub fn systemOpenArgvKind(custom_exe: []const u8, target: []const u8, kind: OpenKind, buf: *[5][]const u8) []const []const u8 {
+    return openArgvFor(builtin.os.tag, custom_exe, target, kind, buf);
+}
+
+/// `systemOpenArgvKind` for a given OS (unit-testable on any host).
+pub fn openArgvFor(os: std.Target.Os.Tag, custom_exe: []const u8, target: []const u8, kind: OpenKind, buf: *[5][]const u8) []const []const u8 {
     const use_default = custom_exe.len == 0 or std.mem.eql(u8, custom_exe, "xdg-open");
     if (!use_default) {
         buf[0] = custom_exe;
         buf[1] = target;
         return buf[0..2];
     }
-    switch (builtin.os.tag) {
-        .windows => {
-            // `start` treats its first quoted arg as a window title, so pass
-            // an empty title before the target (works for URLs and folders).
-            buf[0] = "cmd";
-            buf[1] = "/c";
-            buf[2] = "start";
-            buf[3] = "";
-            buf[4] = target;
-            return buf[0..5];
+    switch (os) {
+        .windows => switch (kind) {
+            .url => {
+                buf[0] = "rundll32.exe";
+                buf[1] = "url.dll,FileProtocolHandler";
+                buf[2] = target;
+                return buf[0..3];
+            },
+            .folder => {
+                buf[0] = "explorer.exe";
+                buf[1] = target;
+                return buf[0..2];
+            },
         },
         .macos => {
             buf[0] = "open";
@@ -1124,6 +1148,35 @@ fn exeExistsUnder(io: std.Io, install_dir: []const u8, exe: []const u8) bool {
 /// defer block (name kept from when it also freed download tables).
 pub fn freePostInstalled(state: *State, alloc: std.mem.Allocator) void {
     launch_mod.freeRunningGames(state, alloc);
+}
+
+test "openArgvFor: Windows uses rundll32 for links and explorer for folders, never a shell" {
+    var buf: [5][]const u8 = undefined;
+    const url = "https://f95zone.to/masked/x?a=1&b=2|c^d%PATH%";
+    const w = openArgvFor(.windows, "", url, .url, &buf);
+    try std.testing.expectEqual(@as(usize, 3), w.len);
+    try std.testing.expectEqualStrings("rundll32.exe", w[0]);
+    try std.testing.expectEqualStrings("url.dll,FileProtocolHandler", w[1]);
+    try std.testing.expectEqualStrings(url, w[2]);
+    for (w) |a| {
+        try std.testing.expect(!std.ascii.eqlIgnoreCase(a, "cmd") and !std.ascii.eqlIgnoreCase(a, "cmd.exe"));
+        try std.testing.expect(!std.mem.eql(u8, a, "/c"));
+    }
+    const f = openArgvFor(.windows, "xdg-open", "C:\\Games\\a & b", .folder, &buf);
+    try std.testing.expectEqual(@as(usize, 2), f.len);
+    try std.testing.expectEqualStrings("explorer.exe", f[0]);
+    try std.testing.expectEqualStrings("C:\\Games\\a & b", f[1]);
+    // Linux and macOS keep their openers; a custom browser is used as is.
+    const l = openArgvFor(.linux, "", url, .url, &buf);
+    try std.testing.expectEqualStrings("xdg-open", l[0]);
+    try std.testing.expectEqualStrings(url, l[1]);
+    const lf = openArgvFor(.linux, "", "/x/y", .folder, &buf);
+    try std.testing.expectEqualStrings("xdg-open", lf[0]);
+    const m = openArgvFor(.macos, "", url, .url, &buf);
+    try std.testing.expectEqualStrings("open", m[0]);
+    const c = openArgvFor(.windows, "C:\\ff\\firefox.exe", url, .url, &buf);
+    try std.testing.expectEqual(@as(usize, 2), c.len);
+    try std.testing.expectEqualStrings(url, c[1]);
 }
 
 test "lib prefs: list_cover_fit round-trips and old lines keep the default" {
