@@ -2,6 +2,15 @@
 
 All notable, user-facing changes. Dates are YYYY-MM-DD.
 
+## [0.15.24] - 2026-11-03
+
+### Changed
+- No file is read inside a frame any more: an I/O thread serves thumbnails, guide listings, the mkxp zoom file and mod trackers through a cache; a missing file is remembered instead of retried every frame, and a game's thumbs refresh as soon as a sync writes them.
+- The recipe editor simulates the install plan once per change on the compute thread instead of on every frame (archive listings and folder walks included); the page shows "updating…" while it does.
+- Folder import scans on the compute thread with "Scanning folder i / n", a progress bar and a Stop button; rows appear as they are found.
+- Recipe lookups for the "update available" line are cached per game.
+- Tree copies never follow symlinks (links are recreated on Linux, skipped on Windows); queued job results are freed cleanly at quit.
+
 ## [0.15.23] - 2026-11-03
 
 ### Changed
