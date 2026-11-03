@@ -40,6 +40,7 @@ test {
     _ = types;
     _ = state_mod;
     _ = @import("catalogue_view.zig");
+    _ = @import("dl_rows.zig");
 }
 
 pub const State = state_mod.State;

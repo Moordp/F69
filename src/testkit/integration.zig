@@ -2241,6 +2241,63 @@ test "downloads page GUI: clicking Paste link…, typing and OK sends paste_link
     tlog("dl-needs-you-gui: OK", .{});
 }
 
+test "downloads page renders trail chips and buttons per step" {
+    tlog("START: dl-trail", .{});
+    const gpa = std.testing.allocator;
+    const downloads = @import("downloads");
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(8) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var env = try TestEnv.init(gpa, "dl-trail");
+    defer env.deinit();
+    var t = try dvui.testing.init(.{ .allocator = gpa, .io = io, .window_size = .{ .w = 1280, .h = 800 } });
+    defer t.deinit();
+    ui.registerBundledFonts(t.window);
+    var h = try ui.Harness.init(gpa, io, t.window, env.root);
+    defer h.deinit();
+
+    // Stored rows (no engine_ref, so the downloader never polls them):
+    // an http job at extracting and a torrent at seeding.
+    _ = try h.dl.store.insert(&.{ .id = 0, .group_id = 0, .kind = .game, .game_thread_id = 0, .title = "Torrent Game", .source_href = "rpdl:1", .engine = .aria2_torrent, .step = .seeding, .dest_dir = "/tmp/f69-trail-b", .bytes_total = 100, .bytes_done = 100 });
+    _ = try h.dl.store.insert(&.{ .id = 0, .group_id = 0, .kind = .game, .game_thread_id = 0, .title = "Http Game", .source_href = "https://example.invalid/a.zip", .engine = .aria2_http, .step = .extracting, .dest_dir = "/tmp/f69-trail-a" });
+    try h.dl.load();
+    h.dl.stepOnce(1000);
+    try std.testing.expectEqual(@as(usize, 2), h.dl.recs.items.len);
+
+    var fr = h.frame();
+    dlv2_frame = &fr;
+    defer dlv2_frame = null;
+    h.state.screen = .downloads;
+    _ = try dvui.testing.step(dlv2Render);
+    _ = try dvui.testing.step(dlv2Render);
+    // Both rows render; the first row of the page carries the tags.
+    try dvui.testing.expectVisible("dl-job-row");
+    try dvui.testing.expectVisible("dl-open-folder");
+
+    // Both rows take the same step, so the first row (which carries the
+    // tags) is the one asserted.
+    const Case = struct { step: downloads.model.Step, fail: ?downloads.model.FailReason = null, tags: []const []const u8 };
+    const cases = [_]Case{
+        .{ .step = .seeding, .tags = &.{ "dl-stop-seeding", "dl-open-folder" } },
+        .{ .step = .downloading, .tags = &.{ "dl-pause", "dl-open-folder" } },
+        .{ .step = .paused, .tags = &.{"dl-resume"} },
+        .{ .step = .failed, .fail = .network, .tags = &.{ "dl-retry", "dl-remove" } },
+        .{ .step = .done, .tags = &.{ "dl-remove", "dl-open-folder" } },
+    };
+    for (cases) |c| {
+        for (h.dl.recs.items) |r| {
+            r.job.step = c.step;
+            r.job.fail = c.fail;
+        }
+        h.dl.touched = true;
+        h.dl.stepOnce(1002);
+        _ = try dvui.testing.step(dlv2Render);
+        _ = try dvui.testing.step(dlv2Render);
+        for (c.tags) |tag| try dvui.testing.expectVisible(tag);
+    }
+    tlog("dl-trail: OK", .{});
+}
+
 test "downloads page GUI: Pick file… hands the picked path to pick_file" {
     tlog("START: dl-needs-you-pick", .{});
     const gpa = std.testing.allocator;
