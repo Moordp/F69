@@ -46,6 +46,7 @@ test {
     _ = @import("threads/activity.zig");
     _ = @import("threads/events.zig");
     _ = @import("threads/work_thread.zig");
+    _ = @import("threads/io_thread.zig");
     _ = @import("threads/threads.zig");
     _ = @import("threads/jobs/convert.zig");
     _ = @import("threads/jobs/decrypt.zig");
@@ -349,6 +350,26 @@ pub fn runMainLoop(
     defer ui_events.deinit();
     var book = threads.Book.init(gpa, io);
     defer book.deinit();
+    // I/O thread: file reads, listings, install probes, tree copy/delete.
+    // Created before the worker and its defer registered first, so it
+    // stops after the worker and before `ui_events` / the downloader
+    // (shutdown order: work.stop → io.stop → dl.stop). Same detached-exit
+    // policy as the worker: a request that outlives the 3 s budget keeps
+    // using `ui_events`, so exit at once instead of freeing it.
+    var io_thread = threads.IoThread.init(gpa, io, &ui_events, .{
+        .library_root = info.library_root,
+        .exe_dir = info.exe_dir,
+        .data_root = info.data_root,
+    });
+    defer {
+        io_thread.stop();
+        if (io_thread.detached) {
+            std.log.warn("quit: I/O request still running after 3 s; exiting without the remaining cleanup", .{});
+            dl.stop();
+            std.process.exit(0);
+        }
+        io_thread.deinit();
+    }
     var worker = threads.Worker.init(gpa, io, &book, &ui_events, .{
         .alloc = gpa,
         .io = io,
@@ -395,6 +416,7 @@ pub fn runMainLoop(
     };
 
     worker.start() catch |e| std.log.err("compute thread failed to start: {s}", .{@errorName(e)});
+    io_thread.start() catch |e| std.log.err("I/O thread failed to start: {s}", .{@errorName(e)});
 
     var interrupted = false;
     main_loop: while (true) {
@@ -449,6 +471,8 @@ pub fn runMainLoop(
             // Same for the compute thread: it pushes events that wake the
             // window. `stop` is idempotent; the defer above is a no-op then.
             worker.stop();
+            // And the I/O thread, after the worker (same reason).
+            io_thread.stop();
             // End this frame cleanly first.
             _ = try win.end(.{ .manage_backend = false });
 
@@ -483,6 +507,7 @@ pub fn runMainLoop(
                 .mod_jobs = &mod_jobs,
                 .book = &book,
                 .work = &worker,
+                .io_thread = &io_thread,
                 .events = &ui_events,
                 .info = info,
             };
@@ -553,6 +578,7 @@ pub fn runMainLoop(
             .mod_jobs = &mod_jobs,
             .book = &book,
             .work = &worker,
+            .io_thread = &io_thread,
             .events = &ui_events,
             .info = info,
         };

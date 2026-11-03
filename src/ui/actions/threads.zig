@@ -141,7 +141,12 @@ pub fn drainThreads(frame: *Frame) void {
         switch (ev) {
             .toast => |t| frame.state.pushToast(kindMap(t.kind), t.msg),
             .work_done => |w| handleWorkDone(frame, w.activity_id, w.outcome),
-            .io => {},
+            .io => |r| {
+                // Task 15 routes replies to the file cache. Until then
+                // nothing waits on a ticket: free the reply here.
+                threads.io_thread.freeReply(frame.events.alloc, r);
+                continue;
+            },
             .wake => {},
         }
         // Toast messages are owned by the Events allocator.

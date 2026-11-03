@@ -113,6 +113,9 @@ pub const Frame = struct {
     /// The compute thread. Submit a `WorkJob` with an `Activity` from
     /// `book`; the result arrives as `.work_done` on `events`.
     work: *threads.Worker,
+    /// The I/O thread. `send` an `IoRequest` with a ticket; the reply
+    /// arrives as `.io` on `events`.
+    io_thread: *threads.IoThread,
     /// Worker-to-UI event mailbox, drained first in every frame by
     /// `actions.drainThreads`.
     events: *threads.Events,

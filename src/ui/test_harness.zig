@@ -64,10 +64,12 @@ pub const Harness = struct {
     compat_svc: compat.Service,
     mod_jobs_ctx: actions.RunnerCtx,
     mod_jobs: mod_job_queue.Queue,
-    /// Same three thread objects `runMainLoop` builds. The worker is
-    /// started in `init` and stopped first in `deinit`.
+    /// Same thread objects `runMainLoop` builds. The worker and the I/O
+    /// thread are started in `init` and stopped first in `deinit`
+    /// (worker, then I/O thread).
     ui_events: threads.Events,
     book: threads.Book,
+    io_thread: threads.IoThread,
     worker: threads.Worker,
     /// Submits every mod-queue enqueue to `worker` (as `runMainLoop`).
     mod_queue_hook: threads.ModQueueHook,
@@ -204,6 +206,12 @@ pub const Harness = struct {
         errdefer self.ui_events.deinit();
         self.book = threads.Book.init(gpa, io);
         errdefer self.book.deinit();
+        self.io_thread = threads.IoThread.init(gpa, io, &self.ui_events, .{
+            .library_root = self.info.library_root,
+            .exe_dir = self.info.exe_dir,
+            .data_root = self.info.data_root,
+        });
+        errdefer self.io_thread.deinit();
         self.worker = threads.Worker.init(gpa, io, &self.book, &self.ui_events, .{
             .alloc = gpa,
             .io = io,
@@ -220,6 +228,7 @@ pub const Harness = struct {
         self.mod_jobs.on_enqueue = threads.ModQueueHook.onEnqueue;
         self.mod_jobs.on_enqueue_ctx = &self.mod_queue_hook;
         try self.worker.start();
+        try self.io_thread.start();
 
         return self;
     }
@@ -272,6 +281,7 @@ pub const Harness = struct {
         // the worker once it is stopped.
         self.mod_jobs.on_enqueue = null;
         self.worker.stop();
+        self.io_thread.stop();
         // Signal cancel to any worker the test left running, then pump the
         // drains until they clear — otherwise tearing down the services
         // races a live worker thread's next syscall (UAF). Mirrors
@@ -321,7 +331,9 @@ pub const Harness = struct {
         // both, so leak them rather than free memory a live thread uses.
         const worker_detached = self.worker.detached;
         self.worker.deinit();
-        if (!worker_detached) {
+        const io_detached = self.io_thread.detached;
+        self.io_thread.deinit();
+        if (!worker_detached and !io_detached) {
             self.ui_events.deinit();
             self.book.deinit();
         }
@@ -360,6 +372,7 @@ pub const Harness = struct {
             .mod_jobs = &self.mod_jobs,
             .book = &self.book,
             .work = &self.worker,
+            .io_thread = &self.io_thread,
             .events = &self.ui_events,
             .info = self.info,
         };

@@ -10,6 +10,8 @@ const log = std.log.scoped(.ui_events);
 
 const work_thread = @import("work_thread.zig");
 pub const WorkOutcome = work_thread.WorkOutcome;
+const io_thread = @import("io_thread.zig");
+pub const IoReply = io_thread.IoReply;
 
 pub const ToastKind = enum { ok, warn, err, info };
 
@@ -17,15 +19,17 @@ pub const UiEvent = union(enum) {
     /// `msg` is owned by the sender's allocator; `freeEvent` frees it.
     toast: struct { kind: ToastKind, msg: []const u8 },
     work_done: struct { activity_id: u64, outcome: WorkOutcome },
-    /// Task 14 replaces this with the real reply type.
-    io: void,
+    /// A reply from the I/O thread. Owned by the `Events` allocator;
+    /// `freeEvent` frees it with `io_thread.freeReply`.
+    io: IoReply,
     wake: void,
 };
 
-/// Frees strings owned by the event.
+/// Frees strings and buffers owned by the event.
 pub fn freeEvent(alloc: std.mem.Allocator, ev: UiEvent) void {
     switch (ev) {
         .toast => |t| alloc.free(t.msg),
+        .io => |r| io_thread.freeReply(alloc, r),
         else => {},
     }
 }
