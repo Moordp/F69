@@ -2,6 +2,15 @@
 
 All notable, user-facing changes. Dates are YYYY-MM-DD.
 
+## [0.15.23] - 2026-11-03
+
+### Changed
+- Convert, Decrypt RPGM assets, Fix Compat, Extract RPA, engine re-analysis and mod installs now run on a separate compute thread, one at a time: the window never freezes while they work. Each shows on the Downloads page under "Tools" (phase, progress bar or sweep, elapsed time, Cancel) and as a strip on the game's page on every tab; finished ones move to "Tools history" with their result.
+- The hero row shows a Convert button when Play finds a Windows build and no Linux launcher; the message names where to click.
+- Convert reports real steps: downloading the SDK (bytes), unpacking it, copying runtime files (file i / n), patching libraries, writing the launcher. Cancel between files leaves a folder a second Convert repairs.
+- Auto-convert after an install and the Play-time convert go through the same compute thread.
+- Mod install crash recovery now records the running phase at once and rolls back by the recipe id it was installed under.
+
 ## [0.15.22] - 2026-11-03
 
 ### Added
