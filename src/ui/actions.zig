@@ -70,6 +70,10 @@ const mods = @import("actions/mods.zig");
 const tags = @import("actions/tags.zig");
 const imports = @import("actions/imports.zig");
 const common = @import("actions/common.zig");
+const threads_act = @import("actions/threads.zig");
+
+// ---- Threads: worker-to-UI event drain ----
+pub const drainThreads = threads_act.drainThreads;
 
 // ---- Public type aliases (kept identical to pre-R9 names) ----
 pub const ModsTabCounts = mods.ModsTabCounts;
@@ -348,6 +352,7 @@ pub const wizardSave = mods.wizardSave;
 // only analyze the referenced symbols, so nested `test` blocks would
 // silently no-op (same idiom as downloads.zig / importers.zig roots).
 test {
+    _ = @import("actions/threads.zig");
     _ = @import("actions/auth.zig");
     _ = @import("actions/mega.zig");
     _ = @import("actions/saves_link.zig");

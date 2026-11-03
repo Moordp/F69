@@ -40,7 +40,11 @@ pub const Events = struct {
         return .{ .mb = Mailbox(UiEvent).init(alloc, io), .win = win, .alloc = alloc };
     }
 
+    /// Closes the mailbox, frees every event still queued, then frees the
+    /// queue. No producer may push after this.
     pub fn deinit(self: *Events) void {
+        self.mb.close();
+        while (self.mb.tryPop()) |ev| freeEvent(self.alloc, ev);
         self.mb.deinit();
     }
 
@@ -76,6 +80,15 @@ test "push two toasts then drain in order" {
     try std.testing.expectEqualStrings("one", out.items[0].toast.msg);
     try std.testing.expectEqualStrings("two", out.items[1].toast.msg);
     for (out.items) |e| freeEvent(alloc, e);
+}
+
+test "deinit frees events still queued" {
+    const alloc = std.testing.allocator;
+    var ev = Events.init(alloc, std.testing.io, null);
+    ev.push(.{ .toast = .{ .kind = .warn, .msg = try alloc.dupe(u8, "never drained") } });
+    ev.push(.{ .wake = {} });
+    // std.testing.allocator reports a leak if deinit does not free the toast.
+    ev.deinit();
 }
 
 test "push after close drops and frees" {

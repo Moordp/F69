@@ -25,6 +25,7 @@ const compat = @import("compat");
 const dvui = @import("dvui");
 const state_mod = @import("state.zig");
 const mod_job_queue = @import("mod_job_queue.zig");
+pub const threads = @import("threads/threads.zig");
 
 pub const State = state_mod.State;
 
@@ -106,6 +107,15 @@ pub const Frame = struct {
     /// All `actions.doInstallMod` / `doUninstallMod` calls enqueue here
     /// instead of running synchronously, so 15GB mods don't lock the UI.
     mod_jobs: *mod_job_queue.Queue,
+    /// What the user sees of background jobs (title, phase, progress,
+    /// result). Shared with the compute thread; read via `snapshot`.
+    book: *threads.Book,
+    /// The compute thread. Submit a `WorkJob` with an `Activity` from
+    /// `book`; the result arrives as `.work_done` on `events`.
+    work: *threads.Worker,
+    /// Worker-to-UI event mailbox, drained first in every frame by
+    /// `actions.drainThreads`.
+    events: *threads.Events,
     info: RuntimeInfo,
     /// Per-frame snapshot of `(game_thread_id → latest install version
     /// string)`. Built once by `guiFrame` from a single SELECT over

@@ -27,6 +27,7 @@ const state_mod = @import("state.zig");
 const types = @import("types.zig");
 const actions = @import("actions.zig");
 const mod_job_queue = @import("mod_job_queue.zig");
+const threads = types.threads;
 
 const State = state_mod.State;
 const Frame = types.Frame;
@@ -63,6 +64,11 @@ pub const Harness = struct {
     compat_svc: compat.Service,
     mod_jobs_ctx: actions.RunnerCtx,
     mod_jobs: mod_job_queue.Queue,
+    /// Same three thread objects `runMainLoop` builds. The worker is
+    /// started in `init` and stopped first in `deinit`.
+    ui_events: threads.Events,
+    book: threads.Book,
+    worker: threads.Worker,
 
     state: State,
     info: RuntimeInfo,
@@ -192,6 +198,24 @@ pub const Harness = struct {
             .host = .{},
         };
 
+        self.ui_events = threads.Events.init(gpa, io, win);
+        errdefer self.ui_events.deinit();
+        self.book = threads.Book.init(gpa, io);
+        errdefer self.book.deinit();
+        self.worker = threads.Worker.init(gpa, io, &self.book, &self.ui_events, .{
+            .alloc = gpa,
+            .io = io,
+            .convert_svc = &self.convert_svc,
+            .compat_svc = &self.compat_svc,
+            .recipe_repo = &self.recipe_repo,
+            .mod_jobs = &self.mod_jobs,
+            .library_root = self.info.library_root,
+            .exe_dir = self.info.exe_dir,
+            .data_root = self.info.data_root,
+        });
+        errdefer self.worker.deinit();
+        try self.worker.start();
+
         return self;
     }
 
@@ -199,6 +223,7 @@ pub const Harness = struct {
     /// slot is empty, so this is safe to call repeatedly. Mirrors the set
     /// runMainLoop calls each frame.
     fn pumpDrains(f: *Frame) void {
+        actions.drainThreads(f);
         actions.drainSync(f);
         actions.drainFastCheck(f);
         actions.drainImageQueue(f);
@@ -236,6 +261,10 @@ pub const Harness = struct {
 
     pub fn deinit(self: *Harness) void {
         const gpa = self.gpa;
+        // Stop the compute thread first (cancel + up to 3 s wait). The
+        // events and book it shared stay alive until the drain loop below
+        // has run, which still drains `ui_events`.
+        self.worker.stop();
         // Signal cancel to any worker the test left running, then pump the
         // drains until they clear — otherwise tearing down the services
         // races a live worker thread's next syscall (UAF). Mirrors
@@ -279,6 +308,16 @@ pub const Harness = struct {
         actions.freeWatchDir(&self.state, lib_alloc);
 
         if (self.games.len > 0) self.lib.freeGames(self.games);
+        // Mirrors runMainLoop's defer order: worker, then the queued
+        // events (their toast strings), then the activity book.
+        // A detached worker (did not stop within 3 s) may still touch
+        // both, so leak them rather than free memory a live thread uses.
+        const worker_detached = self.worker.detached;
+        self.worker.deinit();
+        if (!worker_detached) {
+            self.ui_events.deinit();
+            self.book.deinit();
+        }
         self.mod_jobs.deinit();
         self.compat_host.deinit();
         self.compat_repo.deinit();
@@ -312,6 +351,9 @@ pub const Harness = struct {
             .win = self.win,
             .io = self.io,
             .mod_jobs = &self.mod_jobs,
+            .book = &self.book,
+            .work = &self.worker,
+            .events = &self.ui_events,
             .info = self.info,
         };
     }

@@ -28,6 +28,7 @@ const dvui = @import("dvui");
 
 const state_mod = @import("state.zig");
 const types = @import("types.zig");
+const threads = types.threads;
 const actions = @import("actions.zig");
 const screens = @import("screens.zig");
 const mod_job_queue = @import("mod_job_queue.zig");
@@ -45,6 +46,7 @@ test {
     _ = @import("threads/activity.zig");
     _ = @import("threads/events.zig");
     _ = @import("threads/work_thread.zig");
+    _ = @import("threads/threads.zig");
     _ = @import("dl_controls.zig");
     _ = @import("screens/downloads.zig");
 }
@@ -338,6 +340,30 @@ pub fn runMainLoop(
     dl.start() catch |e| std.log.err("downloader thread failed to start: {s}", .{@errorName(e)});
     defer dl.stop();
 
+    // Compute thread + the two objects it shares with the UI thread. The
+    // worker's defer is registered after the downloader's, so it runs
+    // first: the worker stops (cancel + up to 3 s wait), then `book` and
+    // `ui_events` are freed, then the downloader stops. The quit path also
+    // stops it explicitly before the window is torn down, since
+    // `ui_events.push` wakes `win`.
+    var ui_events = threads.Events.init(gpa, io, &win);
+    defer ui_events.deinit();
+    var book = threads.Book.init(gpa, io);
+    defer book.deinit();
+    var worker = threads.Worker.init(gpa, io, &book, &ui_events, .{
+        .alloc = gpa,
+        .io = io,
+        .convert_svc = convert_svc,
+        .compat_svc = compat_svc,
+        .recipe_repo = recipe_repo,
+        .mod_jobs = &mod_jobs,
+        .library_root = info.library_root,
+        .exe_dir = info.exe_dir,
+        .data_root = info.data_root,
+    });
+    defer worker.deinit();
+    worker.start() catch |e| std.log.err("compute thread failed to start: {s}", .{@errorName(e)});
+
     var interrupted = false;
     main_loop: while (true) {
         if (state.reload_requested) {
@@ -388,6 +414,9 @@ pub fn runMainLoop(
             // Stop the downloader thread before any teardown — it calls the
             // window's wake-up and owns the engines' sockets.
             dl.stop();
+            // Same for the compute thread: it pushes events that wake the
+            // window. `stop` is idempotent; the defer above is a no-op then.
+            worker.stop();
             // End this frame cleanly first.
             _ = try win.end(.{ .manage_backend = false });
 
@@ -420,6 +449,9 @@ pub fn runMainLoop(
                 .win = &win,
                 .io = io,
                 .mod_jobs = &mod_jobs,
+                .book = &book,
+                .work = &worker,
+                .events = &ui_events,
                 .info = info,
             };
             // Wait up to ~6 seconds. The forum rate-limit is 1.5 s
@@ -453,7 +485,9 @@ pub fn runMainLoop(
                 actions.drainModJobs(&shutdown_frame);
                 io.sleep(std.Io.Duration.fromMilliseconds(50), .real) catch {};
             }
-            if (actions.workersBusy(&state)) {
+            // A detached compute thread may still touch `book` and
+            // `ui_events`, which the defers would free: hard-exit too.
+            if (actions.workersBusy(&state) or worker.detached) {
                 // A worker is still running and we've run out of patience.
                 // Letting `main`'s defers run from here would tear down
                 // `init.io` / `f95_client.http` / `gpa` while the worker
@@ -487,6 +521,9 @@ pub fn runMainLoop(
             .win = &win,
             .io = io,
             .mod_jobs = &mod_jobs,
+            .book = &book,
+            .work = &worker,
+            .events = &ui_events,
             .info = info,
         };
         // Auto-update-check: fires once at startup (if enabled) and
@@ -720,6 +757,9 @@ pub fn guiFrame(frame: *Frame) !bool {
     }
 
     const t_drain = types.startLatency(frame.io);
+    // Thread events first: compute / I/O results land before anything
+    // else this frame reads.
+    actions.drainThreads(frame);
     actions.drainSync(frame);
     actions.drainFastCheck(frame);
     actions.drainImageQueue(frame);
@@ -742,7 +782,8 @@ pub fn guiFrame(frame: *Frame) !bool {
     // ~60 fps; an idle library incurs zero wakeups.
     if (anyDownloadActive(frame.dl) or anyPostInstallActive(frame.state) or
         actions.folderImportActive(frame.state) or actions.anyModJobActive(frame) or
-        actions.anyManualInstallActive(frame.state) or actions.anyRetryPending(frame.dl))
+        actions.anyManualInstallActive(frame.state) or actions.anyRetryPending(frame.dl) or
+        frame.book.anyLive())
     {
         dvui.refresh(frame.win, @src(), null);
     }

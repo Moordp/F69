@@ -2102,6 +2102,87 @@ test "downloads v2: a failed install worker fails the job instead of acking it" 
     tlog("dl-v2-install-fail: OK ({s})", .{j.fail_msg});
 }
 
+var threads_frame: ?*ui.Frame = null;
+fn threadsRender() !dvui.App.Result {
+    if (threads_frame) |fr| _ = ui.guiFrame(fr) catch return .close;
+    return .ok;
+}
+
+test "threads: a fake compute job finishes through the frame and pushes no toast" {
+    tlog("START: threads-fake-done", .{});
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(8) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var env = try TestEnv.init(gpa, "threads-fake-done");
+    defer env.deinit();
+    var t = try dvui.testing.init(.{ .allocator = gpa, .io = io, .window_size = .{ .w = 1280, .h = 800 } });
+    defer t.deinit();
+    var h = try ui.Harness.init(gpa, io, t.window, env.root);
+    defer h.deinit();
+
+    var fr = h.frame();
+    threads_frame = &fr;
+    defer threads_frame = null;
+
+    const a = try fr.book.start(.hash, 42, "Fake job");
+    try fr.work.submit(.{ .fake = .{ .steps = 5, .sleep_ms = 1 } }, a);
+
+    var done = false;
+    var i: usize = 0;
+    while (i < 200 and !done) : (i += 1) {
+        _ = try dvui.testing.step(threadsRender);
+        var arena_state = std.heap.ArenaAllocator.init(gpa);
+        defer arena_state.deinit();
+        const views = try fr.book.snapshot(arena_state.allocator());
+        for (views) |v| {
+            if (v.id == a.id and v.status == .done) done = true;
+        }
+        if (!done) std.Io.sleep(io, .fromMilliseconds(5), .awake) catch {};
+    }
+    try std.testing.expect(done);
+    // Step once more so the `.work_done` event is drained by guiFrame.
+    _ = try dvui.testing.step(threadsRender);
+    // A fake job's `work_done` pushes no toast.
+    try std.testing.expectEqual(@as(usize, 0), h.state.toast_count);
+    tlog("threads-fake-done: OK after {d} frames", .{i});
+}
+
+test "threads: Harness.deinit cancels a running 100-step job within 3 s" {
+    tlog("START: threads-deinit-cancel", .{});
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(8) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var env = try TestEnv.init(gpa, "threads-deinit-cancel");
+    defer env.deinit();
+    var t = try dvui.testing.init(.{ .allocator = gpa, .io = io, .window_size = .{ .w = 1280, .h = 800 } });
+    defer t.deinit();
+    // Owned here (no defer) so the test can time `deinit` itself.
+    const h = try ui.Harness.init(gpa, io, t.window, env.root);
+    var h_live = true;
+    errdefer if (h_live) h.deinit();
+
+    var fr = h.frame();
+    threads_frame = &fr;
+    defer threads_frame = null;
+
+    const a = try fr.book.start(.hash, 43, "Long fake job");
+    try fr.work.submit(.{ .fake = .{ .steps = 100, .sleep_ms = 50 } }, a);
+    _ = try dvui.testing.step(threadsRender);
+    _ = try dvui.testing.step(threadsRender);
+    _ = try dvui.testing.step(threadsRender);
+    threads_frame = null;
+
+    const t0 = std.Io.Clock.Timestamp.now(io, .awake);
+    h_live = false;
+    h.deinit();
+    const t1 = std.Io.Clock.Timestamp.now(io, .awake);
+    const elapsed_ms = t0.durationTo(t1).raw.toMilliseconds();
+    tlog("threads-deinit-cancel: deinit took {d} ms", .{elapsed_ms});
+    try std.testing.expect(elapsed_ms < 3000);
+}
+
 /// Resolver for the browser-flow tests: Workupload pages resolve to
 /// `needs_browser` without any request; every request fails.
 const NoHttp = struct {
