@@ -127,8 +127,11 @@ pub const Scanner = struct {
             if (!unchanged or now - gop.value_ptr.first_seen_at < stable_secs) continue;
 
             const path = try std.fs.path.join(self.alloc, &.{ self.dir, e.name });
+            if (!openExclusive(self.io, path)) {
+                self.alloc.free(path);
+                continue;
+            }
             errdefer self.alloc.free(path);
-            if (!openExclusive(self.io, path)) continue;
             try out.append(self.alloc, .{
                 .path = path,
                 .name = path[path.len - e.name.len ..],
@@ -223,7 +226,7 @@ fn xdgDownloadDir(alloc: Allocator, home: ?[]const u8, text: []const u8) ![]u8 {
         var v = std.mem.trim(u8, line[key.len..], " \t");
         v = std.mem.trim(u8, v, "\"");
         var resolved: []u8 = undefined;
-        if (std.mem.startsWith(u8, v, "$HOME")) {
+        if (std.mem.startsWith(u8, v, "$HOME") and (v.len == 5 or v[5] == '/')) {
             const h = home orelse return error.NotFound;
             resolved = try std.fmt.allocPrint(alloc, "{s}{s}", .{ std.mem.trimEnd(u8, h, "/"), v["$HOME".len..] });
         } else if (v.len > 0 and v[0] == '/') {
@@ -248,7 +251,7 @@ pub const MovedPath = struct { path: []u8 };
 pub fn moveIntoDir(io: std.Io, alloc: Allocator, src: []const u8, dest_dir: []const u8) !MovedPath {
     const cwd = std.Io.Dir.cwd();
     try cwd.createDirPath(io, dest_dir);
-    const dst = try std.fs.path.join(alloc, &.{ dest_dir, std.fs.path.basename(src) });
+    const dst = try uniqueDest(io, alloc, dest_dir, std.fs.path.basename(src));
     errdefer alloc.free(dst);
     cwd.rename(src, cwd, dst, io) catch |e| switch (e) {
         error.CrossDevice => {
@@ -260,11 +263,32 @@ pub fn moveIntoDir(io: std.Io, alloc: Allocator, src: []const u8, dest_dir: []co
     return .{ .path = dst };
 }
 
+/// `<dir>/<base>`, or `<dir>/<stem> (N).<ext>` when that already exists.
+fn uniqueDest(io: std.Io, alloc: Allocator, dir: []const u8, base: []const u8) ![]u8 {
+    const cwd = std.Io.Dir.cwd();
+    const first = try std.fs.path.join(alloc, &.{ dir, base });
+    if (cwd.statFile(io, first, .{ .follow_symlinks = false })) |_| {} else |_| return first;
+    alloc.free(first);
+    const ext = std.fs.path.extension(base);
+    const stem = base[0 .. base.len - ext.len];
+    var n: u32 = 2;
+    while (n < 10_000) : (n += 1) {
+        const name = try std.fmt.allocPrint(alloc, "{s} ({d}){s}", .{ stem, n, ext });
+        defer alloc.free(name);
+        const next = try std.fs.path.join(alloc, &.{ dir, name });
+        if (cwd.statFile(io, next, .{ .follow_symlinks = false })) |_| {
+            alloc.free(next);
+        } else |_| return next;
+    }
+    return error.PathAlreadyExists;
+}
+
 fn copyFile(io: std.Io, src: []const u8, dst: []const u8) !void {
     var in = try std.Io.Dir.cwd().openFile(io, src, .{ .mode = .read_only });
     defer in.close(io);
-    var out = try std.Io.Dir.cwd().createFile(io, dst, .{ .truncate = true });
+    var out = try std.Io.Dir.cwd().createFile(io, dst, .{ .exclusive = true });
     defer out.close(io);
+    errdefer std.Io.Dir.cwd().deleteFile(io, dst) catch {};
     var chunk: [64 * 1024]u8 = undefined;
     var fr_buf: [4096]u8 = undefined;
     var fw_buf: [4096]u8 = undefined;
@@ -436,4 +460,59 @@ test "moveIntoDir: same-filesystem rename" {
     const data = try tmp.dir.readFileAlloc(testing.io, "dest/f.zip", testing.allocator, .limited(100));
     defer testing.allocator.free(data);
     try testing.expectEqualStrings("hello", data);
+}
+
+test "moveIntoDir: existing destination gets a unique name" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    try tmp.dir.createDirPath(testing.io, "dest");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "dest/f.zip", .data = "old" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "f.zip", .data = "new" });
+    const src = try std.fs.path.join(testing.allocator, &.{ root, "f.zip" });
+    defer testing.allocator.free(src);
+    const dest = try std.fs.path.join(testing.allocator, &.{ root, "dest" });
+    defer testing.allocator.free(dest);
+
+    const moved = try moveIntoDir(testing.io, testing.allocator, src, dest);
+    defer testing.allocator.free(moved.path);
+    try testing.expect(std.mem.endsWith(u8, moved.path, "f (2).zip"));
+    const old = try tmp.dir.readFileAlloc(testing.io, "dest/f.zip", testing.allocator, .limited(100));
+    defer testing.allocator.free(old);
+    try testing.expectEqualStrings("old", old);
+    const new = try tmp.dir.readFileAlloc(testing.io, "dest/f (2).zip", testing.allocator, .limited(100));
+    defer testing.allocator.free(new);
+    try testing.expectEqualStrings("new", new);
+}
+
+test "defaultWatchDirFromEnv: $HOMEX is not expanded" {
+    const t = try defaultWatchDirFromEnv(testing.allocator, "/home/u", null, "XDG_DOWNLOAD_DIR=\"$HOMEX/dl\"\n", .linux);
+    defer testing.allocator.free(t);
+    try testing.expectEqualStrings("/home/u/Downloads", t);
+}
+
+test "Scanner: unopenable file does not leak" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(dir);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "locked.zip", .data = "abc" });
+    try tmp.dir.setFilePermissions(testing.io, "locked.zip", .fromMode(0), .{});
+    defer tmp.dir.setFilePermissions(testing.io, "locked.zip", .fromMode(0o644), .{}) catch {};
+    // Running as root, open still succeeds: the skip branch is not reached.
+    var probe = tmp.dir.openFile(testing.io, "locked.zip", .{}) catch null;
+    if (probe) |*f| {
+        f.close(testing.io);
+        return error.SkipZigTest;
+    }
+
+    var sc = Scanner.init(testing.allocator, testing.io, dir);
+    defer sc.deinit();
+    const c1 = try sc.scan(1000);
+    defer freeCandidates(testing.allocator, c1);
+    const c2 = try sc.scan(1004);
+    defer freeCandidates(testing.allocator, c2);
+    try testing.expectEqual(@as(usize, 0), c2.len);
 }
