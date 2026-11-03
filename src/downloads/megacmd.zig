@@ -46,6 +46,7 @@ fn parseGroup(g: []const u8) ?Progress {
     var pct_s = std.mem.trim(u8, g[colon + 1 ..], " ");
     if (std.mem.endsWith(u8, pct_s, "%")) pct_s = std.mem.trim(u8, pct_s[0 .. pct_s.len - 1], " ");
     const pct = std.fmt.parseFloat(f32, pct_s) catch return null;
+    if (!std.math.isFinite(pct)) return null;
     return .{ .done = done_n *| mult, .total = total_n *| mult, .pct = pct };
 }
 
@@ -84,14 +85,19 @@ pub fn parseTransfersTable(text: []const u8, alloc: Allocator) ![]Transfer {
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
         if (line.len == 0) continue;
-        var f: [4][]const u8 = undefined;
-        var n: usize = 0;
-        var it = std.mem.splitScalar(u8, line, '|');
-        while (it.next()) |part| {
-            if (n < 4) f[n] = std.mem.trim(u8, part, " \t");
-            n += 1;
-        }
-        if (n < 4) continue;
+        // tag = first field, state = last, progress = second-to-last,
+        // dest = everything between (so a `|` in a path survives).
+        const first = std.mem.indexOfScalar(u8, line, '|') orelse continue;
+        const last = std.mem.lastIndexOfScalar(u8, line, '|').?;
+        if (last == first) continue;
+        const mid = std.mem.lastIndexOfScalar(u8, line[0..last], '|').?;
+        if (mid == first) continue;
+        const f = [4][]const u8{
+            std.mem.trim(u8, line[0..first], " \t"),
+            std.mem.trim(u8, line[first + 1 .. mid], " \t"),
+            std.mem.trim(u8, line[mid + 1 .. last], " \t"),
+            std.mem.trim(u8, line[last + 1 ..], " \t"),
+        };
         const tag = std.fmt.parseInt(u32, f[0], 10) catch continue; // header
         const state = std.meta.stringToEnum(State, f[3]) orelse continue;
         const dest = try alloc.dupe(u8, f[1]);
@@ -107,7 +113,8 @@ fn trailingPct(s: []const u8) ?f32 {
     var start = body.len;
     while (start > 0 and (std.ascii.isDigit(body[start - 1]) or body[start - 1] == '.')) start -= 1;
     if (start == body.len) return null;
-    return std.fmt.parseFloat(f32, body[start..]) catch null;
+    const v = std.fmt.parseFloat(f32, body[start..]) catch return null;
+    return if (std.math.isFinite(v)) v else null;
 }
 
 /// `Account e-mail: <email>` -> trimmed email.
@@ -174,28 +181,17 @@ fn locateInErr(
     os: std.Target.Os.Tag,
     exists: *const fn (path: []const u8) bool,
 ) !?Located {
+    // Candidates are built with `defer free`; the result owns separate dupes.
     if (os == .windows) {
         const lad = localappdata orelse return null;
-        const dir = try std.fmt.allocPrint(alloc, "{s}\\MEGAcmd", .{lad});
-        errdefer alloc.free(dir);
-        const client = try std.fmt.allocPrint(alloc, "{s}\\MegaClient.exe", .{dir});
-        errdefer alloc.free(client);
-        if (!exists(client)) {
-            alloc.free(client);
-            alloc.free(dir);
-            return null;
-        }
-        const server_p = try std.fmt.allocPrint(alloc, "{s}\\MEGAcmdServer.exe", .{dir});
-        errdefer alloc.free(server_p);
-        return .{
-            .client = client,
-            .server = if (exists(server_p)) server_p else blk: {
-                alloc.free(server_p);
-                break :blk null;
-            },
-            .dir = dir,
-            .is_windows_direct = true,
-        };
+        const dir_p = try std.fmt.allocPrint(alloc, "{s}\\MEGAcmd", .{lad});
+        defer alloc.free(dir_p);
+        const client_p = try std.fmt.allocPrint(alloc, "{s}\\MegaClient.exe", .{dir_p});
+        defer alloc.free(client_p);
+        if (!exists(client_p)) return null;
+        const server_p = try std.fmt.allocPrint(alloc, "{s}\\MEGAcmdServer.exe", .{dir_p});
+        defer alloc.free(server_p);
+        return try buildLocated(alloc, client_p, if (exists(server_p)) server_p else null, dir_p, true);
     }
     for (path_entries) |entry| {
         if (entry.len == 0) continue;
@@ -203,30 +199,47 @@ fn locateInErr(
         defer alloc.free(get);
         if (!exists(get)) continue;
         const exec_p = try std.fs.path.join(alloc, &.{ entry, "mega-exec" });
-        errdefer alloc.free(exec_p);
-        const client = if (exists(exec_p)) exec_p else blk: {
-            alloc.free(exec_p);
-            break :blk try alloc.dupe(u8, get);
-        };
-        errdefer alloc.free(client);
+        defer alloc.free(exec_p);
         const server_p = try std.fs.path.join(alloc, &.{ entry, "mega-cmd-server" });
-        errdefer alloc.free(server_p);
-        const server: ?[]const u8 = if (exists(server_p)) server_p else blk: {
-            alloc.free(server_p);
-            break :blk null;
-        };
-        errdefer if (server) |s| alloc.free(s);
-        return .{ .client = client, .server = server, .dir = try alloc.dupe(u8, entry), .is_windows_direct = false };
+        defer alloc.free(server_p);
+        return try buildLocated(alloc, if (exists(exec_p)) exec_p else get, if (exists(server_p)) server_p else null, entry, false);
     }
     return null;
+}
+
+/// Dupe the three strings into a `Located`; each allocation has one owner.
+fn buildLocated(alloc: Allocator, client: []const u8, server: ?[]const u8, dir: []const u8, win: bool) !Located {
+    const c = try alloc.dupe(u8, client);
+    errdefer alloc.free(c);
+    const sv: ?[]u8 = if (server) |x| try alloc.dupe(u8, x) else null;
+    errdefer if (sv) |x| alloc.free(x);
+    const d = try alloc.dupe(u8, dir);
+    return .{ .client = c, .server = sv, .dir = d, .is_windows_direct = win };
 }
 
 threadlocal var real_io: ?std.Io = null;
 
 fn realExists(path: []const u8) bool {
     const io = real_io orelse return false;
-    _ = std.Io.Dir.cwd().statFile(io, path, .{}) catch return false;
-    return true;
+    const st = std.Io.Dir.cwd().statFile(io, path, .{}) catch return false;
+    return st.kind == .file;
+}
+
+/// Pure core of `locate`. A non-empty `override` is authoritative: if it
+/// is not an existing file the result is null (no fallback to PATH).
+fn locateCore(
+    alloc: Allocator,
+    override: []const u8,
+    path_entries: []const []const u8,
+    localappdata: ?[]const u8,
+    os: std.Target.Os.Tag,
+    exists: *const fn (path: []const u8) bool,
+) ?Located {
+    if (override.len > 0) {
+        if (!exists(override)) return null;
+        return buildLocated(alloc, override, null, std.fs.path.dirname(override) orelse ".", os == .windows) catch null;
+    }
+    return locateIn(alloc, path_entries, localappdata, os, exists);
 }
 
 /// Find MEGAcmd: `override` file, else PATH (Linux) / %LOCALAPPDATA% (Windows).
@@ -234,26 +247,18 @@ fn realExists(path: []const u8) bool {
 pub fn locate(alloc: Allocator, io: std.Io, environ: std.process.Environ, override: []const u8) ?Located {
     real_io = io;
     defer real_io = null;
-    if (override.len > 0 and realExists(override)) {
-        const client = alloc.dupe(u8, override) catch return null;
-        const dir = alloc.dupe(u8, std.fs.path.dirname(override) orelse ".") catch {
-            alloc.free(client);
-            return null;
-        };
-        return .{ .client = client, .server = null, .dir = dir, .is_windows_direct = builtin.os.tag == .windows };
-    }
     if (builtin.os.tag == .windows) {
-        const lad = environ.getAlloc(alloc, "LOCALAPPDATA") catch return null;
+        const lad = environ.getAlloc(alloc, "LOCALAPPDATA") catch return locateCore(alloc, override, &.{}, null, .windows, realExists);
         defer alloc.free(lad);
-        return locateIn(alloc, &.{}, lad, .windows, realExists);
+        return locateCore(alloc, override, &.{}, lad, .windows, realExists);
     }
-    const path = environ.getAlloc(alloc, "PATH") catch return null;
+    const path = environ.getAlloc(alloc, "PATH") catch return locateCore(alloc, override, &.{}, null, builtin.os.tag, realExists);
     defer alloc.free(path);
     var entries: std.ArrayList([]const u8) = .empty;
     defer entries.deinit(alloc);
     var it = std.mem.splitScalar(u8, path, ':');
     while (it.next()) |e| entries.append(alloc, e) catch return null;
-    return locateIn(alloc, entries.items, null, builtin.os.tag, realExists);
+    return locateCore(alloc, override, entries.items, null, builtin.os.tag, realExists);
 }
 
 /// Build the argv for one MEGAcmd command. Outer slice owned; free with
@@ -422,6 +427,49 @@ test "locate override file" {
     try testing.expectEqualStrings(dir, l.dir);
     try testing.expect(l.server == null);
     try testing.expect(locate(a, testing.io, .empty, "/nonexistent/mega-get") == null);
+}
+
+test "parseProgressLine rejects non-finite pct" {
+    try testing.expect(parseProgressLine("(1/2 MB: nan %)") == null);
+    try testing.expect(parseProgressLine("(1/2 MB: inf %)") == null);
+}
+
+test "parseTransfersTable keeps a pipe inside the path" {
+    const ts = try parseTransfersTable("5|/a|b/c.zip|1.0 MB of 2 MB  50.0%|PAUSED\n", testing.allocator);
+    defer freeTransfers(testing.allocator, ts);
+    try testing.expectEqual(@as(usize, 1), ts.len);
+    try testing.expectEqualStrings("/a|b/c.zip", ts[0].dest);
+    try testing.expectEqual(State.PAUSED, ts[0].state);
+    try testing.expectApproxEqAbs(@as(f32, 50.0), ts[0].pct.?, 0.001);
+}
+
+test "locateCore: bad override does not fall through to PATH" {
+    const a = testing.allocator;
+    try testing.expect(locateCore(a, "/typo/mega-get", &.{"/opt/mega"}, null, .linux, fakeExists) == null);
+    try testing.expect(locateCore(a, "/opt/mega", &.{"/opt/mega"}, null, .linux, fakeExists) == null);
+    const l = locateCore(a, "", &.{"/opt/mega"}, null, .linux, fakeExists).?;
+    freeLocated(a, l);
+    const o = locateCore(a, "/opt/mega/mega-get", &.{}, null, .linux, fakeExists).?;
+    defer freeLocated(a, o);
+    try testing.expectEqualStrings("/opt/mega", o.dir);
+}
+
+fn locateOom(a: Allocator, os: std.Target.Os.Tag) !void {
+    if (try locateInErr(a, &.{ "/usr/bin", "/opt/mega" }, "C:\\L", os, fakeExists)) |l| freeLocated(a, l);
+}
+
+test "locateIn is OOM-safe (Linux and Windows tables)" {
+    try testing.checkAllAllocationFailures(testing.allocator, locateOom, .{std.Target.Os.Tag.linux});
+    try testing.checkAllAllocationFailures(testing.allocator, locateOom, .{std.Target.Os.Tag.windows});
+}
+
+fn transfersOom(a: Allocator) !void {
+    const ts = try parseTransfersTable("TAG|D|P|S\n1|/a|1%|ACTIVE\n2|/b|----%|QUEUED\n", a);
+    freeTransfers(a, ts);
+}
+
+test "parseTransfersTable is OOM-safe" {
+    try testing.checkAllAllocationFailures(testing.allocator, transfersOom, .{});
 }
 
 test "installHint" {
