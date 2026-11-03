@@ -21,6 +21,7 @@ const workers = @import("workers.zig");
 const resolve = @import("resolve.zig");
 const errs = @import("errors.zig");
 const watch = @import("watch.zig");
+const megacmd = @import("megacmd.zig");
 const dl_classify = @import("f95").dl_classify;
 
 const Engine = engine_mod.Engine;
@@ -1034,7 +1035,7 @@ pub const Downloader = struct {
 
     fn missingEngine(self: *Downloader, r: *Rec, now: i64) void {
         const t: model.Transition = switch (r.job.engine) {
-            .megacmd => .{ .step = .failed, .fail = .engine_missing, .detail = "MEGAcmd is not installed", .attempts = r.job.attempts },
+            .megacmd => .{ .step = .failed, .fail = .engine_missing, .detail = megacmd.installHint(), .attempts = r.job.attempts },
             else => .{ .step = .failed, .fail = .unknown, .detail = BROWSER_STAGE2, .attempts = r.job.attempts },
         };
         self.apply(r, t, now);
@@ -2509,7 +2510,7 @@ test "downloader: missing MEGAcmd engine fails the job without retry" {
     const got = fx.rec(id).job;
     try testing.expectEqual(model.Step.failed, got.step);
     try testing.expectEqual(model.FailReason.engine_missing, got.fail.?);
-    try testing.expectEqualStrings("MEGAcmd is not installed", got.step_detail);
+    try testing.expectEqualStrings(megacmd.installHint(), got.step_detail);
     try testing.expectEqual(@as(?i64, null), got.next_retry_at);
 }
 

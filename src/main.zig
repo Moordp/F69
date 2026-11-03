@@ -433,11 +433,27 @@ pub fn main(init: std.process.Init) !void {
     // Hosts that need clicking: the page opens in the user's browser and
     // the file comes back through the watched folder / paste / pick.
     var browser_engine: downloads.engine_browser.BrowserEngine = .{ .alloc = gpa, .io = init.io };
+    // MEGAcmd: `<data_root>/megacmd_path` override, else PATH (Linux) /
+    // %LOCALAPPDATA%\MEGAcmd (Windows). Not found → `.megacmd = null`, and
+    // MEGA jobs fail with the install hint. Like the aria2 engine, it is
+    // declared before `dl` so its deinit runs after the downloader thread
+    // is joined.
+    var mega_engine: ?downloads.engine_megacmd.MegaEngine =
+        if (downloads.megacmd.locate(gpa, init.io, init.minimal.environ, dl_settings.megacmd_path)) |l|
+            downloads.engine_megacmd.MegaEngine.init(gpa, init.io, l)
+        else
+            null;
+    defer if (mega_engine) |*m| m.deinit();
+    if (mega_engine) |m| log.info("MEGAcmd client {s}", .{m.located.client}) else log.info("MEGAcmd not found", .{});
     var dl = downloads.Downloader.init(
         gpa,
         init.io,
         dl_store,
-        .{ .aria2 = aria2_engine.engine(), .browser = browser_engine.engine() },
+        .{
+            .aria2 = aria2_engine.engine(),
+            .megacmd = if (mega_engine) |*m| m.engine() else null,
+            .browser = browser_engine.engine(),
+        },
         .{ .downloads_root = downloads_root, .library_root = library_root, .data_root = data_root },
         dl_settings,
         .{ .http = dl_http.http() },
