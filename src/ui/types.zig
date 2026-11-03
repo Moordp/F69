@@ -71,6 +71,10 @@ pub const Frame = struct {
     /// paired with `releaseSnapshot()` in the same scope) and drains
     /// `UiEvent`s once per frame (`actions.drainDownloaderEvents`).
     dl: *downloads.Downloader,
+    /// MEGAcmd engine for the Settings → Accounts MEGA card (whoami / login
+    /// / logout on a worker, `actions/mega.zig`). Null when MEGAcmd was not
+    /// found at startup (or in the test harness).
+    mega: ?*downloads.engine_megacmd.MegaEngine,
     /// Local recipes repo — used by the per-game Download button to
     /// resolve a game's recipe + sources at click time.
     recipe_repo: *recipe.Repo,

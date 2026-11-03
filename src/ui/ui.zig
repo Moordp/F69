@@ -72,6 +72,10 @@ pub const ensureCatalogue = actions.ensureCatalogue;
 pub const drainDownloaderEvents = actions.drainDownloaderEvents;
 pub const dlPasteLink = actions.dlPasteLink;
 pub const setWatchDir = actions.setWatchDir;
+pub const megaCheckStatus = actions.megaCheckStatus;
+pub const megaSignIn = actions.megaSignIn;
+pub const drainMegaAuth = actions.drainMegaAuth;
+pub const MegaStatus = state_mod.MegaStatus;
 pub const doLogout = actions.doLogout;
 pub const commitFolderImport = actions.commitFolderImport;
 pub const doOpenLogsFolder = actions.doOpenLogsFolder;
@@ -102,6 +106,8 @@ pub fn runMainLoop(
     f95_svc: *f95.Service,
     f95_indexer_client: *f95_indexer.Client,
     dl: *downloads.Downloader,
+    /// MEGAcmd engine for the Accounts card; null = MEGAcmd not found.
+    mega: ?*downloads.engine_megacmd.MegaEngine,
     recipe_repo: *recipe.Repo,
     sandbox_backend: *sandbox.Sandbox,
     host_launcher: *sandbox.NoSandbox,
@@ -304,6 +310,7 @@ pub fn runMainLoop(
         actions.freeTagsMaster(lib.alloc, &state);
         if (state.sync_queue) |q| lib.alloc.free(q);
         if (state.rpdl_token) |t| lib.alloc.free(t);
+        actions.freeMegaState(&state, lib.alloc);
         actions.freeDetailCatalogue(&state);
         actions.freeWatchDir(&state, lib.alloc);
         if (state.tag_colors) |*m| library.Library.freeTagColors(m);
@@ -392,6 +399,7 @@ pub fn runMainLoop(
                 .f95_svc = f95_svc,
                 .f95_indexer_client = f95_indexer_client,
                 .dl = dl,
+                .mega = mega,
                 .recipe_repo = recipe_repo,
                 .sandbox = sandbox_backend,
                 .host_launcher = host_launcher,
@@ -415,6 +423,7 @@ pub fn runMainLoop(
                 actions.drainBookmarks(&shutdown_frame);
                 actions.drainUpdateCheck(&shutdown_frame);
                 actions.drainDonorProbe(&shutdown_frame);
+                actions.drainMegaAuth(&shutdown_frame);
                 actions.drainSlideLoads(&shutdown_frame);
                 actions.drainCoverLoads(&shutdown_frame);
                 actions.drainLaunchWatcher(&shutdown_frame);
@@ -457,6 +466,7 @@ pub fn runMainLoop(
             .f95_svc = f95_svc,
             .f95_indexer_client = f95_indexer_client,
             .dl = dl,
+            .mega = mega,
             .recipe_repo = recipe_repo,
             .sandbox = sandbox_backend,
             .host_launcher = host_launcher,
@@ -689,6 +699,14 @@ pub fn guiFrame(frame: *Frame) !bool {
         actions.checkDonorStatus(frame);
     }
 
+    // One-shot MEGA sign-in check (Settings → Accounts card). With an
+    // engine it runs `whoami` on a worker (`drainMegaAuth` below); without
+    // one it just marks the card "not installed".
+    if (!frame.state.mega_check_started) {
+        frame.state.mega_check_started = true;
+        actions.megaCheckStatus(frame);
+    }
+
     const t_drain = types.startLatency(frame.io);
     actions.drainSync(frame);
     actions.drainFastCheck(frame);
@@ -699,6 +717,7 @@ pub fn guiFrame(frame: *Frame) !bool {
     actions.drainDonorDownload(frame);
     actions.drainDownloaderEvents(frame);
     actions.drainDonorProbe(frame);
+    actions.drainMegaAuth(frame);
     actions.drainSlideLoads(frame);
     actions.drainCoverLoads(frame);
     actions.drainLaunchWatcher(frame);

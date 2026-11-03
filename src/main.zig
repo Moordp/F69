@@ -815,7 +815,7 @@ pub fn main(init: std.process.Init) !void {
     const staging_dir = try resolveTempDir(gpa, init.minimal.environ);
     defer gpa.free(staging_dir);
 
-    try ui.runMainLoop(init, &lib, &f95_service, &indexer_client, &dl, &recipe_repo, &sandbox, &host_launcher, &convert_svc, &compat_svc, rpdl_token, .{
+    try ui.runMainLoop(init, &lib, &f95_service, &indexer_client, &dl, if (mega_engine) |*me| me else null, &recipe_repo, &sandbox, &host_launcher, &convert_svc, &compat_svc, rpdl_token, .{
         .exe_dir = ui_exe_dir,
         .data_root = data_root,
         .db_path = db_path,

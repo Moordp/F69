@@ -9,6 +9,7 @@ const entypo = dvui.entypo;
 const library = @import("library");
 const file_picker = @import("util_file_picker");
 const atomic_io = @import("util_atomic_io");
+const downloads = @import("downloads");
 
 const tokens = @import("ui_tokens");
 const comp = @import("ui_comp");
@@ -454,6 +455,20 @@ fn pickAria2Binary(frame: *Frame) void {
     writePathOverride(frame, "aria2_path", picked, "aria2c set — applies on restart.");
 }
 
+/// Browse to the MEGAcmd client (`mega-get` dir on Linux, MegaClient.exe on
+/// Windows) and persist it as `<data_root>/megacmd_path`. The engine is
+/// built once at startup, so this applies on restart.
+fn pickMegacmdBinary(frame: *Frame) void {
+    const alloc = frame.lib.alloc;
+    const picked = (file_picker.open(alloc, &[_]file_picker.FilterItem{}, null) catch |e| {
+        var buf: [160]u8 = undefined;
+        frame.state.notifyErr(std.fmt.bufPrint(&buf, "File picker failed: {s}", .{@errorName(e)}) catch "File picker failed");
+        return;
+    }) orelse return;
+    defer alloc.free(picked);
+    writePathOverride(frame, "megacmd_path", picked, "MEGAcmd path set \u{2014} applies on restart.");
+}
+
 fn writePathOverride(frame: *Frame, name: []const u8, value: []const u8, ok_msg: []const u8) void {
     const alloc = frame.lib.alloc;
     const file = std.fmt.allocPrint(alloc, "{s}/{s}", .{ frame.info.data_root, name }) catch return;
@@ -736,6 +751,8 @@ fn renderSettingsAccounts(frame: *Frame) void {
     renderF95Account(frame);
     settingsSectionDivider(3);
     renderRpdlAccount(frame);
+    settingsSectionDivider(4);
+    renderMegaAccount(frame);
 }
 
 /// How covers are shaped in the library list view.
@@ -1899,6 +1916,111 @@ fn renderRpdlAccount(frame: *Frame) void {
     if (style.button(@src(), "Login", .{}, .{ .style = .highlight })) {
         actions.doRpdlLogin(frame, state.rpdlUserSlice(), state.rpdlPassSlice());
     }
+}
+
+/// Settings → Accounts → MEGA card (spec §3.8). All MEGAcmd calls run on a
+/// worker (`actions/mega.zig`); this only reads State and queues them.
+fn renderMegaAccount(frame: *Frame) void {
+    const state = frame.state;
+    const grey: dvui.Options = .{ .style = .control, .color_text = .{ .color = .{ .r = 0x80, .g = 0x80, .b = 0x80 } } };
+
+    dvui.label(@src(), "MEGA (via MEGAcmd)", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
+
+    var status_buf: [192]u8 = undefined;
+    const status_text: []const u8 = switch (state.mega_status) {
+        .unknown => "Checking\u{2026}",
+        .not_installed => "MEGAcmd not installed",
+        .signed_out => "Signed out",
+        .signed_in => if (state.mega_account) |a|
+            std.fmt.bufPrint(&status_buf, "Signed in as {s}", .{a}) catch "Signed in"
+        else
+            "Signed in",
+        .needs_code => "Code needed",
+        .busy => if (state.mega_msg.isEmpty()) "Signing in\u{2026}" else state.mega_msg.read(),
+        .failed => "Sign-in failed",
+    };
+    const status_opts: dvui.Options = switch (state.mega_status) {
+        .signed_in => .{ .color_text = .{ .color = dcol(tokens.active.acc) }, .tag = "mega-status" },
+        .failed => .{ .style = .err, .tag = "mega-status" },
+        else => .{ .tag = "mega-status" },
+    };
+    dvui.label(@src(), "status: {s}", .{status_text}, status_opts);
+    // The busy line already shows the message.
+    if (state.mega_status != .busy and !state.mega_msg.isEmpty()) {
+        dvui.labelNoFmt(@src(), state.mega_msg.read(), .{}, .{});
+    }
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
+
+    if (state.mega_status == .not_installed) {
+        components.settingsHelpText(downloads.megacmd.installHint());
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 4 } });
+        dvui.labelNoFmt(@src(), "Restart f69 after installing.", .{}, .{ .tag = "mega-not-installed", .color_text = .{ .color = style.labelDim() } });
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        defer row.deinit();
+        if (style.button(@src(), "MEGAcmd path\u{2026}", .{}, .{ .gravity_y = 0.5, .tag = "mega-path" })) pickMegacmdBinary(frame);
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
+        if (style.button(@src(), "Use default", .{}, .{ .gravity_y = 0.5, .id_extra = 0x3E6A, .tag = "mega-path-default" }))
+            resetPathOverride(frame, "megacmd_path", "MEGAcmd path cleared \u{2014} applies on restart.");
+        return;
+    }
+
+    if (frame.mega) |m| {
+        dvui.label(@src(), "MEGAcmd: {s}", .{m.located.client}, .{ .color_text = .{ .color = style.labelDim() } });
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
+    }
+
+    const busy = state.mega_status == .busy or state.pending_mega_job != null;
+    // Signed in, or signing out (the account stays until the result lands).
+    if (state.mega_status == .signed_in or (busy and state.mega_account != null)) {
+        if (style.button(@src(), "Sign out", .{}, if (busy) grey.override(.{ .tag = "mega-sign-out" }) else .{ .style = .err, .tag = "mega-sign-out" }) and !busy) {
+            actions.megaSignOut(frame);
+        }
+        return;
+    }
+    // Startup check still running: nothing to act on yet.
+    if (state.mega_status == .unknown) return;
+
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{});
+        defer row.deinit();
+        dvui.label(@src(), "email:", .{}, .{ .min_size_content = .{ .w = 90, .h = 24 }, .gravity_y = 0.5 });
+        const te = style.textEntry(@src(), .{ .text = .{ .buffer = &state.mega_email_buf } }, .{
+            .min_size_content = .{ .w = 240, .h = 24 },
+            .tag = "mega-email",
+        });
+        te.deinit();
+    }
+    {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{});
+        defer row.deinit();
+        dvui.label(@src(), "password:", .{}, .{ .min_size_content = .{ .w = 90, .h = 24 }, .gravity_y = 0.5 });
+        const te = style.textEntry(@src(), .{
+            .text = .{ .buffer = &state.mega_pass_buf },
+            .password_char = "\u{2022}",
+        }, .{
+            .min_size_content = .{ .w = 240, .h = 24 },
+            .tag = "mega-password",
+        });
+        te.deinit();
+    }
+    if (state.mega_status == .needs_code) {
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{});
+        defer row.deinit();
+        dvui.label(@src(), "Two-factor code:", .{}, .{ .min_size_content = .{ .w = 90, .h = 24 }, .gravity_y = 0.5 });
+        const te = style.textEntry(@src(), .{ .text = .{ .buffer = &state.mega_code_buf } }, .{
+            .min_size_content = .{ .w = 120, .h = 24 },
+            .tag = "mega-code",
+        });
+        te.deinit();
+    }
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
+    if (style.button(@src(), "Sign in", .{}, if (busy) grey.override(.{ .tag = "mega-sign-in" }) else .{ .style = .highlight, .tag = "mega-sign-in" }) and !busy) {
+        actions.megaSignIn(frame);
+    }
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
+    components.settingsHelpText("The password is handed to MEGAcmd once and is not stored by f69.");
 }
 
 const LibraryStats = struct {

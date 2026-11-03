@@ -57,6 +57,9 @@ pub fn cancelAllWorkers(state: *types.State) void {
     if (state.pending_donor_download) |j| j.cancel.store(true, .release);
     if (state.pending_tags_refresh) |j| j.cancel.store(true, .release);
     if (state.donor_probe_job) |j| j.cancel.store(true, .release);
+    // MEGAcmd calls can't be interrupted; the flag only keeps the
+    // "every busy slot is cancelled" rule true.
+    if (state.pending_mega_job) |j| j.cancel.store(true, .release);
     if (state.slide_load_job) |j| j.cancel.store(true, .release);
     if (state.launch_watch_job) |j| j.cancel.store(true, .release);
     if (state.test_install_job) |j| j.cancel.store(true, .release);
@@ -85,6 +88,7 @@ pub fn workersBusy(state: *const types.State) bool {
     if (state.pending_donor_download != null) return true;
     if (state.pending_tags_refresh != null) return true;
     if (state.donor_probe_job != null) return true;
+    if (state.pending_mega_job != null) return true;
     if (state.slide_load_job != null) return true;
     if (state.launch_watch_job != null) return true;
     if (state.test_install_job != null) return true;

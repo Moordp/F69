@@ -154,6 +154,9 @@ pub const FolderImportRowState = struct {
 pub const SortColumn = enum { name, rating, weighted, votes, last_updated, sync_state, last_played_version };
 pub const SortDir = enum { asc, desc };
 pub const LoginStatus = enum { unknown, logged_out, logged_in, logging_in, err };
+/// MEGA card status. `unknown` = startup check not finished; `busy` = a
+/// sign-in / sign-out worker is running.
+pub const MegaStatus = enum { unknown, not_installed, signed_out, signed_in, needs_code, busy, failed };
 pub const View = enum { grid, list, kanban };
 
 /// Card cover shapes for the grid view (width : height of the cover area).
@@ -1400,6 +1403,23 @@ pub const State = struct {
     rpdl_status: LoginStatus = .unknown,
     rpdl_msg: buf_mod.MessageBuf(128) = .{},
     rpdl_token: ?[]u8 = null,
+    /// MEGA account (Settings → Accounts → MEGA card, `actions/mega.zig`).
+    /// The password is copied into the sign-in worker once and these
+    /// buffers are zeroed after every attempt; f69 never stores it.
+    mega_email_buf: [128]u8 = @splat(0),
+    mega_pass_buf: [128]u8 = @splat(0),
+    mega_code_buf: [16]u8 = @splat(0),
+    mega_status: MegaStatus = .unknown,
+    /// Signed-in account e-mail from `mega-whoami`. Owned by `lib.alloc`;
+    /// replaced/freed only through `actions/mega.zig` (`setMegaAccount`,
+    /// `freeMegaState`).
+    mega_account: ?[]u8 = null,
+    mega_msg: buf_mod.MessageBuf(128) = .{},
+    /// In-flight MEGAcmd whoami/login/logout worker. Drained per frame by
+    /// `drainMegaAuth`; counted by `workersBusy`.
+    pending_mega_job: ?*owned.MegaAuthJob = null,
+    /// One-shot guard for the startup `megaCheckStatus` call in `guiFrame`.
+    mega_check_started: bool = false,
     bookmarks_msg: buf_mod.MessageBuf(160) = .{},
     /// Mirrored from the worker's atomic fields each frame so the
     /// progress widget can read plain `u32`s.
@@ -1758,6 +1778,15 @@ pub const State = struct {
     pub fn rpdlPassSlice(self: *State) []u8 {
         const end = std.mem.indexOfScalar(u8, &self.rpdl_pass_buf, 0) orelse self.rpdl_pass_buf.len;
         return self.rpdl_pass_buf[0..end];
+    }
+    pub fn megaEmailSlice(self: *State) []u8 {
+        return std.mem.sliceTo(&self.mega_email_buf, 0);
+    }
+    pub fn megaPassSlice(self: *State) []u8 {
+        return std.mem.sliceTo(&self.mega_pass_buf, 0);
+    }
+    pub fn megaCodeSlice(self: *State) []u8 {
+        return std.mem.sliceTo(&self.mega_code_buf, 0);
     }
     pub fn rpdlMsg(self: *const State) []const u8 {
         return self.rpdl_msg.read();

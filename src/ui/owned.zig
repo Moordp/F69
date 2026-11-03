@@ -30,6 +30,7 @@ const library = @import("library");
 const f95 = @import("f95");
 const f95_indexer = @import("f95_indexer");
 const dvui = @import("dvui");
+const downloads = @import("downloads");
 const job_mod = @import("job.zig");
 
 /// Re-export so `state.zig` + `actions/*.zig` see one common
@@ -317,6 +318,29 @@ pub const DonorProbePayload = struct {
     err_name: ?[]const u8 = null,
 };
 pub const DonorProbeJob = Job(DonorProbePayload);
+
+/// What a `MegaAuthJob` runs (`actions/mega.zig`).
+pub const MegaAuthOp = enum { check, sign_in, sign_out };
+
+/// Payload for one MEGAcmd account call (`mega-whoami` / `mega-login` /
+/// `mega-logout`). They block on child processes, so they run here and
+/// never on the render thread. `engine` is borrowed from `main.zig`, which
+/// outlives every job (the shutdown drain waits for this slot).
+pub const MegaAuthPayload = struct {
+    engine: *downloads.engine_megacmd.MegaEngine,
+    op: MegaAuthOp,
+    /// sign_in inputs, owned by `job.alloc`. The worker zeroes `password`
+    /// and `code` and frees all three right after `login` returns.
+    email: ?[]u8 = null,
+    password: ?[]u8 = null,
+    code: ?[]u8 = null,
+    /// Worker output. `login_result` is set for sign_in; `account`
+    /// (owned by `job.alloc`) is the `whoami` e-mail for check, and for a
+    /// sign_in that succeeded.
+    login_result: ?downloads.engine_megacmd.LoginResult = null,
+    account: ?[]u8 = null,
+};
+pub const MegaAuthJob = Job(MegaAuthPayload);
 
 /// Payload for one off-thread carousel-slide file read. The UI used
 /// to block on `readFileAlloc` whenever the user navigated to a slide

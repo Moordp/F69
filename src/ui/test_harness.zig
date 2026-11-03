@@ -207,6 +207,7 @@ pub const Harness = struct {
         actions.drainUpdateCheck(f);
         actions.drainRefreshTags(f);
         actions.drainDonorProbe(f);
+        actions.drainMegaAuth(f);
         actions.drainRpdlDownload(f);
         actions.drainDonorDownload(f);
         actions.drainDownloaderEvents(f);
@@ -273,6 +274,7 @@ pub const Harness = struct {
         actions.freeTagsMaster(lib_alloc, &self.state);
         if (self.state.sync_queue) |q| lib_alloc.free(q);
         if (self.state.rpdl_token) |t| lib_alloc.free(t);
+        actions.freeMegaState(&self.state, lib_alloc);
         actions.freeDetailCatalogue(&self.state);
         actions.freeWatchDir(&self.state, lib_alloc);
 
@@ -301,6 +303,7 @@ pub const Harness = struct {
             .f95_svc = &self.f95_service,
             .f95_indexer_client = &self.indexer_client,
             .dl = &self.dl,
+            .mega = null,
             .recipe_repo = &self.recipe_repo,
             .sandbox = &self.sandbox_backend,
             .host_launcher = &self.host_launcher,

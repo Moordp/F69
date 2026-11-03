@@ -2333,6 +2333,66 @@ test "settings downloads: Use default clears watch_dir and sends reload_settings
     tlog("dl-watch-dir: OK", .{});
 }
 
+test "settings accounts: MEGA card shows Not installed when the engine is null; shows the sign-in form when signed out" {
+    tlog("START: mega-card", .{});
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(8) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var env = try TestEnv.init(gpa, "mega-card");
+    defer env.deinit();
+    var t = try dvui.testing.init(.{ .allocator = gpa, .io = io, .window_size = .{ .w = 1280, .h = 800 } });
+    defer t.deinit();
+    ui.registerBundledFonts(t.window);
+    var h = try ui.Harness.init(gpa, io, t.window, env.root);
+    defer h.deinit();
+    var fr = h.frame();
+    try std.testing.expect(fr.mega == null);
+    dlv2_frame = &fr;
+    defer dlv2_frame = null;
+
+    // No engine: the startup check (guiFrame's one-shot megaCheckStatus)
+    // marks the card not installed; the card shows the install hint and
+    // the path override, and no sign-in form.
+    h.state.screen = .settings;
+    h.state.settings_tab = .accounts;
+    _ = try dvui.testing.step(dlv2Render);
+    _ = try dvui.testing.step(dlv2Render);
+    try std.testing.expectEqual(ui.MegaStatus.not_installed, h.state.mega_status);
+    try std.testing.expect(h.state.pending_mega_job == null); // no worker without an engine
+    try std.testing.expect(dvui.tagGet("mega-not-installed") != null);
+    try std.testing.expect(dvui.tagGet("mega-path") != null);
+    try std.testing.expect(dvui.tagGet("mega-path-default") != null);
+    try std.testing.expect(dvui.tagGet("mega-sign-in") == null);
+
+    // Signed out: the e-mail + password form and Sign in; no hint, no code.
+    h.state.mega_status = .signed_out;
+    _ = try dvui.testing.step(dlv2Render);
+    _ = try dvui.testing.step(dlv2Render);
+    try std.testing.expect(dvui.tagGet("mega-sign-in") != null);
+    try std.testing.expect(dvui.tagGet("mega-email") != null);
+    try std.testing.expect(dvui.tagGet("mega-password") != null);
+    try std.testing.expect(dvui.tagGet("mega-code") == null);
+    try std.testing.expect(dvui.tagGet("mega-not-installed") == null);
+
+    // Code needed: the two-factor entry joins the form.
+    h.state.mega_status = .needs_code;
+    _ = try dvui.testing.step(dlv2Render);
+    _ = try dvui.testing.step(dlv2Render);
+    try std.testing.expect(dvui.tagGet("mega-code") != null);
+    try std.testing.expect(dvui.tagGet("mega-sign-in") != null);
+
+    // Sign in with no engine: maps to not_installed and wipes the secrets.
+    @memcpy(h.state.mega_email_buf[0..6], "a@b.cd");
+    @memcpy(h.state.mega_pass_buf[0..6], "secret");
+    @memcpy(h.state.mega_code_buf[0..6], "123456");
+    ui.megaSignIn(&fr);
+    try std.testing.expectEqual(ui.MegaStatus.not_installed, h.state.mega_status);
+    for (h.state.mega_pass_buf) |b| try std.testing.expectEqual(@as(u8, 0), b);
+    for (h.state.mega_code_buf) |b| try std.testing.expectEqual(@as(u8, 0), b);
+    tlog("mega-card: OK", .{});
+}
+
 test "hostile: findLauncher dispatch picks the OS-correct launcher from a mixed install" {
     // The production dispatch (launch.zig findLauncher) — NOT the per-OS
     // finders called directly. Walks a tree right after writing it; if this

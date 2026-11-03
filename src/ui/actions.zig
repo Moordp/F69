@@ -35,6 +35,8 @@
 //                      isLikelyNonGameTitle helpers (with tests).
 //                      Owns BookmarksJob, BookmarksJobPhase.
 //   auth.zig         — doLogin / doLogout / doRpdlLogin / doRpdlLogout.
+//   mega.zig         — MEGA card: megaCheckStatus / megaSignIn /
+//                      megaSignOut workers + drainMegaAuth. Owns MegaAuthJob.
 //   mods.zig         — modfileForGame, refreshModfileCache,
 //                      dropModfileCache, modsPageCache + lookups,
 //                      isModInstalled, doUninstallMod, preset cache
@@ -62,6 +64,7 @@ const installer = @import("actions/installer.zig");
 const launch = @import("actions/launch.zig");
 const bookmarks = @import("actions/bookmarks.zig");
 const auth = @import("actions/auth.zig");
+const mega = @import("actions/mega.zig");
 const mods = @import("actions/mods.zig");
 const tags = @import("actions/tags.zig");
 const imports = @import("actions/imports.zig");
@@ -241,6 +244,14 @@ pub const drainDonorProbe = auth.drainDonorProbe;
 pub const doRpdlLogin = auth.doRpdlLogin;
 pub const doRpdlLogout = auth.doRpdlLogout;
 
+// ---- MEGA account ----
+pub const megaCheckStatus = mega.megaCheckStatus;
+pub const megaSignIn = mega.megaSignIn;
+pub const megaSignOut = mega.megaSignOut;
+pub const drainMegaAuth = mega.drainMegaAuth;
+pub const applyMegaLoginResult = mega.applyLoginResult;
+pub const freeMegaState = mega.freeMegaState;
+
 // ---- Launch / convert / running games / saves ----
 pub const doOpenLogsFolder = launch.doOpenLogsFolder;
 pub const doLaunchGame = launch.doLaunchGame;
@@ -329,6 +340,7 @@ pub const wizardSave = mods.wizardSave;
 // silently no-op (same idiom as downloads.zig / importers.zig roots).
 test {
     _ = @import("actions/auth.zig");
+    _ = @import("actions/mega.zig");
     _ = @import("actions/bookmarks.zig");
     _ = @import("actions/common.zig");
     _ = @import("actions/downloads.zig");
