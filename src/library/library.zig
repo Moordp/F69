@@ -270,6 +270,16 @@ pub const Library = struct {
     /// Pin a game to (or unpin from) a specific version. `version = null`
     /// clears the pin (track latest again). Single-column write so it
     /// doesn't clobber concurrent edits to other columns.
+    /// Point a game's saves at another game's sandbox HOME (`root`), or
+    /// back at its own (null). Writes one column.
+    pub fn setSavesGroup(self: *Library, thread_id: u64, root: ?u64) errs.Error!void {
+        const root_i: ?i64 = if (root) |r| @intCast(r) else null;
+        self.conn.inner.exec(
+            "UPDATE games SET saves_group = ? WHERE f95_thread_id = ?",
+            .{ root_i, @as(i64, @intCast(thread_id)) },
+        ) catch return self.dbFail();
+    }
+
     pub fn setPinnedVersion(self: *Library, thread_id: u64, version: ?[]const u8) errs.Error!void {
         self.conn.inner.exec(
             "UPDATE games SET pinned_version = ? WHERE f95_thread_id = ?",
@@ -559,7 +569,8 @@ pub const Library = struct {
             \\       description_md, changelog_md, reviews_md, download_links_json,
             \\       dev_status, downloads_md, last_updated_at, thread_info_md,
             \\       censored, auto_update, mod_backup_mode, last_indexer_change,
-            \\       last_indexer_parser_version, last_played_version, pinned_version, status_changed_at
+            \\       last_indexer_parser_version, last_played_version, pinned_version, status_changed_at,
+            \\       saves_group
             \\FROM games WHERE f95_thread_id = ?
         , .{@as(i64, @intCast(thread_id))}) catch return self.dbFail();
         defer rows.deinit();
@@ -583,7 +594,8 @@ pub const Library = struct {
             \\       description_md, changelog_md, reviews_md, download_links_json,
             \\       dev_status, downloads_md, last_updated_at, thread_info_md,
             \\       censored, auto_update, mod_backup_mode, last_indexer_change,
-            \\       last_indexer_parser_version, last_played_version, pinned_version, status_changed_at
+            \\       last_indexer_parser_version, last_played_version, pinned_version, status_changed_at,
+            \\       saves_group
             \\FROM games ORDER BY name COLLATE NOCASE
         , .{}) catch return self.dbFail();
         defer rows.deinit();
@@ -1948,6 +1960,16 @@ const migrations = [_]Migration{
         \\CREATE INDEX IF NOT EXISTS dl_events_job ON dl_events(job_id, id);
         ,
     },
+    .{
+        .id = 26,
+        .sql =
+        // Shared saves: the thread id of the game whose sandbox HOME this
+        // game uses (chapters of one story reading each other's saves).
+        // NULL = own HOME. Not in upsertGame's column list, so a metadata
+        // sync leaves it untouched.
+        \\ALTER TABLE games ADD COLUMN saves_group INTEGER;
+        ,
+    },
 };
 
 fn runMigrations(alloc: std.mem.Allocator, conn: *dbu.Conn, db_path: []const u8) !void {
@@ -2241,6 +2263,9 @@ fn hydrateGame(alloc: std.mem.Allocator, r: anytype) errs.Error!dom.Game {
         g.pinned_version = alloc.dupe(u8, s) catch return errs.Error.OutOfMemory;
     }
     g.status_changed_at = r.nullableInt(31);
+    if (r.nullableInt(32)) |v| {
+        if (v > 0) g.saves_group = @intCast(v);
+    }
 
     return g;
 }
@@ -3045,6 +3070,28 @@ test "library: save-path override round-trips and a metadata sync preserves it" 
 test {
     _ = @import("domain.zig");
     _ = @import("errors.zig");
+}
+
+test "library: migration 26 adds saves_group; setSavesGroup round-trips through listGames" {
+    var lib = try Library.open(std.testing.allocator, ":memory:");
+    defer lib.close();
+    try lib.upsertGame(&.{ .f95_thread_id = 7, .name = "Story Ch.1" });
+    try lib.upsertGame(&.{ .f95_thread_id = 9, .name = "Story Ch.2" });
+    try lib.setSavesGroup(9, 7);
+    {
+        const games = try lib.listGames();
+        defer lib.freeGames(games);
+        for (games) |g| {
+            if (g.f95_thread_id == 9) try std.testing.expectEqual(@as(?u64, 7), g.saves_group);
+            if (g.f95_thread_id == 7) try std.testing.expectEqual(@as(?u64, null), g.saves_group);
+        }
+    }
+    // A metadata sync (upsert) must not clear the link.
+    try lib.upsertGame(&.{ .f95_thread_id = 9, .name = "Story Ch.2 renamed" });
+    try lib.setSavesGroup(9, null);
+    const games = try lib.listGames();
+    defer lib.freeGames(games);
+    for (games) |g| try std.testing.expectEqual(@as(?u64, null), g.saves_group);
 }
 
 test "library: migration 25 creates the downloader v2 tables" {

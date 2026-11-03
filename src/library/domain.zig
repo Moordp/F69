@@ -186,6 +186,10 @@ pub const Game = struct {
     /// Auto-update behaviour for this game. `.use_default` defers to
     /// `state.auto_update_default`; `.always`/`.never` override.
     auto_update: AutoUpdateOverride = .use_default,
+    /// Thread id of the game whose sandbox HOME this game shares (a
+    /// sequel reading the previous chapter's saves). Null = its own
+    /// HOME. The root game itself has null; members point at the root.
+    saves_group: ?u64 = null,
     /// Per-game uninstall safety policy for mod installs. `.none` is
     /// today's behaviour (no backup; mods that overwrite vanilla
     /// files can't be cleanly uninstalled). `.copy` mirrors originals

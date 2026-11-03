@@ -962,6 +962,9 @@ fn renderGameConfig(frame: *Frame, game: *library.Game) void {
         }
     }
 
+    renderSavesRow(frame, game, row_id);
+    row_id += 1;
+
     // Version pin — hold the game on its current version (suppresses
     // auto-update). Pin/unpin writes a single column; we mirror the change
     // in the in-memory snapshot so the row updates without a reload.
@@ -2611,6 +2614,81 @@ fn doCompatFixForActiveInstall(frame: *Frame, game: *const library.Game) void {
     else
         std.fmt.bufPrint(&msg_buf, "Compat: nothing to fix on this install.", .{}) catch "Compat: nothing to fix.";
     state.setLaunchMsg(msg);
+}
+
+/// "Saves" row of the Launch & updates group: which game's sandbox HOME
+/// this game uses. A linked chapter shows its root and Unlink; a root
+/// with followers says so; otherwise a suggested sibling (same story,
+/// installed) gets a one-click "Share with …" and a picker lists every
+/// other installed game.
+fn renderSavesRow(frame: *Frame, game: *library.Game, row_id: u32) void {
+    const sl = actions.saves_link;
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
+        .id_extra = row_id,
+        .expand = .horizontal,
+        .padding = .{ .x = 0, .y = 3, .w = 0, .h = 3 },
+    });
+    defer row.deinit();
+    dvui.label(@src(), "Saves", .{}, .{
+        .min_size_content = .{ .w = 120, .h = 20 },
+        .gravity_y = 0.5,
+        .color_text = .{ .color = style.labelDim() },
+    });
+    const tid = game.f95_thread_id;
+    if (game.saves_group) |root| {
+        const root_name: []const u8 = if (frame.games_by_thread) |m| (if (m.get(root)) |g| g.name else "another game") else "another game";
+        var buf: [160]u8 = undefined;
+        const lbl = std.fmt.bufPrint(&buf, "Shared with {s}", .{root_name}) catch "Shared";
+        dvui.labelNoFmt(@src(), lbl, .{}, .{ .gravity_y = 0.5, .tag = "saves-shared" });
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
+        if (components.iconButton(@src(), "Unlink", entypo.cross, .{ .gravity_y = 0.5, .tag = "saves-unlink" })) {
+            saveOrToast(frame, "saves", sl.unlink(frame, tid));
+        }
+        return;
+    }
+    const followers = sl.memberCount(frame, tid);
+    if (followers > 0) {
+        var buf: [96]u8 = undefined;
+        const lbl = std.fmt.bufPrint(&buf, "Own folder \u{00B7} shared by {d} other chapter{s}", .{ followers, if (followers == 1) "" else "s" }) catch "Own folder";
+        dvui.labelNoFmt(@src(), lbl, .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = style.labelDim() } });
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
+    } else {
+        dvui.labelNoFmt(@src(), "Own folder", .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = style.labelDim() } });
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
+    }
+    // One-click suggestion: an installed game that reads as another
+    // chapter of this story.
+    if (sl.suggestSibling(frame, game)) |sib| {
+        var buf: [160]u8 = undefined;
+        const lbl = std.fmt.bufPrint(&buf, "Share with {s}", .{sib.name}) catch "Share saves";
+        if (components.iconButton(@src(), lbl, entypo.link, .{ .gravity_y = 0.5, .style = .highlight, .tag = "saves-suggest" })) {
+            saveOrToast(frame, "saves", sl.link(frame, tid, sib.f95_thread_id));
+            return;
+        }
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
+    }
+    // Picker: every other installed game, by name.
+    const arena = dvui.currentWindow().arena();
+    var labels: std.ArrayList([]const u8) = .empty;
+    var ids: std.ArrayList(u64) = .empty;
+    labels.append(arena, "Share saves with\u{2026}") catch return;
+    ids.append(arena, 0) catch return;
+    for (frame.games) |*g| {
+        if (g.f95_thread_id == tid) continue;
+        if (!actions.isInstalled(frame, g.f95_thread_id)) continue;
+        labels.append(arena, g.name) catch break;
+        ids.append(arena, g.f95_thread_id) catch break;
+    }
+    if (labels.items.len > 1) {
+        var picked: usize = 0;
+        if (style.dropdown(@src(), labels.items, .{ .choice = &picked }, .{}, .{
+            .gravity_y = 0.5,
+            .min_size_content = .{ .w = 220, .h = 26 },
+            .tag = "saves-picker",
+        })) {
+            if (picked > 0) saveOrToast(frame, "saves", sl.link(frame, tid, ids.items[picked]));
+        }
+    }
 }
 
 /// Switch to the Downloads tab and scroll the tab strip into view.

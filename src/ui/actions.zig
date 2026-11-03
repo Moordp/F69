@@ -65,6 +65,7 @@ const launch = @import("actions/launch.zig");
 const bookmarks = @import("actions/bookmarks.zig");
 const auth = @import("actions/auth.zig");
 const mega = @import("actions/mega.zig");
+pub const saves_link = @import("actions/saves_link.zig");
 const mods = @import("actions/mods.zig");
 const tags = @import("actions/tags.zig");
 const imports = @import("actions/imports.zig");
@@ -190,6 +191,7 @@ pub const setSavesFolder = common.setSavesFolder;
 pub const clearSavesFolder = common.clearSavesFolder;
 pub const refreshInstalledSet = common.refreshInstalledSet;
 pub const installDotState = common.installDotState;
+pub const isInstalled = common.isInstalled;
 pub const freeInstalledSet = common.freeInstalledSet;
 pub const freePostInstalled = common.freePostInstalled;
 
@@ -348,6 +350,7 @@ pub const wizardSave = mods.wizardSave;
 test {
     _ = @import("actions/auth.zig");
     _ = @import("actions/mega.zig");
+    _ = @import("actions/saves_link.zig");
     _ = @import("actions/bookmarks.zig");
     _ = @import("actions/common.zig");
     _ = @import("actions/downloads.zig");

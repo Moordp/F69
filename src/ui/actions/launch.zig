@@ -21,6 +21,7 @@ const owned_types = @import("../owned.zig");
 const job_mod = @import("../job.zig");
 const mods_act = @import("mods.zig");
 const common = @import("common.zig");
+const saves_link = @import("saves_link.zig");
 
 const Frame = types.Frame;
 const State = types.State;
@@ -90,7 +91,10 @@ pub fn doLaunchGame(frame: *Frame, game: *const library.Game) void {
     var home_buf: [640]u8 = undefined;
     var sandbox_home: []const u8 = "";
     if (want_sandbox) {
-        sandbox_home = std.fmt.bufPrint(&home_buf, "{s}/{d}/.f69-home", .{ frame.info.library_root, game.f95_thread_id }) catch {
+        // A chapter linked to another game shares that game's HOME
+        // (saves_link): the sequel sees the previous chapter's saves.
+        const home_tid = saves_link.rootOf(frame, game.f95_thread_id);
+        sandbox_home = std.fmt.bufPrint(&home_buf, "{s}/{d}/.f69-home", .{ frame.info.library_root, home_tid }) catch {
             state.setLaunchMsg("Sandbox HOME buffer overflow.");
             return;
         };
@@ -2397,7 +2401,8 @@ pub fn doOpenInstallFolder(frame: *Frame, game: *const library.Game) void {
 /// needs.
 fn savesDir(frame: *Frame, tid: u64) ![]u8 {
     if (frame.lib.savePathOverride(tid) catch null) |ov| return ov;
-    return std.fmt.allocPrint(frame.lib.alloc, "{s}/{d}/.f69-home", .{ frame.info.library_root, tid });
+    // A linked chapter's saves live in its root game's HOME.
+    return std.fmt.allocPrint(frame.lib.alloc, "{s}/{d}/.f69-home", .{ frame.info.library_root, saves_link.rootOf(frame, tid) });
 }
 
 /// Pure. Expand `$HOME` and `$XDG_DATA_HOME` in the recipe's saves

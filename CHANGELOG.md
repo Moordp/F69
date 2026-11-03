@@ -2,6 +2,11 @@
 
 All notable, user-facing changes. Dates are YYYY-MM-DD.
 
+## [0.15.22] - 2026-11-03
+
+### Added
+- Shared saves between chapters: on a game's Overview, "Saves → Share with …" makes it use another game's sandbox folder, so a sequel sees the previous chapter's saves. f69 suggests the link when an installed game reads as another chapter of the same story (same name before "Chapter/Part/Episode/Season …", same developer); Unlink restores the game's own folder. Backup / Import / Open saves follow the link.
+
 ## [0.15.21] - 2026-11-03
 
 ### Added

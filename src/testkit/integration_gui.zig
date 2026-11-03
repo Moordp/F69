@@ -928,6 +928,58 @@ test "layer2: sandboxed hero-play redirects the game HOME (and USERPROFILE on Wi
     tlog("L2-heroplay-sbx: OK home={s}", .{sandbox.spawn_hook.envHome()});
 }
 
+test "layer2: a chapter linked to another game launches with that game's sandbox HOME" {
+    tlog("START: L2-heroplay-shared-saves", .{});
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(8) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var env = try TestEnv.init(gpa, "l2-heroplay-shared");
+    defer env.deinit();
+    var t = try dvui.testing.init(.{ .allocator = gpa, .io = io, .window_size = .{ .w = 1280, .h = 800 } });
+    defer t.deinit();
+    ui.registerBundledFonts(t.window);
+    var h = try ui.Harness.init(gpa, io, t.window, env.root);
+    defer h.deinit();
+
+    const install_path = try seedLaunchableGame(h, &env);
+    defer gpa.free(install_path);
+    // Game 42 is "Launch Game"; game 7 is the earlier chapter it follows.
+    _ = try h.lib.insertIfMissing(&.{ .f95_thread_id = 7, .name = "Launch Game Ch.1", .developer = "Dev", .engine = .renpy });
+    try h.lib.setSavesGroup(42, 7);
+    try h.reloadGames();
+
+    var fr = h.frame();
+    g_frame = &fr;
+    defer g_frame = null;
+    h.state.screen = .detail;
+    h.state.selected_thread = 42;
+    h.state.sandbox_default = true;
+    h.state.launch_diag_acked = true;
+
+    _ = try dvui.testing.step(renderFrame);
+    _ = try dvui.testing.step(renderFrame);
+    try dvui.testing.expectVisible("hero-play");
+    // The Overview row names the root and offers Unlink.
+    try dvui.testing.expectVisible("saves-shared");
+    try dvui.testing.expectVisible("saves-unlink");
+
+    sandbox.spawn_hook.install(0);
+    defer sandbox.spawn_hook.reset();
+    try dvui.testing.moveTo("hero-play");
+    try dvui.testing.click(.left);
+    _ = try dvui.testing.step(renderFrame);
+    _ = try dvui.testing.step(renderFrame);
+
+    try std.testing.expectEqual(@as(usize, 1), sandbox.spawn_hook.calls);
+    const home = sandbox.spawn_hook.envHome();
+    try std.testing.expect(std.mem.endsWith(u8, home, ".f69-home"));
+    // The HOME belongs to game 7, not 42.
+    try std.testing.expect(std.mem.indexOf(u8, home, "/7/.f69-home") != null or std.mem.indexOf(u8, home, "\\7\\.f69-home") != null);
+    try std.testing.expect(std.mem.indexOf(u8, home, "42") == null);
+    tlog("L2-heroplay-shared-saves: OK home={s}", .{home});
+}
+
 test "layer2: launch then stop on Windows — stop is refused with a message and the entry clears" {
     // Windows-only: stop isn't supported there yet (launch.zig doStopGame),
     // and on POSIX a tracked fake pid would be waitpid()ed by the frame
