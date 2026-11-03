@@ -459,8 +459,16 @@ pub fn main(init: std.process.Init) !void {
         .{ .http = dl_http.http() },
     );
     // `deinit` stops the thread (no-op if the UI already did) and closes
-    // the store.
-    defer dl.deinit();
+    // the store. A worker it had to leave running (still stuck after its
+    // 3 s wait) may still use the F95 client, engines or allocator that
+    // the later defers free: then exit at once instead.
+    defer {
+        const detached = dl.deinit();
+        if (detached > 0) {
+            log.warn("quit: {d} download task(s) still running; exiting without the remaining cleanup", .{detached});
+            std.process.exit(0);
+        }
+    }
     // Default watched folder (empty `watch_dir` setting) comes from the
     // environment ($XDG_DOWNLOAD_DIR / ~/Downloads, %USERPROFILE%\Downloads).
     dl.environ = init.minimal.environ;

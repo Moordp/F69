@@ -438,8 +438,10 @@ pub const Downloader = struct {
     /// resolve, move) get at most `QUIT_WAIT_MS` in total; any still
     /// running after that is detached and its memory left allocated (the
     /// process is quitting). An interrupted extract keeps its marker and is
-    /// redone by the next start's reconcile.
-    pub fn deinit(self: *Downloader) void {
+    /// redone by the next start's reconcile. Returns how many workers were
+    /// left running: when non-zero, the caller must not free anything a
+    /// worker may use (resolver HTTP, engines, allocator, io) — exit.
+    pub fn deinit(self: *Downloader) usize {
         self.stop();
         for (self.recs.items) |r| self.freeRec(r);
         self.recs.deinit(self.alloc);
@@ -475,6 +477,7 @@ pub const Downloader = struct {
         for (&self.snap_arenas) |*a| a.deinit();
         if (self.settings_arena) |*a| a.deinit();
         self.store.close();
+        return left;
     }
 
     /// Sleep in short steps until no orphaned worker runs or `max_ms` pass.
@@ -1868,7 +1871,9 @@ pub const Downloader = struct {
             .queued => {},
             .installing => self.raiseInstall(r),
             .verifying => self.startVerify(r, now),
-            .extracting => self.startExtract(r, now, .again),
+            // A job that was waiting for another job's extract has no
+            // folder of its own yet: a fresh start, never "register".
+            .extracting => self.startExtract(r, now, if (j.extract_dir != null) .again else .fresh),
             // Browser jobs keep waiting; the page is not opened again (the
             // row offers "Open page again"). Files downloaded while f69
             // was closed are older than `awaiting_since` and not matched.
@@ -2439,7 +2444,7 @@ const Fx = struct {
 
     fn destroy(fx: *Fx) void {
         const a = testing.allocator;
-        fx.dl.deinit();
+        _ = fx.dl.deinit();
         a.free(fx.dl_root);
         a.free(fx.lib_root);
         a.free(fx.data_root);
@@ -2829,7 +2834,7 @@ test "downloader: idle app does not republish every tick" {
     try testing.expect(fx.dl.generation > g1);
 }
 
-test "downloader: extract marker — our interrupted folder is cleared and re-extracted; a foreign non-empty folder is registered" {
+test "downloader: extract marker — our interrupted folder is cleared and re-extracted; the job's own finished folder is registered" {
     var fx = try Fx.create(.{});
     defer fx.destroy();
     try fx.env.writeFile("payload/g.zip", "not really a zip");
@@ -2846,6 +2851,10 @@ test "downloader: extract marker — our interrupted folder is cleared and re-ex
     const id_a = try fx.dl.store.insert(&a);
     var b = a;
     b.version = "v2";
+    // Its own extract finished before the quit (folder recorded, no marker).
+    const own = try std.fmt.allocPrint(testing.allocator, "{s}" ++ sep ++ "9" ++ sep ++ "v2" ++ sep, .{fx.lib_root});
+    defer testing.allocator.free(own);
+    b.extract_dir = own;
     const id_b = try fx.dl.store.insert(&b);
 
     try fx.dl.load();
@@ -3886,10 +3895,11 @@ test "downloader: deinit returns within 4 s while a worker still runs (the worke
     dl.stepOnce(1000);
     try testing.expect(dl.recs.items[0].resolve_worker != null);
     const t0 = std.Io.Clock.Timestamp.now(testing.io, .awake).raw.toMilliseconds();
-    dl.deinit();
+    const detached = dl.deinit();
     const ms = std.Io.Clock.Timestamp.now(testing.io, .awake).raw.toMilliseconds() - t0;
     try testing.expect(ms < 4000);
     try testing.expect(ms >= QUIT_WAIT_MS - 100);
+    try testing.expectEqual(@as(usize, 1), detached);
 }
 
 test "downloader: reconcile drops cookies left on finished rows; a failure with a retry pending keeps them" {
@@ -3910,4 +3920,25 @@ test "downloader: reconcile drops cookies left on finished rows; a failure with 
     const rows = try fx.dl.store.loadAll(testing.allocator);
     defer store_mod.Store.freeJobs(testing.allocator, rows);
     try testing.expectEqual(@as(usize, 0), rows[0].resolved_headers.len);
+}
+
+test "downloader: reconcile — a job that was waiting to extract (no folder of its own) never registers another job's folder" {
+    var fx = try Fx.create(.{});
+    defer fx.destroy();
+    try fx.env.writeFile("payload/g.zip", "not really a zip");
+    const zip = try fx.env.path("payload/g.zip");
+    defer testing.allocator.free(zip);
+    // The other job's finished extract.
+    try fx.env.writeFile("lib/9/v1/game.exe", "x");
+    var j = storedJob(.extracting);
+    j.game_thread_id = 9;
+    j.version = "v1";
+    j.final_path = zip;
+    j.step_detail = EXTRACT_WAIT;
+    const id = try fx.dl.store.insert(&j);
+    try fx.dl.load();
+    fx.dl.reconcile();
+    try testing.expect(!std.mem.eql(u8, fx.rec(id).job.step_detail, FOLDER_EXISTS));
+    try testing.expect(std.mem.endsWith(u8, fx.rec(id).job.extract_dir.?, "9" ++ sep ++ "v1 (2)" ++ sep));
+    try waitWorkers(fx, 1001);
 }

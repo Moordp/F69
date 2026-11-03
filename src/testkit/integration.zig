@@ -1843,7 +1843,7 @@ test "flow: a missing aria2 binary fails a download enqueue cleanly" {
         .{},
         null,
     );
-    defer dl.deinit();
+    defer _ = dl.deinit();
 
     dl.send(.{ .enqueue_url = .{ .url = "http://127.0.0.1:9/none.zip", .kind = .game, .game_thread_id = 1, .title = "none", .host = "raw" } });
     dl.stepOnce(1000);

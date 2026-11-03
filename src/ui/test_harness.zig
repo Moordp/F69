@@ -118,7 +118,7 @@ pub const Harness = struct {
             .{},
             null,
         );
-        errdefer self.dl.deinit();
+        errdefer _ = self.dl.deinit();
         self.recipe_repo = recipe.Repo.init(gpa, io, recipes_dir);
 
         const env = std.process.Environ.empty;
@@ -285,7 +285,7 @@ pub const Harness = struct {
         self.convert_svc.deinit();
         self.sandbox_backend.deinit();
         self.recipe_repo.deinit();
-        self.dl.deinit();
+        _ = self.dl.deinit();
         self.f95_client.deinit();
         self.lib.close();
         self.arena.deinit();
