@@ -31,6 +31,7 @@ const STDOUT_MAX = 64 * 1024;
 const LINE_MAX = 1024;
 /// `ensureServer` waits this long for `whoami` to answer.
 const SERVER_PROBE_MS = 2000;
+const NO_SERVER_MSG = "MEGAcmdServer.exe not found next to MegaClient.exe";
 
 pub const LoginResult = enum { ok, already_logged_in, needs_auth_code, bad_credentials, not_installed };
 
@@ -59,6 +60,10 @@ const Run = struct {
     pid_lock: std.atomic.Value(bool) = .init(false),
     /// Under `pid_lock`: the worker called `child.wait` (id is gone).
     reaped: bool = false,
+
+    /// Set at creation: no server binary, so no child and no worker
+    /// (`child` is undefined, `done` is already true).
+    no_server: bool = false,
 
     // ---- downloader thread only ----
     paused: bool = false,
@@ -90,15 +95,33 @@ const Run = struct {
             r.have_prog.store(true, .release);
             return;
         }
-        if (std.mem.indexOf(u8, piece, " ERR ") != null or std.mem.indexOf(u8, piece, "ERR:") != null) {
+        if (isErrLine(piece)) {
             const n = @min(piece.len, r.err_buf.len);
             @memcpy(r.err_buf[0..n], piece[0..n]);
             r.err_len = n;
         }
     }
 
-    /// Worker body: stderr (incremental) → stdout (bounded) → reap.
+    /// Drain stdout to EOF; keeps the first `STDOUT_MAX` bytes, discards
+    /// the rest (so the child never blocks on a full pipe).
+    fn readStdout(r: *Run, io: Io) void {
+        const f = r.child.stdout orelse return;
+        var buf: [4096]u8 = undefined;
+        while (true) {
+            const n = f.readStreaming(io, &.{&buf}) catch break;
+            const room = r.out_buf.len - r.out_len;
+            const k = @min(n, room);
+            @memcpy(r.out_buf[r.out_len..][0..k], buf[0..k]);
+            r.out_len += k;
+        }
+    }
+
+    /// Worker body: stdout on its own thread while this one reads stderr
+    /// (incremental), so neither pipe can fill up and stall the client
+    /// (the Windows pipe buffer is only 4 KB); then both are joined and
+    /// the child is reaped.
     fn work(r: *Run, io: Io) void {
+        const out_thr: ?std.Thread = std.Thread.spawn(.{}, readStdout, .{ r, io }) catch null;
         if (r.child.stderr) |f| {
             var buf: [4096]u8 = undefined;
             var line: [LINE_MAX]u8 = undefined;
@@ -117,16 +140,8 @@ const Run = struct {
             }
             r.takePiece(line[0..len]);
         }
-        if (r.child.stdout) |f| {
-            var buf: [4096]u8 = undefined;
-            while (true) {
-                const n = f.readStreaming(io, &.{&buf}) catch break;
-                const room = r.out_buf.len - r.out_len;
-                const k = @min(n, room);
-                @memcpy(r.out_buf[r.out_len..][0..k], buf[0..k]);
-                r.out_len += k;
-            }
-        }
+        // No thread (spawn failed): drain stdout here, after stderr.
+        if (out_thr) |t| t.join() else r.readStdout(io);
         waitExitNoReap(&r.child);
         r.lock();
         const term = r.child.wait(io) catch blk: {
@@ -219,9 +234,16 @@ pub const MegaEngine = struct {
     poll_msg: ?[]u8 = null,
     poll_final: ?[]u8 = null,
 
-    /// Takes ownership of `located`.
+    /// Takes ownership of `located`. Windows: when the locator found no
+    /// server, `<dir>\MEGAcmdServer.exe` is used if it exists.
     pub fn init(alloc: Allocator, io: Io, located: megacmd.Located) MegaEngine {
-        return .{ .alloc = alloc, .io = io, .located = located };
+        var l = located;
+        if (builtin.os.tag == .windows and l.server == null) {
+            if (std.fs.path.join(alloc, &.{ l.dir, "MEGAcmdServer.exe" })) |sp| {
+                if (Io.Dir.cwd().statFile(io, sp, .{})) |_| l.server = sp else |_| alloc.free(sp);
+            } else |_| {}
+        }
+        return .{ .alloc = alloc, .io = io, .located = l };
     }
 
     /// Cancels and kills every live run, joins its worker, frees it.
@@ -260,9 +282,16 @@ pub const MegaEngine = struct {
     /// within 2 s. The client's own auto-start would inherit our pipes and
     /// block EOF. Linux: no-op (the client auto-starts the server).
     pub fn ensureServer(self: *MegaEngine) void {
-        if (builtin.os.tag != .windows) return;
-        const server = self.located.server orelse return;
-        if (self.probeServer()) return;
+        _ = self.serverReady();
+    }
+
+    /// `ensureServer`, and false on Windows when there is no server binary
+    /// to start: then no MEGAcmd client may run (its own auto-start would
+    /// hold our pipes open and hang the reader). Always true on Linux.
+    fn serverReady(self: *MegaEngine) bool {
+        if (builtin.os.tag != .windows) return true;
+        const server = self.located.server orelse return false;
+        if (self.probeServer()) return true;
         log.info("MEGAcmd server not answering; starting {s}", .{server});
         var child = std.process.spawn(self.io, .{
             .argv = &.{server},
@@ -272,7 +301,7 @@ pub const MegaEngine = struct {
             .create_no_window = true,
         }) catch |e| {
             log.warn("starting MEGAcmd server failed: {s}", .{@errorName(e)});
-            return;
+            return true;
         };
         // Not waited for: the server outlives this call (and f69).
         if (builtin.os.tag == .windows) {
@@ -280,6 +309,7 @@ pub const MegaEngine = struct {
             std.os.windows.CloseHandle(child.thread_handle);
             child.id = null;
         }
+        return true;
     }
 
     /// True when `whoami` answered (signed in or out) within 2 s.
@@ -316,7 +346,7 @@ pub const MegaEngine = struct {
     /// `mega-login <email> <password> [--auth-code=<code>]`. The password
     /// is one argv element and is never logged. Blocks: call on a worker.
     pub fn login(self: *MegaEngine, alloc: Allocator, email: []const u8, password: []const u8, auth_code: ?[]const u8) errs.Error!LoginResult {
-        self.ensureServer();
+        if (!self.serverReady()) return .not_installed;
         const code_arg: ?[]u8 = if (auth_code) |c|
             std.fmt.allocPrint(alloc, "--auth-code={s}", .{c}) catch return errs.Error.OutOfMemory
         else
@@ -341,6 +371,7 @@ pub const MegaEngine = struct {
     /// Signed-in account e-mail (owned by `alloc`), or null when signed out,
     /// not installed or the call failed. Blocks: call on a worker.
     pub fn whoami(self: *MegaEngine, alloc: Allocator) ?[]u8 {
+        if (!self.serverReady()) return null;
         const av = megacmd.argv(alloc, self.located, "whoami", &.{}) catch return null;
         defer megacmd.freeArgv(alloc, av);
         const res = util_proc.run(alloc, self.io, av, .{ .stderr = .ignore }) catch return null;
@@ -352,6 +383,7 @@ pub const MegaEngine = struct {
 
     /// `mega-logout`; failures are logged only. Blocks: call on a worker.
     pub fn logout(self: *MegaEngine) void {
+        if (!self.serverReady()) return;
         const av = megacmd.argv(self.alloc, self.located, "logout", &.{}) catch return;
         defer megacmd.freeArgv(self.alloc, av);
         const res = util_proc.run(self.alloc, self.io, av, .{ .stderr = .ignore }) catch |e| {
@@ -382,13 +414,22 @@ pub const MegaEngine = struct {
             log.warn("mega: creating '{s}' failed: {s}", .{ spec.dest_dir, @errorName(e) });
             return if (e == error.NoSpaceLeft) errs.Error.DiskFull else errs.Error.NetworkError;
         };
-        self.ensureServer();
-        self.applyLimit(true);
+        const ready = self.serverReady();
+        if (ready) self.applyLimitReady(true);
 
         const run = self.alloc.create(Run) catch return errs.Error.OutOfMemory;
         errdefer self.alloc.destroy(run);
         const dest = self.alloc.dupe(u8, spec.dest_dir) catch return errs.Error.OutOfMemory;
         errdefer self.alloc.free(dest);
+        if (!ready) {
+            // Windows without MEGAcmdServer.exe: never spawn the client.
+            // The run is born finished; `poll` reports engine_missing.
+            log.warn("mega: job {d}: no MEGAcmdServer.exe next to {s}", .{ spec.job_id, self.located.client });
+            run.* = .{ .child = undefined, .dest_dir = dest, .no_server = true };
+            run.done.store(true, .release);
+            self.runs.putAssumeCapacity(spec.job_id, run);
+            return ref;
+        }
         const av = megacmd.argv(self.alloc, self.located, "get", &.{ spec.url, spec.dest_dir }) catch return errs.Error.OutOfMemory;
         defer megacmd.freeArgv(self.alloc, av);
         const child = std.process.spawn(self.io, .{
@@ -436,6 +477,10 @@ pub const MegaEngine = struct {
         }
         const done_b = run.prog_done.load(.monotonic);
         const total: ?u64 = if (run.have_prog.load(.acquire)) run.prog_total.load(.monotonic) else null;
+        if (run.no_server) {
+            self.poll_msg = self.alloc.dupe(u8, NO_SERVER_MSG) catch null;
+            return .{ .phase = .failed, .fail = .engine_missing, .msg = self.poll_msg orelse "" };
+        }
         const code = run.exit_code;
         if (code == 0) {
             self.poll_final = findFinal(self.alloc, self.io, run);
@@ -501,6 +546,9 @@ pub const MegaEngine = struct {
     /// `mega-transfers <flag> <tag>` for every live transfer of `run`.
     /// Returns how many tags were found.
     fn transfersAction(self: *MegaEngine, run: *Run, flag: []const u8) usize {
+        // Windows: a dead server would be auto-started by this helper and
+        // hold its stdout pipe open, so the call would never return.
+        if (!self.serverReady()) return 0;
         const tags = self.liveTags(run.dest_dir) catch |e| {
             log.warn("mega-transfers lookup failed: {s}", .{@errorName(e)});
             return 0;
@@ -522,10 +570,12 @@ pub const MegaEngine = struct {
 
     /// Cancel the server-side transfer (when still running), kill the
     /// client, join the worker, free the run.
+    /// Order: kill first, so a hung lookup can never keep the client alive.
     fn stopRun(self: *MegaEngine, run: *Run) void {
         if (!run.done.load(.acquire)) {
-            _ = self.transfersAction(run, "-c");
             run.killChild();
+            // The server keeps the transfer after the client dies: cancel it.
+            _ = self.transfersAction(run, "-c");
         }
         if (run.thr) |t| t.join();
         self.alloc.free(run.dest_dir);
@@ -558,7 +608,7 @@ pub const MegaEngine = struct {
     fn finalPathImpl(p: *anyopaque, alloc: Allocator, ref: []const u8) errs.Error!?[]u8 {
         const self = cast(p);
         const run = self.runs.get(refId(ref) orelse return null) orelse return null;
-        if (!run.done.load(.acquire)) return null;
+        if (!run.done.load(.acquire) or run.no_server) return null;
         return findFinal(alloc, self.io, run);
     }
 
@@ -571,6 +621,15 @@ pub const MegaEngine = struct {
     /// Send `want_limit` to `mega-speedlimit -d` when it changed and a run
     /// exists (or one is about to start).
     fn applyLimit(self: *MegaEngine, starting: bool) void {
+        const want = self.want_limit orelse return;
+        if (self.last_limit) |l| if (l == want) return;
+        if (!starting and self.runs.count() == 0) return;
+        if (!self.serverReady()) return;
+        self.applyLimitReady(starting);
+    }
+
+    /// `applyLimit` once the server is known to be up.
+    fn applyLimitReady(self: *MegaEngine, starting: bool) void {
         const want = self.want_limit orelse return;
         if (self.last_limit) |l| if (l == want) return;
         if (!starting and self.runs.count() == 0) return;
@@ -648,11 +707,16 @@ fn capture(alloc: Allocator, io: Io, av: []const []const u8) error{ OutOfMemory,
     return .{ .stdout = so, .stderr = se, .code = code };
 }
 
+/// A kept stderr error line: ` ERR ` / `ERR:` in any case.
+fn isErrLine(piece: []const u8) bool {
+    return std.ascii.findIgnoreCase(piece, " err ") != null or std.ascii.findIgnoreCase(piece, "err:") != null;
+}
+
 fn loginResult(code: u8, stderr: []const u8, stdout: []const u8) LoginResult {
     if (code == 0) return .ok;
     if (code == megacmd.EXIT_ALREADY_LOGGED_IN) return .already_logged_in;
     for ([_][]const u8{ stderr, stdout }) |text| {
-        for ([_][]const u8{ "auth", "code", "2fa" }) |w| {
+        for ([_][]const u8{ "auth code", "authentication code", "two-factor", "2fa", "multi-factor" }) |w| {
             if (std.ascii.findIgnoreCase(text, w) != null) return .needs_auth_code;
         }
     }
@@ -714,6 +778,7 @@ const fake_script =
     \\    dest="$2"
     \\    echo "$dest" > "$d/last_dest"
     \\    printf 'abcdef' > "$dest/Game.zip"
+    \\    [ -f "$d/bigout" ] && head -c 100000 /dev/zero | tr '\0' 'x'
     \\    printf 'TRANSFERRING ||##||( 1/6 MB:  16.67 %%) \rTRANSFERRING ||####||( 6/6 MB: 100.00 %%) \n' >&2
     \\    [ -f "$d/hang" ] && exec sleep 30
     \\    if [ "$code" = 17 ]; then
@@ -737,7 +802,7 @@ const FakeMega = struct {
     root: [:0]u8,
     eng: MegaEngine,
 
-    fn create(opts: struct { exit_code: ?[]const u8 = null, hang: bool = false }) !*FakeMega {
+    fn create(opts: struct { exit_code: ?[]const u8 = null, hang: bool = false, bigout: bool = false }) !*FakeMega {
         const a = testing.allocator;
         const io = testing.io;
         const f = try a.create(FakeMega);
@@ -749,6 +814,7 @@ const FakeMega = struct {
         try f.tmp.dir.symLink(io, "mega-get", "mega-speedlimit", .{});
         if (opts.exit_code) |c| try f.tmp.dir.writeFile(io, .{ .sub_path = "exit_code", .data = c });
         if (opts.hang) try f.tmp.dir.writeFile(io, .{ .sub_path = "hang", .data = "" });
+        if (opts.bigout) try f.tmp.dir.writeFile(io, .{ .sub_path = "bigout", .data = "" });
         f.root = try f.tmp.dir.realPathFileAlloc(io, ".", a);
         errdefer a.free(f.root);
         const client = try std.fs.path.join(a, &.{ f.root, "mega-get" });
@@ -880,6 +946,58 @@ test "mega engine: login result mapping" {
     try testing.expectEqual(LoginResult.needs_auth_code, loginResult(1, "[API:err: ...] ERR Two-factor Authentication required\n", ""));
     try testing.expectEqual(LoginResult.needs_auth_code, loginResult(9, "", "Enter the 2FA code"));
     try testing.expectEqual(LoginResult.bad_credentials, loginResult(9, "Login failed: invalid email or password", ""));
+    try testing.expectEqual(LoginResult.bad_credentials, loginResult(9, "[API:err: 12:00:00] Login failed: authentication failed", ""));
+    try testing.expectEqual(LoginResult.needs_auth_code, loginResult(9, "Please enter the authentication code", ""));
+    try testing.expectEqual(LoginResult.needs_auth_code, loginResult(9, "Multi-factor authentication is enabled", ""));
+}
+
+test "mega engine: ERR lines match in any case" {
+    try testing.expect(isErrLine("[API:err: 12:00:00] Failed to get node"));
+    try testing.expect(isErrLine("[12:00:00] ERR Not found"));
+    try testing.expect(isErrLine("[ERR: x] boom"));
+    try testing.expect(!isErrLine("TRANSFERRING ||##||( 1/6 MB:  16.67 %)"));
+    try testing.expect(!isErrLine("Download finished: /x/error.zip"));
+}
+
+test "mega engine: >64 KB of stdout before exit does not stall the reader" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const f = try FakeMega.create(.{ .bigout = true });
+    defer f.destroy();
+    const e = f.eng.engine();
+    var db: [512]u8 = undefined;
+    const dest = try f.destDir(&db);
+    const ref = try e.start(.{ .job_id = 1, .url = "https://mega.nz/file/abc#key", .headers = &.{}, .dest_dir = dest, .out_name = null, .torrent_bytes = null });
+    defer testing.allocator.free(ref);
+    const p = try pollUntilDone(e, ref);
+    try testing.expectEqual(model.Phase.transfer_done, p.phase);
+    const run = f.eng.runs.get(1).?;
+    try testing.expectEqual(@as(?u8, 0), run.exit_code);
+    try testing.expectEqual(@as(usize, STDOUT_MAX), run.out_len); // capped, rest drained
+    // `Download finished:` sat past the cap; the single-file rule finds it.
+    try testing.expect(std.mem.endsWith(u8, p.final_path.?, "Game.zip"));
+    try e.cancel(ref);
+}
+
+test "mega engine: a run without a server binary fails engine_missing" {
+    var me = MegaEngine.init(testing.allocator, testing.io, .{
+        .client = try testing.allocator.dupe(u8, "/x/MegaClient.exe"),
+        .server = null,
+        .dir = try testing.allocator.dupe(u8, "/x"),
+        .is_windows_direct = true,
+    });
+    defer me.deinit();
+    const dest = try testing.allocator.dupe(u8, "/x/dl");
+    const run = try testing.allocator.create(Run);
+    run.* = .{ .child = undefined, .dest_dir = dest, .no_server = true };
+    run.done.store(true, .release);
+    try me.runs.put(testing.allocator, 7, run);
+    const e = me.engine();
+    const p = try e.poll("mega:7");
+    try testing.expectEqual(model.Phase.failed, p.phase);
+    try testing.expectEqual(model.FailReason.engine_missing, p.fail.?);
+    try testing.expectEqualStrings(NO_SERVER_MSG, p.msg);
+    try testing.expectEqual(@as(?[]u8, null), try e.finalPath(testing.allocator, "mega:7"));
+    try e.cancel("mega:7");
 }
 
 test "mega engine: underDir needs a separator after the prefix" {

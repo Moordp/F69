@@ -237,7 +237,16 @@ fn locateCore(
 ) ?Located {
     if (override.len > 0) {
         if (!exists(override)) return null;
-        return buildLocated(alloc, override, null, std.fs.path.dirname(override) orelse ".", os == .windows) catch null;
+        const win = os == .windows;
+        const dir = (if (win) std.fs.path.dirnameWindows(override) else std.fs.path.dirnamePosix(override)) orelse ".";
+        // Windows: the server must be started by us (its auto-start
+        // inherits our pipes), so look for it next to the overridden client.
+        if (win) {
+            const server_p = std.fmt.allocPrint(alloc, "{s}\\MEGAcmdServer.exe", .{dir}) catch return null;
+            defer alloc.free(server_p);
+            return buildLocated(alloc, override, if (exists(server_p)) server_p else null, dir, true) catch null;
+        }
+        return buildLocated(alloc, override, null, dir, false) catch null;
     }
     return locateIn(alloc, path_entries, localappdata, os, exists);
 }
@@ -452,6 +461,28 @@ test "locateCore: bad override does not fall through to PATH" {
     const o = locateCore(a, "/opt/mega/mega-get", &.{}, null, .linux, fakeExists).?;
     defer freeLocated(a, o);
     try testing.expectEqualStrings("/opt/mega", o.dir);
+}
+
+test "locateCore: Windows override finds MEGAcmdServer.exe next to the client" {
+    const a = testing.allocator;
+    const l = locateCore(a, "C:\\L\\MEGAcmd\\MegaClient.exe", &.{}, null, .windows, fakeExists).?;
+    defer freeLocated(a, l);
+    try testing.expectEqualStrings("C:\\L\\MEGAcmd", l.dir);
+    try testing.expectEqualStrings("C:\\L\\MEGAcmd\\MEGAcmdServer.exe", l.server.?);
+    try testing.expect(l.is_windows_direct);
+    try testing.expect(locateCore(a, "C:\\Other\\MegaClient.exe", &.{}, null, .windows, fakeExists) == null);
+}
+
+fn noServerExists(path: []const u8) bool {
+    return std.mem.eql(u8, path, "D:\\M\\MegaClient.exe");
+}
+
+test "locateCore: Windows override without a server binary leaves server null" {
+    const a = testing.allocator;
+    const l = locateCore(a, "D:\\M\\MegaClient.exe", &.{}, null, .windows, noServerExists).?;
+    defer freeLocated(a, l);
+    try testing.expect(l.server == null);
+    try testing.expectEqualStrings("D:\\M", l.dir);
 }
 
 fn locateOom(a: Allocator, os: std.Target.Os.Tag) !void {
