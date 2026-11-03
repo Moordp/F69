@@ -2,6 +2,11 @@
 
 All notable, user-facing changes. Dates are YYYY-MM-DD.
 
+## [0.15.19] - 2026-11-03
+
+### Added
+- MEGA downloads via MEGAcmd: links to mega.nz now download inside f69 when MEGAcmd is installed; sign in to your MEGA account under Settings → Accounts for the larger transfer quota; MEGAcmd path override.
+
 ## [0.15.18] - 2026-11-03
 
 ### Added
