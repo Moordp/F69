@@ -17,6 +17,7 @@ pub const WorkJob = work_thread.WorkJob;
 pub const IoThread = io_thread.IoThread;
 pub const IoRequest = io_thread.IoRequest;
 pub const IoReply = io_thread.IoReply;
+pub const folder_scan_job = @import("jobs/folder_scan.zig");
 pub const ModQueueHook = @import("jobs/mod_queue.zig").Hook;
 
 test {
@@ -31,4 +32,5 @@ test {
     _ = @import("jobs/compat.zig");
     _ = @import("jobs/reanalyse.zig");
     _ = @import("jobs/mod_queue.zig");
+    _ = @import("jobs/folder_scan.zig");
 }

@@ -218,7 +218,7 @@ test "headless: ui_scale not rewritten when unchanged (no dirty)" {
 //
 // The first Frame-driven slice: builds the complete service graph + a
 // Frame on a testing window via ui.Harness, then drives the real folder-
-// scan action (doFolderScan + pump tickFolderScan to completion) against
+// scan action (doFolderScan + drain the compute job to completion) against
 // a synthetic Ren'Py install, asserting the scan detected it. This is the
 // template every remaining feature suite follows: build harness → frame()
 // → drive action → drain → assert on real state.
@@ -245,15 +245,16 @@ test "headless: folder scan detects a Ren'Py game (F4.2)" {
     var f = h.frame();
     ui.doFolderScan(&f, scan_dir);
 
-    // Pump the scan forward until the session reports done (bounded so a
-    // bug can't hang the test).
+    // The scan runs on the compute thread: drain its events until the
+    // session is done (bounded so a bug can't hang the test).
     var guard: usize = 0;
-    while (guard < 100_000) : (guard += 1) {
-        ui.tickFolderScan(&f);
-        if (std.mem.indexOf(u8, h.state.folderScanMsg(), "done") != null) break;
+    while (guard < 2000 and ui.folderScanInProgress(&h.state)) : (guard += 1) {
+        ui.drainThreads(&f);
+        std.Io.sleep(env.io, .fromMilliseconds(5), .awake) catch {};
     }
 
-    try std.testing.expect(std.mem.indexOf(u8, h.state.folderScanMsg(), "done") != null);
+    try std.testing.expect(!ui.folderScanInProgress(&h.state));
+    try std.testing.expect(std.mem.startsWith(u8, h.state.folderScanMsg(), "Scan finished"));
     try std.testing.expect(h.state.folder_scan_row_count >= 1);
 }
 
@@ -710,12 +711,11 @@ test "flow: folder import — scan a synthetic install, commit it, game is in th
 
     var f = h.frame();
     ui.doFolderScan(&f, scan_root);
-    // The scan is a pumped session, not a worker: it advances one step per
-    // tickFolderScan call. drainWorkers alone leaves it parked at "Scanning…".
+    // The scan is a compute job: drain its events until the session is done.
     var guard: usize = 0;
-    while (guard < 100_000) : (guard += 1) {
-        ui.tickFolderScan(&f);
-        if (std.mem.indexOf(u8, h.state.folderScanMsg(), "done") != null) break;
+    while (guard < 2000 and ui.folderScanInProgress(&h.state)) : (guard += 1) {
+        ui.drainThreads(&f);
+        std.Io.sleep(io, .fromMilliseconds(5), .awake) catch {};
     }
     tlog("flow-folder-import: scan msg='{s}' rows={d}", .{ h.state.folderScanMsg(), h.state.folder_scan_row_count });
     try std.testing.expect(h.state.folder_scan_row_count >= 1);
@@ -738,13 +738,9 @@ test "flow: folder import — scan a synthetic install, commit it, game is in th
     var f2 = h.frame();
     ui.commitFolderImport(&f2);
     // The commit queues transfers on a job + refreshes its own library
-    // snapshot; give both a chance to finish and let the scan session tick to
-    // its cleanup, otherwise the test tears down mid-flight.
-    // Do NOT tick the scan after committing. commitFolderImport calls
-    // refreshLibSnapshot, which frees the library snapshot that the scan
-    // session still holds NON-OWNING aliases into (imports.zig:1856) — ticking
-    // afterwards reads freed memory and aborts. Worth knowing: the production
-    // UI must not tick a scan after a commit either.
+    // snapshot; give both a chance to finish, otherwise the test tears down
+    // mid-flight. (The scan job copies the library list it needs, so the
+    // snapshot refresh no longer leaves the session with stale aliases.)
     h.drainWorkers(1000);
 
     const after_games = try h.lib.listGames();
@@ -2423,6 +2419,129 @@ fn activityStatus(fr: *ui.Frame, id: u64) ?ui.threads.activity.Status {
     const views = fr.book.snapshot(arena_state.allocator()) catch return null;
     for (views) |v| if (v.id == id) return v.status;
     return null;
+}
+
+/// Six Ren'Py-shaped game folders (`<root>/scan6/Game N/renpy/bootstrap.py`,
+/// the fingerprint the F4.2 test uses). Returns the scan root (caller frees).
+fn seedSixGames(env: *TestEnv) ![]u8 {
+    var p_buf: [128]u8 = undefined;
+    var i: usize = 1;
+    while (i <= 6) : (i += 1) {
+        try env.writeFile(try std.fmt.bufPrint(&p_buf, "scan6/Game {d}/renpy/bootstrap.py", .{i}), "");
+    }
+    return env.path("scan6");
+}
+
+/// Steps frames until the folder scan session is done (bounded, ~10 s).
+fn stepUntilScanDone(io: std.Io) !void {
+    var k: usize = 0;
+    while (k < 2000) : (k += 1) {
+        _ = try dvui.testing.step(threadsRender);
+        const fr = threads_frame orelse return error.NoFrame;
+        if (!ui.folderScanInProgress(fr.state)) return;
+        std.Io.sleep(io, .fromMilliseconds(5), .awake) catch {};
+    }
+    return error.ScanNeverEnded;
+}
+
+test "threads: folder scan streams rows while it runs; Stop after 2 keeps them and cancels the activity" {
+    tlog("START: threads-folder-scan-stop", .{});
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(8) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var env = try TestEnv.init(gpa, "threads-folder-scan-stop");
+    defer env.deinit();
+    var t = try dvui.testing.init(.{ .allocator = gpa, .io = io, .window_size = .{ .w = 1280, .h = 900 } });
+    defer t.deinit();
+    var h = try ui.Harness.init(gpa, io, t.window, env.root);
+    defer h.deinit();
+    const root = try seedSixGames(&env);
+    defer gpa.free(root);
+
+    // Slow each folder down so the scan is still running when Stop lands.
+    ui.threads.folder_scan_job.test_step_delay_ms = 150;
+    defer ui.threads.folder_scan_job.test_step_delay_ms = 0;
+
+    var fr = h.frame();
+    threads_frame = &fr;
+    defer threads_frame = null;
+    h.state.screen = .import_folder;
+    _ = try dvui.testing.step(threadsRender);
+
+    ui.doFolderScan(&fr, root);
+    const aid = ui.folderScanActivityId(&h.state) orelse return error.NoScanActivity;
+
+    // Rows arrive while the activity runs: the count is seen to grow
+    // across frames before the job ends.
+    var first_live_count: ?usize = null;
+    var grew_while_live = false;
+    {
+        var k: usize = 0;
+        while (h.state.folder_scan_row_count < 2) : (k += 1) {
+            if (k > 2000) return error.RowsNeverArrived;
+            _ = try dvui.testing.step(threadsRender);
+            const n = h.state.folder_scan_row_count;
+            if (activityStatus(&fr, aid) == .running and n > 0) {
+                if (first_live_count) |c0| {
+                    if (n > c0) grew_while_live = true;
+                } else first_live_count = n;
+            }
+            std.Io.sleep(io, .fromMilliseconds(5), .awake) catch {};
+        }
+    }
+    try std.testing.expect(grew_while_live);
+    try std.testing.expect(ui.folderScanInProgress(&h.state));
+
+    try stepUntilTagVisible(io, "import-scan-stop");
+    try dvui.testing.moveTo("import-scan-stop");
+    try dvui.testing.click(.left);
+    try stepUntilScanDone(io);
+
+    try std.testing.expectEqual(ui.threads.activity.Status.cancelled, activityStatus(&fr, aid).?);
+    const n = h.state.folder_scan_row_count;
+    tlog("threads-folder-scan-stop: {d} rows kept, msg='{s}'", .{ n, h.state.folderScanMsg() });
+    try std.testing.expect(n >= 2 and n < 6);
+    try std.testing.expect(std.mem.startsWith(u8, h.state.folderScanMsg(), "Stopped \u{2014} "));
+    // The bundle and the row states stay in step for the review table.
+    try std.testing.expectEqual(n, ui.folderScanBundle(&h.state).?.games.len);
+    try std.testing.expect(dvui.tagGet("import-scan-stop") == null or !dvui.tagGet("import-scan-stop").?.visible);
+}
+
+test "threads: a full folder scan finds all 6 games and marks the session done" {
+    tlog("START: threads-folder-scan-full", .{});
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(8) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var env = try TestEnv.init(gpa, "threads-folder-scan-full");
+    defer env.deinit();
+    var t = try dvui.testing.init(.{ .allocator = gpa, .io = io, .window_size = .{ .w = 1280, .h = 900 } });
+    defer t.deinit();
+    var h = try ui.Harness.init(gpa, io, t.window, env.root);
+    defer h.deinit();
+    const root = try seedSixGames(&env);
+    defer gpa.free(root);
+
+    var fr = h.frame();
+    threads_frame = &fr;
+    defer threads_frame = null;
+    h.state.screen = .import_folder;
+    _ = try dvui.testing.step(threadsRender);
+
+    ui.doFolderScan(&fr, root);
+    const aid = ui.folderScanActivityId(&h.state) orelse return error.NoScanActivity;
+    try stepUntilScanDone(io);
+
+    try std.testing.expectEqual(ui.threads.activity.Status.done, activityStatus(&fr, aid).?);
+    try std.testing.expectEqual(@as(usize, 6), h.state.folder_scan_row_count);
+    try std.testing.expectEqual(@as(usize, 6), ui.folderScanBundle(&h.state).?.games.len);
+    try std.testing.expectEqualStrings("Scan finished \u{2014} 6 folders", h.state.folderScanMsg());
+    // Each row has its engine and launcher path, relative to the root.
+    for (ui.folderScanBundle(&h.state).?.games) |g| {
+        try std.testing.expect(std.mem.startsWith(u8, g.install_executable_rel.?, "Game "));
+    }
+    tlog("threads-folder-scan-full: OK", .{});
 }
 
 test "threads: Downloads Tools section shows a running tool; Cancel moves it to Tools history; Remove drops it" {

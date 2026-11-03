@@ -12,6 +12,7 @@ const compat_job = @import("../threads/jobs/compat.zig");
 const launch_act = @import("launch.zig");
 const mods_act = @import("mods.zig");
 const reanalyse_job = @import("../threads/jobs/reanalyse.zig");
+const imports_act = @import("imports.zig");
 
 const threads = types.threads;
 const Frame = types.Frame;
@@ -187,6 +188,9 @@ fn handleWorkDone(frame: *Frame, activity_id: u64, outcome: threads.work_thread.
             frame.book.remove(activity_id);
             return;
         },
+        // Rows already streamed to the session; mark it done (no toast:
+        // the Import screen shows the end state).
+        .folder_scan => imports_act.onFolderScanDone(frame, activity_id),
     }
 
     var arena = std.heap.ArenaAllocator.init(frame.lib.alloc);

@@ -18,9 +18,12 @@ const owned_types = @import("../owned.zig");
 const job_mod = @import("../job.zig");
 const common = @import("common.zig");
 const sync_act = @import("sync.zig");
+const threads_act = @import("threads.zig");
+const folder_scan_job = @import("../threads/jobs/folder_scan.zig");
 
 const Frame = types.Frame;
 const State = types.State;
+const threads = types.threads;
 
 pub const UpdateCheckPayload = owned_types.UpdateCheckPayload;
 pub const UpdateCheckJob = owned_types.UpdateCheckJob;
@@ -1249,60 +1252,48 @@ fn legacyImportAnchor() void {}
 
 const folder_scan = importers_mod.folder_scan;
 
-/// Incremental scan session — owned by State while a folder scan is
-/// running. Replaces the previous all-at-once `folder_scan.scan` call
-/// that froze the UI on libraries of a few hundred folders. The
-/// render loop calls `tickFolderScan` each frame while the session
-/// is active; the UI shows newly-found games as they appear instead
-/// of waiting for the whole walk to complete.
+/// Folder-scan session — owned by State while a scan's rows are on the
+/// Import screen. The walk itself is a compute job
+/// (`threads/jobs/folder_scan.zig`); it pushes one `ScanRow` per game
+/// folder onto `rows`, and the import screen calls `drainFolderScanRows`
+/// each frame to move them into `games_list` / `rows_list`, so newly
+/// found games show while the scan runs.
 const ScanSession = struct {
     arena: *std.heap.ArenaAllocator,
     games_list: std.ArrayList(importers_mod.ImportedGame),
     rows_list: std.ArrayList(state_mod.FolderImportRowState),
-    /// Cached library snapshot for name_match prefill. Owned by
-    /// `frame.lib`; freed via `lib.freeGames` in `freeFolderScan`.
-    /// Lifetime: lives until the session is torn down.
-    lib_games: []library.Game,
-    /// `name_match.Candidate` view of lib_games. Pre-built so each
-    /// scan tick doesn't redo the conversion.
-    candidates: []importers_mod.name_match.Candidate,
-    /// Owned by `arena`. Identifies the file-system root we're
-    /// walking; combined with `entry.name` to build per-entry probe
-    /// paths.
-    scan_root: []const u8,
-    /// Live directory iterator. `dir` is open until session teardown.
-    dir: std.Io.Dir,
-    iter: std.Io.Dir.Iterator,
+    /// Shared with the job (one reference each). Closed and released
+    /// in `freeFolderScan`.
+    rows: *folder_scan_job.Rows,
+    /// The scan's activity in `frame.book` (phase, progress, Stop).
+    activity_id: u64,
     /// Heap-owned bundle struct mirror so `state.folder_scan_bundle`
     /// can carry a stable `*Bundle` pointer. `bundle.games` is
     /// kept in sync with `games_list.items` after each append.
     bundle: *importers_mod.Bundle,
+    /// Set by `onFolderScanDone` when the job has ended (finished,
+    /// stopped or failed).
     done: bool = false,
-    /// Running tally of scanned entries (regardless of match).
-    /// Surfaces in the status line so the user sees progress on
-    /// huge directories.
-    scanned: usize = 0,
-
-    /// Number of top-level entries we process per `tickFolderScan`
-    /// call. Tuned for ~30 Hz render rate: small enough to keep one
-    /// frame under 16 ms even on slow filesystems (FUSE NTFS),
-    /// large enough that 100 folders finish within ~1 s.
-    pub const STEP_BATCH: usize = 4;
 };
 
-/// Kick off an incremental folder scan. Allocates the session,
-/// opens the scan root, fills the cached library snapshot, and
-/// installs an empty Bundle so the UI can render the (initially
-/// empty) preview right away. Each subsequent frame calls
-/// `tickFolderScan` to add a batch of found games.
+fn scanSession(state: *const State) ?*ScanSession {
+    const p = state.folder_scan_session orelse return null;
+    return @ptrCast(@alignCast(p));
+}
+
+/// Start a folder scan. On click (UI thread) this only reads the
+/// library's game list (link prefill + typeahead snapshot); the folder
+/// walk, the engine fingerprints and the compat scans run on the compute
+/// thread as a `FolderScanJob`. Installs an empty Bundle so the UI can
+/// render the (initially empty) preview right away.
 pub fn doFolderScan(frame: *Frame, dir_path: []const u8) void {
     const state = frame.state;
     if (dir_path.len == 0) {
         state.setFolderScanMsg("Pick a folder first.");
         return;
     }
-    // Drop the previous scan (bundle, session, row states, lib snap).
-    freeFolderScan(state, frame.lib, frame.io);
+    // Drop the previous scan (stops its job, frees bundle, rows, snap).
+    clearFolderScan(frame);
 
     const lib_alloc = frame.lib.alloc;
     const arena_ptr = lib_alloc.create(std.heap.ArenaAllocator) catch {
@@ -1310,252 +1301,204 @@ pub fn doFolderScan(frame: *Frame, dir_path: []const u8) void {
         return;
     };
     arena_ptr.* = std.heap.ArenaAllocator.init(lib_alloc);
-
-    const a = arena_ptr.allocator();
-
-    var dir = std.Io.Dir.cwd().openDir(frame.io, dir_path, .{ .iterate = true }) catch |e| {
-        var buf: [192]u8 = undefined;
-        const m = std.fmt.bufPrint(&buf, "Open failed: {s}", .{@errorName(e)}) catch "Open failed";
-        state.setFolderScanMsg(m);
+    var arena_owned = true;
+    defer if (arena_owned) {
         arena_ptr.deinit();
         lib_alloc.destroy(arena_ptr);
-        return;
     };
 
-    const scan_root_dup = a.dupe(u8, dir_path) catch {
-        state.setFolderScanMsg("Out of memory.");
-        dir.close(frame.io);
-        arena_ptr.deinit();
-        lib_alloc.destroy(arena_ptr);
-        return;
-    };
-
-    // Snapshot the library and build candidate slices for the
-    // per-row name_match prefill. Caching here (vs per-tick or
-    // per-frame) keeps the iterator fast even on a 500-game library.
+    // Snapshot the library once, on click: the typeahead reads it, and
+    // the job gets a copy of each game's id, name and latest version for
+    // the per-row link prefill.
     const lib_games: []library.Game = frame.lib.listGames() catch &.{};
-    state.folder_scan_lib_snapshot = if (lib_games.len > 0) lib_games.ptr else null;
-    state.folder_scan_lib_count = lib_games.len;
+    var snap_owned = true;
+    defer if (snap_owned) frame.lib.freeGames(lib_games);
 
-    var candidates: []importers_mod.name_match.Candidate = &.{};
-    if (a.alloc(importers_mod.name_match.Candidate, lib_games.len)) |cs| {
-        candidates = cs;
-        for (lib_games, 0..) |g, i| {
-            candidates[i] = .{ .thread_id = g.f95_thread_id, .name = g.name };
-        }
-    } else |_| {
-        // No candidates → no auto-link prefill; rows will start
-        // .unresolved and the user picks via the typeahead. Not a
-        // fatal condition.
-    }
+    const rows = folder_scan_job.Rows.create(lib_alloc, frame.io) catch {
+        state.setFolderScanMsg("Out of memory.");
+        return;
+    };
+    defer rows.release(); // the session and the job take their own references
+
+    const job = folder_scan_job.FolderScanJob.create(lib_alloc, dir_path, lib_games, rows) catch {
+        state.setFolderScanMsg("Out of memory.");
+        return;
+    };
+    var job_owned = true;
+    defer if (job_owned) job.deinit();
 
     const bundle_ptr = lib_alloc.create(importers_mod.Bundle) catch {
         state.setFolderScanMsg("Out of memory.");
-        dir.close(frame.io);
-        arena_ptr.deinit();
-        lib_alloc.destroy(arena_ptr);
         return;
     };
+    var bundle_owned = true;
+    defer if (bundle_owned) lib_alloc.destroy(bundle_ptr);
     bundle_ptr.* = .{ .arena = arena_ptr, .games = &.{} };
 
     const session = lib_alloc.create(ScanSession) catch {
         state.setFolderScanMsg("Out of memory.");
-        lib_alloc.destroy(bundle_ptr);
-        dir.close(frame.io);
-        arena_ptr.deinit();
-        lib_alloc.destroy(arena_ptr);
         return;
     };
+    var session_owned = true;
+    defer if (session_owned) lib_alloc.destroy(session);
+
+    var title_buf: [128]u8 = undefined;
+    const title = std.fmt.bufPrint(&title_buf, "Folder scan \u{00B7} {s}", .{std.fs.path.basename(dir_path)}) catch "Folder scan";
+    const a = frame.book.start(.folder_scan, 0, title) catch {
+        state.setFolderScanMsg("Out of memory.");
+        return;
+    };
+
     session.* = .{
         .arena = arena_ptr,
         .games_list = .empty,
         .rows_list = .empty,
-        .lib_games = lib_games,
-        .candidates = candidates,
-        .scan_root = scan_root_dup,
-        .dir = dir,
-        .iter = dir.iterate(),
+        .rows = rows.retain(),
+        .activity_id = a.id,
         .bundle = bundle_ptr,
     };
-
+    // From here the session owns the arena, bundle and rows reference;
+    // State owns the session and the snapshot.
+    arena_owned = false;
+    bundle_owned = false;
+    session_owned = false;
+    snap_owned = false;
     state.folder_scan_session = session;
     state.folder_scan_bundle = bundle_ptr;
     state.folder_scan_row_states = null;
     state.folder_scan_row_count = 0;
+    state.folder_scan_lib_snapshot = if (lib_games.len > 0) lib_games.ptr else null;
+    state.folder_scan_lib_count = lib_games.len;
     state.setFolderScanMsg("Scanning…");
+
+    job_owned = false; // `submit` owns it now, on every path
+    frame.work.submit(.{ .folder_scan = job }, a) catch {
+        // OutOfMemory: the job was freed, the activity is ours to end.
+        threads_act.failTool(frame, a, "Out of memory.");
+        session.done = true;
+        state.setFolderScanMsg("Out of memory.");
+        return;
+    };
+    // A stopped worker finishes the activity at once and sends no
+    // `.work_done`: end the session here.
+    if (a.statusGet() == .failed) onFolderScanDone(frame, a.id);
 }
 
-/// Drive the current scan session forward by `ScanSession.STEP_BATCH`
-/// entries. No-op when no session is active or the iterator has
-/// already drained. Called from the import screen's render path.
-pub fn tickFolderScan(frame: *Frame) void {
-    const state = frame.state;
-    const opaque_ptr = state.folder_scan_session orelse return;
-    const session: *ScanSession = @ptrCast(@alignCast(opaque_ptr));
-    if (session.done) return;
-
-    var processed: usize = 0;
-    while (processed < ScanSession.STEP_BATCH) : (processed += 1) {
-        const entry_opt = session.iter.next(frame.io) catch |iter_err| blk: {
-            // Iterator errored. The OLD code treated this as
-            // "end of dir" which silently stopped the scan
-            // mid-way through (FUSE NTFS can throw transient
-            // errors on individual entries). Log it loudly and
-            // try once more — if it fails again next tick we'll
-            // eventually run out of entries naturally OR keep
-            // hitting an error. Either way the user sees the
-            // log line.
-            std.log.scoped(.ui_actions).warn("folder-scan iter error: {s} — skipping entry, will retry", .{@errorName(iter_err)});
-            break :blk null;
-        };
-        const entry = entry_opt orelse {
-            session.done = true;
-            session.dir.close(frame.io);
-            var buf: [128]u8 = undefined;
-            const m = std.fmt.bufPrint(&buf, "Scan done — {d} game(s) found.", .{session.games_list.items.len}) catch "Scan done.";
-            state.setFolderScanMsg(m);
-            return;
-        };
-        session.scanned += 1;
-        processOneEntry(frame, session, entry) catch |e| {
-            std.log.scoped(.ui_actions).warn("folder-scan entry skipped: {s}", .{@errorName(e)});
-        };
-    }
-
-    var buf: [128]u8 = undefined;
-    const m = std.fmt.bufPrint(&buf, "Scanning… {d} found, {d} dirs checked", .{ session.games_list.items.len, session.scanned }) catch "Scanning…";
-    state.setFolderScanMsg(m);
-}
-
-/// True when a scan is currently in progress; the UI uses this to
-/// auto-tick each frame.
+/// True while the scan's job has not ended yet.
 pub fn folderScanInProgress(state: *const State) bool {
-    const opaque_ptr = state.folder_scan_session orelse return false;
-    const session: *const ScanSession = @ptrCast(@alignCast(opaque_ptr));
+    const session = scanSession(state) orelse return false;
     return !session.done;
 }
 
-/// Process ONE top-level entry. On a hit, appends a game + row to
-/// the session's lists and re-syncs the bundle slice + State row
-/// state pointers so the next render frame sees the new row.
-fn processOneEntry(
-    frame: *Frame,
-    session: *ScanSession,
-    entry: std.Io.Dir.Entry,
-) !void {
-    if (entry.kind != .directory and entry.kind != .unknown) {
-        std.log.scoped(.importers_folder).info("skip '{s}': not a dir (kind={s})", .{ entry.name, @tagName(entry.kind) });
-        return;
-    }
-    if (folder_scan.looksLikeCompanionFile(entry.name)) {
-        std.log.scoped(.importers_folder).info("skip '{s}': companion-file pattern", .{entry.name});
-        return;
-    }
+/// Activity id of the current scan (live or ended), or null when there
+/// is no scan session.
+pub fn folderScanActivityId(state: *const State) ?u64 {
+    const session = scanSession(state) orelse return null;
+    return session.activity_id;
+}
 
-    var top_path_buf: [1024]u8 = undefined;
-    const top_path = try std.fmt.bufPrint(&top_path_buf, "{s}/{s}", .{ session.scan_root, entry.name });
-
-    var rel_buf: [1024]u8 = undefined;
-    const hit_opt = folder_scan.detectEngineDeep(frame.io, top_path, &rel_buf);
-    const hit = hit_opt orelse {
-        std.log.scoped(.importers_folder).info("skip '{s}': no engine fingerprint", .{entry.name});
-        return;
-    };
-
+/// Moves every row the job has pushed so far into the session's lists
+/// and re-syncs the bundle slice and State row pointers. Called by the
+/// import screen each frame and once more when the job ends. Cheap: a
+/// mutex, a few copies; no disk work.
+pub fn drainFolderScanRows(frame: *Frame) void {
+    const state = frame.state;
+    const session = scanSession(state) orelse return;
     const a = session.arena.allocator();
-    const entry_name_dup = try a.dupe(u8, entry.name);
-
-    var parse_buf: [1024]u8 = undefined;
-    const parsed = folder_scan.parseFolderName(&parse_buf, entry.name);
-    const parsed_name: []const u8 = if (parsed) |p| p.name else entry.name;
-    const parsed_version: ?[]const u8 = if (parsed) |p| p.version else null;
-
-    const name_dup = try a.dupe(u8, parsed_name);
-    const version_dup: ?[]const u8 = if (parsed_version) |v| try a.dupe(u8, v) else null;
-    const install_path = try std.fmt.allocPrint(a, "{s}/{s}", .{ entry_name_dup, hit.fingerprint_rel });
-
-    try session.games_list.append(a, .{
-        .thread_id = importers_mod.folder_scan.syntheticThreadId(name_dup),
-        .name = name_dup,
-        .version = version_dup,
-        .engine = hit.engine,
-        .install_executable_rel = install_path,
-    });
-
-    var row: state_mod.FolderImportRowState = .{};
-    copyToBuf(&row.name_buf, name_dup);
-    if (version_dup) |v| copyToBuf(&row.version_buf, v);
-
-    if (importers_mod.name_match.bestMatch(name_dup, session.candidates)) |m| {
-        row.link_state = .linked_existing;
-        row.link_thread_id = m.thread_id;
-        copyToBuf(&row.link_buf, m.name);
-        if (version_dup == null) {
-            for (session.lib_games) |lg| {
-                if (lg.f95_thread_id == m.thread_id) {
-                    if (lg.latest_version) |lv| copyToBuf(&row.version_buf, lv);
-                    break;
-                }
-            }
-        }
-    } else {
-        // No fuzzy match crossed threshold. Seed `link_buf` with the
-        // parsed name so the typeahead has something to filter on the
-        // moment the user opens the cell. `typeahead_open` stays
-        // FALSE — auto-opening made row heights wildly variable
-        // (closed ~65 px, open with suggestion list ~200 px), which
-        // broke viewport culling. The "no match — click ▼" chip
-        // tells the user exactly what to do; one click expands it.
-        copyToBuf(&row.link_buf, name_dup);
+    var added = false;
+    while (session.rows.mb.tryPop()) |r| {
+        defer r.deinit(session.rows.alloc);
+        appendScanRow(session, a, r) catch |e| {
+            log.warn("folder-scan row dropped: {s}", .{@errorName(e)});
+            continue;
+        };
+        added = true;
     }
-
-    populateRowIssues(frame, &row, top_path);
-
-    try session.rows_list.append(a, row);
-
+    if (!added) return;
     session.bundle.games = session.games_list.items;
-    frame.state.folder_scan_row_states = session.rows_list.items.ptr;
-    frame.state.folder_scan_row_count = session.rows_list.items.len;
+    state.folder_scan_row_states = session.rows_list.items.ptr;
+    state.folder_scan_row_count = session.rows_list.items.len;
 }
 
-/// Run the compat service against `install_root` and copy up to
-/// `FOLDER_IMPORT_MAX_ISSUES` matched recipe ids+titles into the
-/// row state. Idempotent — safe to call again after a re-scan.
-fn populateRowIssues(frame: *Frame, row: *state_mod.FolderImportRowState, install_root: []const u8) void {
-    row.issue_count = 0;
-    const issues = frame.compat_svc.scan(install_root, &.{}) catch return;
-    defer frame.compat_svc.freeIssues(issues);
-    var n: u8 = 0;
-    for (issues) |iss| {
-        if (n >= state_mod.FOLDER_IMPORT_MAX_ISSUES) break;
-        var slot = &row.issues[n];
-        const id_n = @min(iss.recipe_id.len, slot.id_buf.len);
-        @memcpy(slot.id_buf[0..id_n], iss.recipe_id[0..id_n]);
-        slot.id_len = @intCast(id_n);
-        const t_n = @min(iss.title.len, slot.title_buf.len);
-        @memcpy(slot.title_buf[0..t_n], iss.title[0..t_n]);
-        slot.title_len = @intCast(t_n);
-        n += 1;
+fn appendScanRow(session: *ScanSession, a: std.mem.Allocator, r: folder_scan_job.ScanRow) !void {
+    const name = try a.dupe(u8, r.name);
+    const version: ?[]const u8 = if (r.version) |v| try a.dupe(u8, v) else null;
+    const exe_rel = try a.dupe(u8, r.install_executable_rel);
+    try session.games_list.ensureUnusedCapacity(a, 1);
+    try session.rows_list.ensureUnusedCapacity(a, 1);
+    session.games_list.appendAssumeCapacity(.{
+        .thread_id = folder_scan.syntheticThreadId(name),
+        .name = name,
+        .version = version,
+        .engine = r.engine,
+        .install_executable_rel = exe_rel,
+    });
+    session.rows_list.appendAssumeCapacity(r.row);
+}
+
+/// `.work_done` for a folder scan: takes the last rows and marks the
+/// session done, so the screen shows the end state. An outcome for an
+/// older scan (the user started a new one or cleared it) is ignored.
+pub fn onFolderScanDone(frame: *Frame, activity_id: u64) void {
+    const state = frame.state;
+    const session = scanSession(state) orelse return;
+    if (session.activity_id != activity_id) return;
+    drainFolderScanRows(frame);
+    session.done = true;
+
+    var arena = std.heap.ArenaAllocator.init(frame.lib.alloc);
+    defer arena.deinit();
+    var status: threads.activity.Status = .done;
+    var result: []const u8 = "";
+    if (frame.book.snapshot(arena.allocator())) |views| {
+        for (views) |v| if (v.id == activity_id) {
+            status = v.status;
+            result = v.result;
+        };
+    } else |_| {}
+
+    const n = session.rows_list.items.len;
+    var buf: [192]u8 = undefined;
+    const m = switch (status) {
+        .cancelled => std.fmt.bufPrint(&buf, "Stopped \u{2014} {d} folders", .{n}) catch "Stopped.",
+        .failed => std.fmt.bufPrint(&buf, "Scan failed \u{2014} {s}", .{result}) catch "Scan failed.",
+        else => std.fmt.bufPrint(&buf, "Scan finished \u{2014} {d} folders", .{n}) catch "Scan finished.",
+    };
+    state.setFolderScanMsg(m);
+}
+
+/// Ends the session when its activity ended without a `.folder_scan`
+/// outcome (dropped before it started, or failed with an error), or is
+/// gone from the book. `view` is the activity's snapshot, or null when
+/// it is not in the book. Called by the import screen while the scan is
+/// in progress.
+pub fn checkFolderScanEnded(frame: *Frame, view: ?threads.activity.View) void {
+    const session = scanSession(frame.state) orelse return;
+    if (session.done) return;
+    if (view) |v| if (v.status == .queued or v.status == .running) return;
+    onFolderScanDone(frame, session.activity_id);
+}
+
+/// Stops the scan's job (if it still runs) and frees the session. The
+/// rows found so far go with it. Used by Clear and by a new Scan.
+pub fn clearFolderScan(frame: *Frame) void {
+    if (scanSession(frame.state)) |s| {
+        if (!s.done) threads_act.cancelTool(frame, s.activity_id);
     }
-    row.issue_count = n;
-}
-
-fn copyToBuf(dst: []u8, src: []const u8) void {
-    @memset(dst, 0);
-    const n = @min(src.len, dst.len);
-    @memcpy(dst[0..n], src[0..n]);
+    freeFolderScan(frame.state, frame.lib, frame.io);
 }
 
 /// Free the folder-scan preview state. Takes `lib + io` separately
 /// so the shutdown path (which doesn't construct a `Frame`) can call
-/// us too. `io` is only used to close the live directory handle held
-/// by a mid-scan session; `lib` releases the cached `listGames`
-/// snapshot.
+/// us too. `lib` releases the cached `listGames` snapshot. A job still
+/// running finds its mailbox closed on its next push and stops; the
+/// mailbox itself lives until the job drops its reference.
 pub fn freeFolderScan(state: *State, lib: *library.Library, io: std.Io) void {
+    _ = io;
     const alloc = lib.alloc;
-    if (state.folder_scan_session) |p| {
-        const session: *ScanSession = @ptrCast(@alignCast(p));
-        if (!session.done) session.dir.close(io);
+    if (scanSession(state)) |session| {
+        session.rows.mb.close();
+        session.rows.release();
         alloc.destroy(session);
         state.folder_scan_session = null;
     }
@@ -1997,25 +1940,6 @@ fn refreshLibSnapshot(frame: *Frame) void {
     const fresh: []library.Game = frame.lib.listGames() catch &.{};
     state.folder_scan_lib_snapshot = if (fresh.len > 0) fresh.ptr else null;
     state.folder_scan_lib_count = fresh.len;
-
-    // The scan session holds NON-OWNING aliases of the slice we just
-    // freed: `session.lib_games` is the same slice, and each
-    // `session.candidates[i].name` points into `lib_games[i].name`.
-    // Repoint them at the fresh snapshot so a later scan tick (or any
-    // other reader) can't dereference the freed allocation. Candidates
-    // are rebuilt in the session's arena (the stale array leaks into the
-    // arena and is reclaimed at session teardown).
-    if (state.folder_scan_session) |sp| {
-        const session: *ScanSession = @ptrCast(@alignCast(sp));
-        session.lib_games = fresh;
-        const a = session.arena.allocator();
-        if (a.alloc(importers_mod.name_match.Candidate, fresh.len)) |cs| {
-            for (fresh, 0..) |g, i| cs[i] = .{ .thread_id = g.f95_thread_id, .name = g.name };
-            session.candidates = cs;
-        } else |_| {
-            session.candidates = &.{};
-        }
-    }
 }
 
 /// Re-scan idempotency check. Returns true when the library already

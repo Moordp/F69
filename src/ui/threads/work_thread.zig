@@ -19,6 +19,7 @@ const compat_job = @import("jobs/compat.zig");
 const reanalyse_job = @import("jobs/reanalyse.zig");
 const mod_queue_job = @import("jobs/mod_queue.zig");
 const plan_sim_job = @import("jobs/plan_sim.zig");
+const folder_scan_job = @import("jobs/folder_scan.zig");
 
 const Activity = activity_mod.Activity;
 const Book = activity_mod.Book;
@@ -46,6 +47,8 @@ pub const WorkOutcome = union(enum) {
     /// Owns the simulation and folder lists; `handleWorkDone` stores it
     /// in the recipe editor's cache (or frees it).
     plan_sim: PlanSimOutcome,
+    /// Rows went to the session's mailbox as they were found. Owns nothing.
+    folder_scan: void,
     /// Tests only.
     fake: struct { steps: u32 },
 };
@@ -68,6 +71,7 @@ pub const WorkJob = union(enum) {
     compat_fix: CompatJob,
     reanalyse: ReanalyseJob,
     plan_sim: PlanSimJob,
+    folder_scan: FolderScanJob,
     fake: FakeJob,
 };
 
@@ -81,6 +85,7 @@ pub const ReanalyseJob = reanalyse_job.ReanalyseJob;
 pub const ReanalyseOutcome = reanalyse_job.ReanalyseOutcome;
 pub const PlanSimJob = plan_sim_job.PlanSimJob;
 pub const PlanSimOutcome = plan_sim_job.PlanSimOutcome;
+pub const FolderScanJob = folder_scan_job.FolderScanJob;
 
 /// Frees what a job owns. Called once per job: after it ran, or when it
 /// is dropped without running.
@@ -92,6 +97,7 @@ fn freeJob(job: WorkJob) void {
         .compat_fix => |c| c.deinit(),
         .reanalyse => |r| r.deinit(),
         .plan_sim => |p| p.deinit(),
+        .folder_scan => |f| f.deinit(),
         .mod_queue, .fake => {},
     }
 }
@@ -171,6 +177,10 @@ fn run(deps: Deps, job: WorkJob, a: *Activity, buf: []u8) anyerror!Done {
         .plan_sim => |j| blk: {
             const r = try plan_sim_job.run(deps, j, a, buf);
             break :blk .{ .outcome = .{ .plan_sim = r.outcome }, .kind = r.kind, .msg = r.msg };
+        },
+        .folder_scan => |j| blk: {
+            const r = try folder_scan_job.run(deps, j, a, buf);
+            break :blk .{ .outcome = .folder_scan, .kind = r.kind, .msg = r.msg };
         },
         .fake => |f| runFake(deps.io, f, a, buf),
     };

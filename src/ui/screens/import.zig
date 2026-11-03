@@ -20,11 +20,13 @@ const style = @import("../style.zig");
 const actions = @import("../actions.zig");
 const state_mod = @import("../state.zig");
 const components = @import("../components.zig");
+const dl_rows = @import("../dl_rows.zig");
 const file_picker = @import("util_file_picker");
 const tokens = @import("ui_tokens");
 const entypo = dvui.entypo;
 
 const Frame = types.Frame;
+const threads = types.threads;
 const State = state_mod.State;
 
 const LINK_PREVIEW_MAX_SUGGESTIONS: usize = 3;
@@ -342,7 +344,7 @@ fn renderFolderScanScreen(frame: *Frame, copy: FolderScanCopy) !bool {
         }
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 4, .h = 1 } });
         if (style.button(@src(), "Clear", .{}, .{})) {
-            actions.freeFolderScan(state, frame.lib, frame.io);
+            actions.clearFolderScan(frame);
             state.setFolderScanMsg("");
         }
     }
@@ -350,15 +352,17 @@ fn renderFolderScanScreen(frame: *Frame, copy: FolderScanCopy) !bool {
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
     renderFolderScanModeToggle(state);
 
-    if (!state.folder_scan_msg.isEmpty()) {
+    // Rows the compute job found since the last frame.
+    actions.drainFolderScanRows(frame);
+
+    if (actions.folderScanInProgress(state)) {
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 4 } });
+        renderScanProgress(frame);
+        // Phase and progress change without a UI event: keep drawing.
+        dvui.refresh(null, @src(), null);
+    } else if (!state.folder_scan_msg.isEmpty()) {
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 4 } });
         dvui.labelNoFmt(@src(), state.folderScanMsg(), .{}, .{ .font = font(.body).withSize(11) });
-    }
-
-    // Auto-tick the incremental scan each frame while active.
-    if (actions.folderScanInProgress(state)) {
-        actions.tickFolderScan(frame);
-        dvui.refresh(null, @src(), null);
     }
 
     // ---- Bottom section: rows table (expands to fill viewport) ----
@@ -370,6 +374,46 @@ fn renderFolderScanScreen(frame: *Frame, copy: FolderScanCopy) !bool {
     renderResolvePopup(frame);
 
     return true;
+}
+
+/// The running scan: its phase ("Scanning folder i / n · name"), a bar,
+/// and Stop. Reads the activity from the book; no disk work.
+fn renderScanProgress(frame: *Frame) void {
+    const id = actions.folderScanActivityId(frame.state) orelse return;
+    var arena = std.heap.ArenaAllocator.init(frame.lib.alloc);
+    defer arena.deinit();
+    const views = frame.book.snapshot(arena.allocator()) catch return;
+    var phase: []const u8 = "Scanning…";
+    var frac: f32 = 0;
+    var found: ?threads.activity.View = null;
+    for (views) |v| {
+        if (v.id != id) continue;
+        found = v;
+        if (v.phase.len > 0) phase = v.phase;
+        if (v.total > 0) {
+            const d: f64 = @floatFromInt(v.done);
+            const t: f64 = @floatFromInt(v.total);
+            frac = @floatCast(@min(d / t, 1.0));
+        }
+        break;
+    }
+    // Normally `.work_done` ends the session; this catches a job that was
+    // dropped before it started or ended with an error.
+    actions.checkFolderScanEnded(frame, found);
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+    defer row.deinit();
+    {
+        var col = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .horizontal, .gravity_y = 0.5 });
+        defer col.deinit();
+        dvui.labelNoFmt(@src(), phase, .{}, .{ .font = font(.body).withSize(11) });
+        var count_buf: [48]u8 = undefined;
+        const count = std.fmt.bufPrint(&count_buf, "{d} found", .{frame.state.folder_scan_row_count}) catch "";
+        dl_rows.renderBar(count, frac, tokens.toDvui(tokens.active.acc, dvui.Color), id);
+    }
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 6, .h = 1 } });
+    if (style.button(@src(), "Stop", .{}, .{ .gravity_y = 0.5, .tag = "import-scan-stop" })) {
+        actions.cancelTool(frame, id);
+    }
 }
 
 /// Compact label font helper. Default theme body sits around 14 px;

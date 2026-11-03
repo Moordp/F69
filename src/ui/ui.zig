@@ -113,7 +113,11 @@ pub const commitFolderImport = actions.commitFolderImport;
 pub const doOpenLogsFolder = actions.doOpenLogsFolder;
 /// External-open recording seam, for flow tests that click "Open folder".
 pub const external_open_hook = @import("actions/common.zig").external_open_hook;
-pub const tickFolderScan = actions.tickFolderScan;
+pub const drainFolderScanRows = actions.drainFolderScanRows;
+pub const folderScanInProgress = actions.folderScanInProgress;
+pub const folderScanBundle = actions.folderScanBundle;
+pub const folderScanActivityId = actions.folderScanActivityId;
+pub const drainThreads = actions.drainThreads;
 pub const folderScanRowStates = actions.folderScanRowStates;
 pub const FolderImportLinkState = state_mod.FolderImportLinkState;
 /// Register the bundled Design-B fonts onto a dvui window (Layer-2 GUI
