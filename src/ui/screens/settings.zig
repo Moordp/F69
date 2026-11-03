@@ -912,12 +912,10 @@ fn renderSettingsLibrary(frame: *Frame) void {
 }
 
 /// Settings → Library → "Re-detect engines from installs". One-shot
-/// button that walks every installed game, peels the wrapper folder,
-/// runs the same `detectEngine` + RGSS-marker probe the Convert path
-/// uses, and updates `Game.engine` when it differs. Synchronous: cost
-/// per game is a handful of `access()` calls, so even a few hundred
-/// games stays well under a second on native FS (a few seconds on
-/// FUSE NTFS). No background-job machinery needed.
+/// button that submits a compute job: it walks every installed game,
+/// peels the wrapper folder, runs the same `detectEngine` + RGSS-marker
+/// probe the Convert path uses, and the UI drain updates `Game.engine`
+/// when it differs (see `actions.doReanalyseAllEngines`).
 fn renderEngineReanalyseSection(frame: *Frame) void {
     const state = frame.state;
     dvui.label(@src(), "Engine labels", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
@@ -934,7 +932,7 @@ fn renderEngineReanalyseSection(frame: *Frame) void {
         .style = .highlight,
         .gravity_y = 0.5,
     })) {
-        _ = actions.doReanalyseAllEngines(frame);
+        actions.doReanalyseAllEngines(frame);
     }
 
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 12, .h = 1 } });

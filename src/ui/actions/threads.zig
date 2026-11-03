@@ -10,6 +10,8 @@ const common = @import("common.zig");
 const convert_job = @import("../threads/jobs/convert.zig");
 const compat_job = @import("../threads/jobs/compat.zig");
 const launch_act = @import("launch.zig");
+const mods_act = @import("mods.zig");
+const reanalyse_job = @import("../threads/jobs/reanalyse.zig");
 
 const threads = types.threads;
 const Frame = types.Frame;
@@ -135,6 +137,12 @@ fn handleWorkDone(frame: *Frame, activity_id: u64, outcome: threads.work_thread.
         .none, .mod_queue, .fake, .decrypt, .rpa => {},
         .convert => |c| applyConvertOutcome(frame, c),
         .compat => |c| applyCompatOutcome(frame, c),
+        // Writes the labels and toasts the summary itself (the activity
+        // result text is the job's own count, before the DB writes).
+        .reanalyse => |r| {
+            defer reanalyse_job.freeOutcome(frame.work.deps.alloc, r);
+            mods_act.applyReanalyseOutcome(frame, r);
+        },
     }
 
     var arena = std.heap.ArenaAllocator.init(frame.lib.alloc);
@@ -144,6 +152,9 @@ fn handleWorkDone(frame: *Frame, activity_id: u64, outcome: threads.work_thread.
         if (v.id != activity_id) continue;
         switch (v.kind) {
             .convert, .decrypt, .rpa_extract, .compat_fix => {},
+            // A finished re-analyse toasted its summary above; a stop or
+            // a failure toasts the activity result here.
+            .reanalyse => if (v.status == .done) return,
             else => return,
         }
         frame.state.pushToast(resultToast(v.result_kind), v.result);

@@ -34,6 +34,7 @@ const common = @import("common.zig");
 const dl_rows = @import("../dl_rows.zig");
 const mods_act = @import("mods.zig");
 const launch_act = @import("launch.zig");
+const threads_act = @import("threads.zig");
 const sync_act = @import("sync.zig");
 
 const Frame = types.Frame;
@@ -1997,49 +1998,50 @@ fn runPostInstallDiagnostics(frame: *Frame, game_id: u64, install_dir: []const u
 }
 
 /// Called after a fresh post-install if `state.auto_convert` is on.
-/// Looks up the recipe, builds a ConvertSpec, and runs Convert in
-/// place. Surfaces failures via `state.setConvertMsg` — most
-/// commonly "no recipe — Convert needs a recipe with convert_linux"
-/// when the user has the toggle on but the game has no recipe.
+/// Submits the same compute-thread convert job as the Convert button
+/// (title "Convert · <name>", compat step chained when
+/// `state.auto_apply_compat` is on); the result is toasted by
+/// `handleWorkDone`. The engine check (`resolveConvertSpec`) still runs
+/// here, so a Linux-native or unknown install is skipped quietly with
+/// the Settings convert message, as before.
 fn maybeAutoConvert(frame: *Frame, game_id: u64, install_dir: []const u8) void {
     const state = frame.state;
+    if (frame.book.liveForGame(game_id)) {
+        log.info("auto-convert: tid={d} skipped, a tool is already running for the game", .{game_id});
+        return;
+    }
     const conv_spec = mods_act.resolveConvertSpec(frame, install_dir);
     if (conv_spec == .none) {
         state.setConvertMsg("Auto-convert skipped: engine not detected, or game is already Linux-native.");
         return;
     }
     log.info("auto-convert: tid={d} engine={s} → {s}", .{ game_id, @tagName(conv_spec), install_dir });
-    frame.convert_svc.convert(install_dir, conv_spec, false, .none) catch |e| {
-        var buf: [192]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "Auto-convert failed: {s}", .{@errorName(e)}) catch "Auto-convert failed";
-        state.setConvertMsg(msg);
-        return;
-    };
 
-    // Chain auto-apply-compat when the toggle is on. Same rationale
-    // as the manual Convert button: the very next thing the user
-    // will try after a successful Convert is Launch, and Launch
-    // typically needs the compat env. Folding it into the post-install
-    // pipeline avoids the "Launch → fail → click Fix → Launch" loop.
-    var compat_tail: []const u8 = "";
-    var compat_buf: [128]u8 = undefined;
-    if (state.auto_apply_compat) {
-        if (frame.lib.latestInstallForGame(game_id) catch null) |inst| {
-            defer frame.lib.freeInstall(inst);
-            const res = launch_act.autoApplyCompatAfterConvert(frame, &inst.id, install_dir);
-            if (res.applied + res.reapplied + res.failed > 0) {
-                compat_tail = std.fmt.bufPrint(
-                    &compat_buf,
-                    " Compat: {d} applied, {d} re-applied, {d} failed.",
-                    .{ res.applied, res.reapplied, res.failed },
-                ) catch "";
-            }
-        }
+    // The install row just written for `install_dir` (its id keys the
+    // compat records).
+    var install_id: ?[36]u8 = null;
+    if (frame.lib.listInstalls(game_id) catch null) |list| {
+        defer frame.lib.freeInstalls(list);
+        for (list) |inst| if (std.mem.eql(u8, inst.install_path, install_dir)) {
+            install_id = inst.id;
+            break;
+        };
     }
-
-    var msg_buf: [256]u8 = undefined;
-    const msg = std.fmt.bufPrint(&msg_buf, "Auto-convert: done.{s}", .{compat_tail}) catch "Auto-convert: done.";
-    state.setConvertMsg(msg);
+    const name = threads_act.gameNameFor(frame, game_id);
+    var engine: library.Engine = .unknown;
+    for (frame.games) |*g| if (g.f95_thread_id == game_id) {
+        engine = g.engine;
+        break;
+    };
+    if (launch_act.startConvert(frame, .{
+        .tid = game_id,
+        .name = name,
+        .engine = engine,
+        .raw_install_path = install_dir,
+        .install_id = install_id,
+        .force = false,
+        .auto_compat = true,
+    })) state.setConvertMsg("Auto-convert: running (see the Tools row).");
 }
 
 fn doInstallUpsert(

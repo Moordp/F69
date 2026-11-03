@@ -16,6 +16,7 @@ const convert_job = @import("jobs/convert.zig");
 const decrypt_job = @import("jobs/decrypt.zig");
 const rpa_job = @import("jobs/rpa.zig");
 const compat_job = @import("jobs/compat.zig");
+const reanalyse_job = @import("jobs/reanalyse.zig");
 
 const Activity = activity_mod.Activity;
 const Book = activity_mod.Book;
@@ -38,6 +39,8 @@ pub const WorkOutcome = union(enum) {
     rpa: struct { files: u32, archives: u32 },
     /// Owns FixRecords; `handleWorkDone` writes and frees them.
     compat: CompatOutcome,
+    /// Owns `updates`; `handleWorkDone` writes and frees them.
+    reanalyse: ReanalyseOutcome,
     /// Tests only.
     fake: struct { steps: u32 },
 };
@@ -58,6 +61,7 @@ pub const WorkJob = union(enum) {
     decrypt: DecryptJob,
     rpa_extract: RpaJob,
     compat_fix: CompatJob,
+    reanalyse: ReanalyseJob,
     fake: FakeJob,
 };
 
@@ -67,6 +71,8 @@ pub const DecryptJob = decrypt_job.DecryptJob;
 pub const RpaJob = rpa_job.RpaJob;
 pub const CompatJob = compat_job.CompatJob;
 pub const CompatOutcome = compat_job.CompatOutcome;
+pub const ReanalyseJob = reanalyse_job.ReanalyseJob;
+pub const ReanalyseOutcome = reanalyse_job.ReanalyseOutcome;
 
 /// Frees what a job owns. Called once per job: after it ran, or when it
 /// is dropped without running.
@@ -76,6 +82,7 @@ fn freeJob(job: WorkJob) void {
         .decrypt => |d| d.deinit(),
         .rpa_extract => |r| r.deinit(),
         .compat_fix => |c| c.deinit(),
+        .reanalyse => |r| r.deinit(),
         .mod_queue, .fake => {},
     }
 }
@@ -144,6 +151,10 @@ fn run(deps: Deps, job: WorkJob, a: *Activity, buf: []u8) anyerror!Done {
         .compat_fix => |c| blk: {
             const r = try compat_job.run(deps, c, a, buf);
             break :blk .{ .outcome = .{ .compat = r.outcome }, .kind = r.kind, .msg = r.msg };
+        },
+        .reanalyse => |j| blk: {
+            const r = try reanalyse_job.run(deps, j, a, buf);
+            break :blk .{ .outcome = .{ .reanalyse = r.outcome }, .kind = r.kind, .msg = r.msg };
         },
         .fake => |f| runFake(deps.io, f, a, buf),
     };

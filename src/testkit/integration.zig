@@ -2405,6 +2405,101 @@ test "threads: Cancel stops a running Convert; a second Convert then completes" 
     tlog("threads-convert-cancel: OK", .{});
 }
 
+/// A small tar.gz built in memory: `files` as (path, bytes) pairs.
+/// Stored (uncompressed) deflate blocks, so no compressor tuning is
+/// needed; the reader does not care.
+fn buildTarGz(gpa: std.mem.Allocator, files: []const struct { []const u8, []const u8 }) ![]u8 {
+    var tar_buf: std.Io.Writer.Allocating = .init(gpa);
+    defer tar_buf.deinit();
+    var tw: std.tar.Writer = .{ .underlying_writer = &tar_buf.writer };
+    for (files) |f| try tw.writeFileBytes(f[0], f[1], .{ .mode = 0o644 });
+    try tw.finishPedantically();
+
+    var gz: std.Io.Writer.Allocating = .init(gpa);
+    errdefer gz.deinit();
+    var wbuf: [std.compress.flate.max_window_len]u8 = undefined;
+    var raw = try std.compress.flate.Compress.Raw.init(&gz.writer, &wbuf, .gzip);
+    try raw.writer.writeAll(tar_buf.written());
+    try raw.finish();
+    return gz.toOwnedSlice();
+}
+
+test "threads: auto-convert after a downloaded install runs as a Convert activity and writes Game.sh" {
+    tlog("START: dl-v2-auto-convert", .{});
+    const gpa = std.testing.allocator;
+    const downloads = @import("downloads");
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(8) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var env = try TestEnv.init(gpa, "dl-v2-auto-convert");
+    defer env.deinit();
+    var t = try dvui.testing.init(.{ .allocator = gpa, .io = io, .window_size = .{ .w = 1280, .h = 800 } });
+    defer t.deinit();
+    var h = try ui.Harness.init(gpa, io, t.window, env.root);
+    defer h.deinit();
+    h.state.auto_convert = true;
+
+    // A Ren'Py-looking Windows build, and the SDK the convert copies.
+    const tgz = try buildTarGz(gpa, &.{
+        .{ "game/script.rpy", "label start:\n    return\n" },
+        .{ "Game.exe", "MZ fake pe" },
+        .{ "lib/py3-windows-x86_64/python.exe", "MZ" },
+        .{ "renpy/vc_version.py", "version = u'8.1.0.23051307'\n" },
+    });
+    defer gpa.free(tgz);
+    try env.writeFile("payload/game.tar.gz", tgz);
+    const sdk = "cache/convert/sdks/renpy-8.1.0";
+    try env.writeFile(sdk ++ "/renpy.sh", "#!/bin/sh\n");
+    try env.writeFile(sdk ++ "/lib/py3-linux-x86_64/renpy", "ELF");
+
+    const file = try env.path("payload/game.tar.gz");
+    defer gpa.free(file);
+    const script = [_]downloads.model.Progress{
+        .{ .phase = .transfer_done, .bytes_done = tgz.len, .bytes_total = tgz.len, .final_path = file },
+    };
+    h.dl_fake.script = &script;
+    const tid: u64 = 4343;
+    _ = try h.lib.insertIfMissing(&.{ .f95_thread_id = tid, .name = "Auto Convert Game", .engine = .renpy });
+    try h.reloadGames();
+
+    var fr = h.frame();
+    threads_frame = &fr;
+    defer threads_frame = null;
+
+    h.dl.send(.{ .enqueue_url = .{
+        .url = "https://example.invalid/game.tar.gz",
+        .kind = .game,
+        .game_thread_id = tid,
+        .title = "Auto Convert Game",
+        .version = "1.0",
+        .host = "raw",
+    } });
+    // Step the downloader until the extract worker is done and the job
+    // waits for the install (bounded, ~10 s).
+    {
+        var now: i64 = 1000;
+        while (true) : (now += 1) {
+            if (now > 3000) return error.NeverInstalling;
+            h.dl.stepOnce(now);
+            if (h.dl.recs.items.len == 1 and h.dl.recs.items[0].job.step == .installing) break;
+            std.Io.sleep(io, .fromMilliseconds(5), .awake) catch {};
+        }
+    }
+
+    // Frames drain `install_ready`: the install row is written and the
+    // auto-convert is submitted as a Convert activity, not run inline.
+    var saw_running = false;
+    const st = try stepUntilConvertEnds(&fr, io, tid, 0, &saw_running);
+    try std.testing.expectEqual(ui.threads.activity.Status.done, st);
+
+    const installs = try h.lib.listInstalls(tid);
+    defer h.lib.freeInstalls(installs);
+    try std.testing.expectEqual(@as(usize, 1), installs.len);
+    try std.testing.expect(launcherExists(io, installs[0].install_path));
+    try std.testing.expect(toastContains(&h.state, "Converted."));
+    tlog("dl-v2-auto-convert: OK", .{});
+}
+
 /// Inverse of `rpgm_crypt.decrypt` for the tests: a 16-byte header that
 /// starts with "RPGMV", then `plain` with its first 16 bytes XOR'd with
 /// `key`. Caller frees.

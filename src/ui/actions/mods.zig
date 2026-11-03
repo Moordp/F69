@@ -25,6 +25,8 @@ const types = @import("../types.zig");
 const state_mod = @import("../state.zig");
 const owned_types = @import("../owned.zig");
 const common = @import("common.zig");
+const threads_act = @import("threads.zig");
+const reanalyse_job = @import("../threads/jobs/reanalyse.zig");
 
 const Frame = types.Frame;
 const State = types.State;
@@ -703,74 +705,89 @@ pub const EngineReanalyseStats = struct {
     to_unity: u32 = 0,
 };
 
-/// Walk every game in the library, peel the wrapper folder of its
-/// latest install, and run engine detection. When the detected engine
-/// differs from the stored `Game.engine`, persist the new value via
-/// `applyScrape`.
-///
-/// Synchronous. Each game costs at most ~9 cheap `access()` calls
-/// (resolveGameRoot's telltale probe + detectEngine's heuristics +
-/// fallback RGSS marker probe), so even a 200-game library on FUSE
-/// NTFS stays under ~10s. If profiling later shows this is too slow,
-/// promote to a background job + RefreshTagsJob-style status row.
+/// Settings → Library → "Re-detect engines". On click the UI thread reads
+/// one install row per game (`latestInstallForGame`; Stage A accepts
+/// these on-click queries) and copies the game id, name, stored engine
+/// and install path into a `ReanalyseJob`. The wrapper peel and engine
+/// detection run on the compute thread (`threads/jobs/reanalyse.zig`)
+/// with "Game i / n · <name>" progress; `handleWorkDone` writes the
+/// changed labels with `applyScrape` and shows the summary
+/// (`applyReanalyseOutcome`).
 ///
 /// Engine coverage: Ren'Py, RPGM MV/MZ, Unity (via convert/detect.zig);
 /// RPGM XP/VX/VX Ace (via convert/rpgm.detectRgssVariant — all roll up
 /// to library's `rpgm_vx` since the Engine enum doesn't carve XP out).
 /// Engines without a Linux fingerprint here (Unreal, HTML, GameMaker,
 /// Wolf RPG) are left alone — they need their own walker.
-pub fn doReanalyseAllEngines(frame: *Frame) EngineReanalyseStats {
-    var stats = EngineReanalyseStats{};
+pub fn doReanalyseAllEngines(frame: *Frame) void {
     const alloc = frame.lib.alloc;
+    // Library-wide: activity tid 0, so `liveForGame(0)` blocks a second run.
+    const a = threads_act.startTool(frame, .reanalyse, 0, "Re-analyse engines") orelse return;
 
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var in: std.ArrayList(reanalyse_job.ReanalyseJob.In) = .empty;
+    var no_install: u32 = 0;
     for (frame.games) |*game| {
-        const install_opt = frame.lib.latestInstallForGame(game.f95_thread_id) catch null;
-        defer if (install_opt) |i| frame.lib.freeInstall(i);
-        const install = install_opt orelse {
-            stats.skipped_no_install += 1;
+        const install = (frame.lib.latestInstallForGame(game.f95_thread_id) catch null) orelse {
+            no_install += 1;
             continue;
         };
-
-        const root = resolveGameRoot(frame.io, install.install_path, alloc) catch {
-            stats.skipped_no_install += 1;
-            continue;
+        defer frame.lib.freeInstall(install);
+        const path = arena.dupe(u8, install.install_path) catch {
+            threads_act.failTool(frame, a, "Out of memory.");
+            return;
         };
-        defer alloc.free(root);
-
-        stats.scanned += 1;
-
-        var detected = convert_mod.detectEngine(frame.io, root);
-        if (detected == .unknown) {
-            const variant = convert_mod.rpgm.detectRgssVariant(frame.io, root);
-            if (variant != .unknown) detected = .rpgm_vx;
-        }
-        if (detected == .unknown) {
-            stats.skipped_detect_unknown += 1;
-            continue;
-        }
-        if (game.engine == detected) continue;
-
-        const old_engine = game.engine;
-        frame.lib.applyScrape(game, .{ .engine = detected }) catch |e| {
-            log.warn("reanalyseEngines: applyScrape failed for tid={d}: {s}", .{ game.f95_thread_id, @errorName(e) });
-            continue;
+        in.append(arena, .{
+            .tid = game.f95_thread_id,
+            .name = game.name,
+            .engine = game.engine,
+            .install_path = path,
+        }) catch {
+            threads_act.failTool(frame, a, "Out of memory.");
+            return;
         };
-        log.info("reanalyseEngines: tid={d} {s} → {s}  ({s})", .{
-            game.f95_thread_id, @tagName(old_engine), @tagName(detected), root,
-        });
-        stats.changed += 1;
-        switch (detected) {
-            .renpy => stats.to_renpy += 1,
-            .rpgm_mv => stats.to_rpgm_mv += 1,
-            .rpgm_mz => stats.to_rpgm_mz += 1,
-            .rpgm_vx => stats.to_rpgm_vx += 1,
-            .unity => stats.to_unity += 1,
-            else => {},
-        }
     }
 
-    // Surface the result in the settings tab.
+    const job = reanalyse_job.ReanalyseJob.create(alloc, in.items, no_install) catch {
+        threads_act.failTool(frame, a, "Out of memory.");
+        return;
+    };
+    frame.work.submit(.{ .reanalyse = job }, a) catch {
+        threads_act.failTool(frame, a, "Out of memory.");
+        return;
+    };
+}
+
+/// UI-thread end of "Re-detect engines": writes each engine change with
+/// `applyScrape` (games deleted meanwhile, or already relabelled, are
+/// skipped), recounts `changed` from the writes that succeeded, writes
+/// the Settings summary line, toasts it, and drops the library filter
+/// cache when anything changed.
+pub fn applyReanalyseOutcome(frame: *Frame, out: reanalyse_job.ReanalyseOutcome) void {
+    var stats = out.stats;
+    stats.changed = 0;
+    stats.to_renpy = 0;
+    stats.to_rpgm_mv = 0;
+    stats.to_rpgm_mz = 0;
+    stats.to_rpgm_vx = 0;
+    stats.to_unity = 0;
+    for (out.updates) |u| {
+        const game = gameByTid(frame, u.tid) orelse continue;
+        if (game.engine == u.engine) continue;
+        const old_engine = game.engine;
+        frame.lib.applyScrape(game, .{ .engine = u.engine }) catch |e| {
+            log.warn("reanalyseEngines: applyScrape failed for tid={d}: {s}", .{ u.tid, @errorName(e) });
+            continue;
+        };
+        log.info("reanalyseEngines: tid={d} {s} → {s}", .{ u.tid, @tagName(old_engine), @tagName(u.engine) });
+        reanalyse_job.countChange(&stats, u.engine);
+    }
+
+    // Surface the result in the settings tab and as a toast.
     writeReanalyseSummary(frame.state, stats);
+    frame.state.pushToast(.success, frame.state.engine_reanalyse_msg_buf[0..frame.state.engine_reanalyse_msg_len]);
 
     // Drop the library filter cache. Its signature doesn't hash
     // per-game data, so a fresh engine label on a game caught by an
@@ -783,8 +800,11 @@ pub fn doReanalyseAllEngines(frame: *Frame) EngineReanalyseStats {
         }
         frame.state.lib_filter_cache_sig = 0;
     }
+}
 
-    return stats;
+fn gameByTid(frame: *Frame, tid: u64) ?*library.Game {
+    for (frame.games) |*g| if (g.f95_thread_id == tid) return g;
+    return null;
 }
 
 fn writeReanalyseSummary(state: *State, stats: EngineReanalyseStats) void {

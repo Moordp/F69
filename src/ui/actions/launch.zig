@@ -144,13 +144,18 @@ pub fn doLaunchGame(frame: *Frame, game: *const library.Game) void {
         if (exe_storage.len == 0 and findLauncher(frame.io, alloc, install_path, &exe_buf) == null) {
             const conv_spec = mods_act.resolveConvertSpec(frame, install_path);
             if (conv_spec != .none) {
-                state.setLaunchMsg("Converting before launch...");
-                frame.convert_svc.convert(install_path, conv_spec, false, .none) catch |e| {
-                    var buf: [256]u8 = undefined;
-                    const msg = std.fmt.bufPrint(&buf, "Auto-convert failed: {s}", .{@errorName(e)}) catch "Auto-convert failed";
-                    state.setLaunchMsg(msg);
-                    return;
-                };
+                // The convert runs on the compute thread (Tools row);
+                // the user presses Play again once it finishes.
+                if (startConvert(frame, .{
+                    .tid = game.f95_thread_id,
+                    .name = game.name,
+                    .engine = game.engine,
+                    .raw_install_path = install_path,
+                    .install_id = if (picked_install) |i| i.id else null,
+                    .force = false,
+                    .auto_compat = true,
+                })) state.setLaunchMsg("Converting first \u{2014} Play again when the Tools row finishes");
+                return;
             }
         }
     }
@@ -1654,14 +1659,7 @@ pub fn mkxpZExtraLibsDir(io: std.Io, exe_dir: []const u8, buf: []u8) ?[]const u8
 /// and the compat file work all run in `threads/jobs/convert.zig`. The
 /// result arrives as `.work_done` and is toasted by `handleWorkDone`.
 pub fn doConvertGame(frame: *Frame, game: *const library.Game) void {
-    const state = frame.state;
     const tid = game.f95_thread_id;
-    const alloc = frame.lib.alloc;
-
-    var title_buf: [128]u8 = undefined;
-    const title = std.fmt.bufPrint(&title_buf, "Convert \u{00B7} {s}", .{game.name}) catch "Convert";
-    const a = threads_act.startTool(frame, .convert, tid, title) orelse return;
-
     // No DB row yet → the legacy placeholder dir.
     var fallback_buf: [640]u8 = undefined;
     const install_opt = frame.lib.latestInstallForGame(tid) catch null;
@@ -1670,13 +1668,51 @@ pub fn doConvertGame(frame: *Frame, game: *const library.Game) void {
         i.install_path
     else
         std.fmt.bufPrint(&fallback_buf, "{s}/{d}", .{ frame.info.library_root, tid }) catch {
-            failTool(frame, a, "Install path buffer overflow.");
+            frame.state.notifyErr("Install path buffer overflow.");
             return;
         };
+    _ = startConvert(frame, .{
+        .tid = tid,
+        .name = game.name,
+        .engine = game.engine,
+        .raw_install_path = raw_install_path,
+        .install_id = if (install_opt) |i| i.id else null,
+        // A manual Convert always re-writes the launcher (and the
+        // mkxp-z sidecars): iterating on launcher templates is the main
+        // reason to click it on an already-converted install.
+        .force = true,
+        .auto_compat = true,
+    });
+}
 
-    const auto_compat = state.auto_apply_compat and install_opt != null;
+pub const ConvertStart = struct {
+    tid: u64,
+    name: []const u8,
+    engine: library.Engine,
+    /// The install dir from the DB (the job peels a wrapper folder).
+    raw_install_path: []const u8,
+    /// The install row's id; null when there is no row (no compat step).
+    install_id: ?[36]u8,
+    force: bool,
+    /// Chain the compat step after the convert. It still only runs when
+    /// `state.auto_apply_compat` is on and there is an install row.
+    auto_compat: bool,
+};
+
+/// Starts the Convert activity ("Convert · <name>") and submits the
+/// convert job. Reads the compat rows already recorded for the install
+/// (one query, on the UI thread) when the compat step will run. Returns
+/// false when nothing was submitted (a tool already runs for the game —
+/// toasted by `startTool` — or out of memory).
+pub fn startConvert(frame: *Frame, in: ConvertStart) bool {
+    const alloc = frame.lib.alloc;
+    var title_buf: [128]u8 = undefined;
+    const title = std.fmt.bufPrint(&title_buf, "Convert \u{00B7} {s}", .{in.name}) catch "Convert";
+    const a = threads_act.startTool(frame, .convert, in.tid, title) orelse return false;
+
+    const auto_compat = in.auto_compat and frame.state.auto_apply_compat and in.install_id != null;
     const applied: []library.Library.AppliedCompatRow = if (auto_compat)
-        frame.lib.listAppliedCompat(install_opt.?.id[0..]) catch |e| blk: {
+        frame.lib.listAppliedCompat(in.install_id.?[0..]) catch |e| blk: {
             log.warn("convert: list applied compat failed: {s}", .{@errorName(e)});
             break :blk &.{};
         }
@@ -1685,26 +1721,24 @@ pub fn doConvertGame(frame: *Frame, game: *const library.Game) void {
     defer if (applied.len > 0) frame.lib.freeAppliedCompatList(applied);
 
     const job = threads.work_thread.ConvertJob.create(alloc, .{
-        .tid = tid,
-        .raw_install_path = raw_install_path,
-        .game_name = game.name,
-        .engine = game.engine,
-        // A manual Convert always re-writes the launcher (and the
-        // mkxp-z sidecars): iterating on launcher templates is the main
-        // reason to click it on an already-converted install.
-        .force = true,
+        .tid = in.tid,
+        .raw_install_path = in.raw_install_path,
+        .game_name = in.name,
+        .engine = in.engine,
+        .force = in.force,
         .auto_compat = auto_compat,
-        .install_id = if (install_opt) |i| i.id else null,
+        .install_id = in.install_id,
         .convert_presets_dir = frame.info.convert_presets_dir,
         .applied = applied,
     }) catch {
         failTool(frame, a, "Out of memory.");
-        return;
+        return false;
     };
     frame.work.submit(.{ .convert = job }, a) catch {
         failTool(frame, a, "Out of memory.");
-        return;
+        return false;
     };
+    return true;
 }
 
 const failTool = threads_act.failTool;

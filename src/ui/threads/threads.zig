@@ -22,4 +22,5 @@ test {
     _ = @import("jobs/decrypt.zig");
     _ = @import("jobs/rpa.zig");
     _ = @import("jobs/compat.zig");
+    _ = @import("jobs/reanalyse.zig");
 }

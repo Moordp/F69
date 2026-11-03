@@ -50,6 +50,7 @@ test {
     _ = @import("threads/jobs/decrypt.zig");
     _ = @import("threads/jobs/rpa.zig");
     _ = @import("threads/jobs/compat.zig");
+    _ = @import("threads/jobs/reanalyse.zig");
     _ = @import("dl_controls.zig");
     _ = @import("screens/downloads.zig");
 }
