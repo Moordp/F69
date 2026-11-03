@@ -327,6 +327,131 @@ pub fn setWatchDir(frame: *Frame, path: ?[]const u8) void {
     if (path != null) state.notifyOk("Watched folder set") else state.notifyInfo("Watching your browser's Downloads folder");
 }
 
+/// One numeric downloader setting the Controls panel edits. Each is kept
+/// in `<data_root>/<fileName()>` as a decimal number (read by
+/// `main.loadDownloaderSettings`).
+pub const DlSettingField = enum {
+    slots_files,
+    slots_torrents,
+    cap_total_kbs,
+    cap_files_kbs,
+    cap_torrents_kbs,
+    torrent_share_pct,
+    ul_cap_busy_kbs,
+    ul_cap_idle_kbs,
+
+    pub fn fileName(self: DlSettingField) []const u8 {
+        return switch (self) {
+            .slots_files => "dl_slots_files",
+            .slots_torrents => "dl_slots_torrents",
+            .cap_total_kbs => "dl_cap_total_kbs",
+            .cap_files_kbs => "dl_cap_files_kbs",
+            .cap_torrents_kbs => "dl_cap_torrents_kbs",
+            .torrent_share_pct => "dl_torrent_share_pct",
+            .ul_cap_busy_kbs => "ul_cap_busy_kbs",
+            .ul_cap_idle_kbs => "ul_cap_idle_kbs",
+        };
+    }
+
+    /// Slots 1–8, torrent share 1–99 %; speed caps (KB/s, 0 = unlimited)
+    /// are taken as given.
+    pub fn clamp(self: DlSettingField, value: u32) u32 {
+        return switch (self) {
+            .slots_files, .slots_torrents => std.math.clamp(value, 1, 8),
+            .torrent_share_pct => std.math.clamp(value, 1, 99),
+            else => value,
+        };
+    }
+
+    /// The value in `s`.
+    pub fn get(self: DlSettingField, s: downloads.policy.Settings) u32 {
+        return switch (self) {
+            .slots_files => s.slots_files,
+            .slots_torrents => s.slots_torrents,
+            .cap_total_kbs => s.cap_total_kbs,
+            .cap_files_kbs => s.cap_files_kbs,
+            .cap_torrents_kbs => s.cap_torrents_kbs,
+            .torrent_share_pct => s.torrent_share_pct,
+            .ul_cap_busy_kbs => s.ul_cap_busy_kbs,
+            .ul_cap_idle_kbs => s.ul_cap_idle_kbs,
+        };
+    }
+
+    /// Store `value` (already clamped) into `s`.
+    fn set(self: DlSettingField, s: *downloads.policy.Settings, value: u32) void {
+        switch (self) {
+            .slots_files => s.slots_files = @intCast(value),
+            .slots_torrents => s.slots_torrents = @intCast(value),
+            .cap_total_kbs => s.cap_total_kbs = value,
+            .cap_files_kbs => s.cap_files_kbs = value,
+            .cap_torrents_kbs => s.cap_torrents_kbs = value,
+            .torrent_share_pct => s.torrent_share_pct = @intCast(value),
+            .ul_cap_busy_kbs => s.ul_cap_busy_kbs = value,
+            .ul_cap_idle_kbs => s.ul_cap_idle_kbs = value,
+        }
+    }
+};
+
+/// Save one numeric downloader setting: clamp, write
+/// `<data_root>/<field file>`, update `state.dl_settings` and send
+/// `reload_settings` (applies at once to running downloads). On a write
+/// failure nothing changes, an error toast shows and false is returned.
+/// One small file write on the UI thread, once per Save click.
+pub fn setDlSetting(frame: *Frame, field: DlSettingField, value: u32) bool {
+    const state = frame.state;
+    const v = field.clamp(value);
+    var file_buf: [1024]u8 = undefined;
+    const file = std.fmt.bufPrint(&file_buf, "{s}" ++ std.fs.path.sep_str ++ "{s}", .{ frame.info.data_root, field.fileName() }) catch {
+        state.notifyErr("The data folder path is too long");
+        return false;
+    };
+    var num_buf: [16]u8 = undefined;
+    const text = std.fmt.bufPrint(&num_buf, "{d}", .{v}) catch unreachable; // u32 fits in 10 digits
+    common.persistTextFile(frame.io, file, text) catch |e| {
+        var buf: [160]u8 = undefined;
+        state.notifyErr(std.fmt.bufPrint(&buf, "Couldn't save the setting: {s}", .{@errorName(e)}) catch "Couldn't save the setting");
+        return false;
+    };
+    field.set(&state.dl_settings, v);
+    frame.dl.send(.{ .reload_settings = state.dl_settings });
+    return true;
+}
+
+test "DlSettingField: clamp keeps slots 1–8 and share 1–99, caps unchanged; fileName matches the startup loader" {
+    const T = struct { f: DlSettingField, in: u32, out: u32 };
+    const cases = [_]T{
+        .{ .f = .slots_files, .in = 0, .out = 1 },
+        .{ .f = .slots_files, .in = 9, .out = 8 },
+        .{ .f = .slots_files, .in = 4, .out = 4 },
+        .{ .f = .slots_torrents, .in = 0, .out = 1 },
+        .{ .f = .slots_torrents, .in = 200, .out = 8 },
+        .{ .f = .torrent_share_pct, .in = 0, .out = 1 },
+        .{ .f = .torrent_share_pct, .in = 100, .out = 99 },
+        .{ .f = .torrent_share_pct, .in = 50, .out = 50 },
+        .{ .f = .cap_total_kbs, .in = 0, .out = 0 },
+        .{ .f = .cap_total_kbs, .in = 123456, .out = 123456 },
+        .{ .f = .cap_files_kbs, .in = 9, .out = 9 },
+        .{ .f = .cap_torrents_kbs, .in = 100, .out = 100 },
+        .{ .f = .ul_cap_busy_kbs, .in = 0, .out = 0 },
+        .{ .f = .ul_cap_idle_kbs, .in = std.math.maxInt(u32), .out = std.math.maxInt(u32) },
+    };
+    for (cases) |c| try std.testing.expectEqual(c.out, c.f.clamp(c.in));
+
+    const names = [_][]const u8{
+        "dl_slots_files",   "dl_slots_torrents",    "dl_cap_total_kbs", "dl_cap_files_kbs",
+        "dl_cap_torrents_kbs", "dl_torrent_share_pct", "ul_cap_busy_kbs",  "ul_cap_idle_kbs",
+    };
+    for (std.enums.values(DlSettingField), names) |f, n| try std.testing.expectEqualStrings(n, f.fileName());
+
+    // get/set round-trip through Settings.
+    var s: downloads.policy.Settings = .{};
+    for (std.enums.values(DlSettingField), 0..) |f, i| {
+        const v = f.clamp(@intCast(i + 2));
+        f.set(&s, v);
+        try std.testing.expectEqual(v, f.get(s));
+    }
+}
+
 /// Free the watched-folder string Settings owns (on quit).
 pub fn freeWatchDir(state: *State, alloc: std.mem.Allocator) void {
     if (state.watch_dir_owned) |s| alloc.free(s);

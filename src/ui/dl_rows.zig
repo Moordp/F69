@@ -145,7 +145,11 @@ test "trailFor: http job at extracting → Resolve/Download/Verify done, Extract
     try std.testing.expectEqual(S.current, br[0].state);
 }
 
-pub const RowMode = enum { full, compact };
+/// `full`: the page (whole step trail). `compact`: the drawer (current
+/// step chip only). `history`: a terminal job in the History section —
+/// compact header, no bars or stats, and the history line (host · engine ·
+/// size · duration · fail reason) instead of the step line.
+pub const RowMode = enum { full, compact, history };
 
 pub const RowAction = union(enum) {
     none,
@@ -264,7 +268,7 @@ pub fn renderJobRow(
         // Compact rows show only the current (or failed) step chip; steps
         // with no chip of their own (paused, done, cancelled) keep the
         // coloured status chip.
-        const own_chip: ?usize = if (mode == .compact and job.step != .paused) currentChip(trail) else null;
+        const own_chip: ?usize = if (mode != .full and job.step != .paused) currentChip(trail) else null;
         if (own_chip) |ci| {
             trailChip(trail[ci], job.id ^ @as(u64, @intCast(ci + 1)));
         } else {
@@ -409,6 +413,12 @@ pub fn renderJobRow(
         });
     }
 
+    // History rows: one meta line, then done.
+    if (mode == .history) {
+        renderHistoryLine(job, tagged);
+        return action;
+    }
+
     // Download-progress bar — shown for jobs that haven't finished
     // pulling bytes yet. Seeding rows skip this since the payload is
     // already complete.
@@ -446,6 +456,93 @@ pub fn renderJobRow(
         dvui.labelNoFmt(@src(), job.step_detail, .{}, .{ .color_text = .{ .color = style.labelDim() } });
     }
     return action;
+}
+
+/// "host · engine · size · duration" + " · " + the fail reason, the
+/// reason in its own label (tag `dl-history-reason` on the tagged row).
+fn renderHistoryLine(job: *const Job, tagged: bool) void {
+    var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+    defer line.deinit();
+    var meta_buf: [192]u8 = undefined;
+    dvui.labelNoFmt(@src(), historyMeta(&meta_buf, job), .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = style.labelDim() } });
+    if (failReasonText(job)) |reason| {
+        dvui.labelNoFmt(@src(), " \u{00B7} ", .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = style.labelDim() } });
+        dvui.labelNoFmt(@src(), reason, .{}, .{ .gravity_y = 0.5, .style = .err, .tag = if (tagged) "dl-history-reason" else null });
+    }
+}
+
+/// Short label of the engine that ran a job.
+pub fn engineLabel(e: model.EngineKind) []const u8 {
+    return switch (e) {
+        .aria2_http => "Direct",
+        .aria2_torrent => "Torrent",
+        .megacmd => "MEGA",
+        .browser => "Browser",
+    };
+}
+
+/// Plain text for a failure reason without a message of its own.
+pub fn failLabel(f: model.FailReason) []const u8 {
+    return switch (f) {
+        .network => "Network error",
+        .host_gone => "The file is gone from the host",
+        .auth_required => "Sign-in needed",
+        .captcha => "Captcha needed",
+        .quota_exceeded => "Transfer quota exceeded",
+        .no_peers => "No peers",
+        .checksum_mismatch => "Checksum mismatch",
+        .bad_archive => "Broken archive",
+        .disk_full => "Disk full",
+        .engine_missing => "Download engine missing",
+        .user_cancelled => "Cancelled",
+        .install_failed => "Install failed",
+        .unknown => "Unknown error",
+    };
+}
+
+/// The reason a failed job shows in History: its `fail_msg`, else the
+/// label of `fail`. Null for jobs that did not fail.
+pub fn failReasonText(job: *const Job) ?[]const u8 {
+    if (job.step != .failed) return null;
+    if (job.fail_msg.len > 0) return job.fail_msg;
+    return failLabel(job.fail orelse .unknown);
+}
+
+/// "host · engine · size · duration"; size and duration are "–" when
+/// unknown. Duration = finished_at − created_at.
+pub fn historyMeta(buf: []u8, job: *const Job) []const u8 {
+    var size_buf: [24]u8 = undefined;
+    const size_s: []const u8 = if (job.bytes_total) |t| components.humanBytes(&size_buf, t) else "\u{2013}";
+    var dur_buf: [32]u8 = undefined;
+    const dur_s: []const u8 = blk: {
+        const fin = job.finished_at orelse break :blk "\u{2013}";
+        if (job.created_at <= 0 or fin < job.created_at) break :blk "\u{2013}";
+        break :blk humanEta(&dur_buf, @intCast(fin - job.created_at));
+    };
+    const host: []const u8 = if (job.host.len > 0) job.host else "\u{2013}";
+    return std.fmt.bufPrint(buf, "{s} \u{00B7} {s} \u{00B7} {s} \u{00B7} {s}", .{ host, engineLabel(job.engine), size_s, dur_s }) catch host;
+}
+
+test "history line: meta parts, duration, and the fail reason (message first, then label)" {
+    var j: Job = .{ .id = 1, .group_id = 1, .kind = .game, .game_thread_id = 0, .source_href = "x", .engine = .megacmd, .step = .failed, .dest_dir = "", .host = "MEGA" };
+    j.bytes_total = 2048;
+    j.created_at = 1000;
+    j.finished_at = 1000 + 3 * 60 + 12;
+    var buf: [192]u8 = undefined;
+    try std.testing.expectEqualStrings("MEGA \u{00B7} MEGA \u{00B7} 2.0 KB \u{00B7} 3m 12s", historyMeta(&buf, &j));
+    j.fail = .quota_exceeded;
+    try std.testing.expectEqualStrings("Transfer quota exceeded", failReasonText(&j).?);
+    j.fail_msg = "MEGA transfer quota exceeded \u{2014} wait 2 hours";
+    try std.testing.expectEqualStrings(j.fail_msg, failReasonText(&j).?);
+
+    // Unknown size / no finish time / no host → dashes; done has no reason.
+    j.bytes_total = null;
+    j.finished_at = null;
+    j.host = "";
+    j.engine = .aria2_torrent;
+    j.step = .done;
+    try std.testing.expectEqualStrings("\u{2013} \u{00B7} Torrent \u{00B7} \u{2013} \u{00B7} \u{2013}", historyMeta(&buf, &j));
+    try std.testing.expect(failReasonText(&j) == null);
 }
 
 const BarKind = enum { download, ratio };

@@ -148,6 +148,7 @@ pub const cancelAllWorkers = common.cancelAllWorkers;
 pub const workersBusy = common.workersBusy;
 pub const openInBrowser = common.openInBrowser;
 pub const openExternalUrl = common.openExternalUrl;
+pub const openFolder = common.openFolder;
 pub const addGuideForGame = common.addGuideForGame;
 pub const openGuide = common.openGuide;
 pub const removeGuide = common.removeGuide;
@@ -219,6 +220,8 @@ pub const dlPickFile = dl.dlPickFile;
 pub const dlPickFileDialog = dl.dlPickFileDialog;
 pub const dlAcceptMatch = dl.dlAcceptMatch;
 pub const setWatchDir = dl.setWatchDir;
+pub const setDlSetting = dl.setDlSetting;
+pub const DlSettingField = dl.DlSettingField;
 pub const freeWatchDir = dl.freeWatchDir;
 pub const installFromArchive = installer.installFromArchive;
 

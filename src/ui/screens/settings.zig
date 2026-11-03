@@ -20,6 +20,7 @@ const actions = @import("../actions.zig");
 const style = @import("../style.zig");
 const import_job_mod = @import("../import_job.zig");
 const components = @import("../components.zig");
+const dl_controls = @import("../dl_controls.zig");
 
 const Frame = types.Frame;
 const State = types.State;
@@ -426,19 +427,6 @@ fn pickFolderOverride(frame: *Frame, name: []const u8, ok_msg: []const u8) void 
     }) orelse return;
     defer alloc.free(picked);
     writePathOverride(frame, name, picked, ok_msg);
-}
-
-/// Folder-pick the watched folder; applies at once (`actions.setWatchDir`).
-fn pickWatchDir(frame: *Frame) void {
-    const alloc = frame.lib.alloc;
-    const start: ?[]const u8 = if (frame.state.dl_settings.watch_dir.len > 0) frame.state.dl_settings.watch_dir else null;
-    const picked = (file_picker.openFolder(alloc, start) catch |e| {
-        var buf: [160]u8 = undefined;
-        frame.state.notifyErr(std.fmt.bufPrint(&buf, "Folder picker failed: {s}", .{@errorName(e)}) catch "Folder picker failed");
-        return;
-    }) orelse return;
-    defer alloc.free(picked);
-    actions.setWatchDir(frame, picked);
 }
 
 /// Browse to an aria2c binary and persist it as `<data_root>/aria2_path`. No
@@ -1104,7 +1092,8 @@ fn renderImportBanner(frame: *Frame) void {
     }
 }
 
-/// Downloads tab — aria2 daemon port + seed-ratio. Port changes
+/// Downloads tab — aria2 daemon port, the shared Controls panel, the
+/// downloads folder and the aria2c override. Port changes
 /// require an app restart
 /// because aria2 binds the listener at spawn time and we don't tear
 /// the daemon down on edit (in-flight downloads would die).
@@ -1180,112 +1169,9 @@ fn renderSettingsDownloads(frame: *Frame) void {
 
     settingsSectionDivider(7);
 
-    // ----- BitTorrent seed-ratio target -----
-    dvui.label(@src(), "Seed ratio", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
-    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
-    components.settingsHelpText(
-        "How much each completed torrent uploads before aria2 stops seeding. 1.0× is the floor " ++
-            "(give back what you took); 3.0× is the f69 default — generous and gets you a " ++
-            "good-seeder reputation. Applied immediately to the running daemon + in-flight torrents.",
-    );
-    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
-
-    var sr_row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
-    // Closed explicitly below (not `defer`) — see the port-row note above.
-
-    dvui.label(@src(), "Ratio", .{}, .{
-        .min_size_content = .{ .w = 60, .h = 20 },
-        .gravity_y = 0.5,
-    });
-    const sr_te = style.textEntry(@src(), .{ .text = .{ .buffer = &state.aria2_seed_ratio_buf } }, .{
-        .min_size_content = .{ .w = 120, .h = 28 },
-        .gravity_y = 0.5,
-    });
-    sr_te.deinit();
-    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
-
-    if (style.button(@src(), "Save", .{}, .{ .style = .highlight, .gravity_y = 0.5, .id_extra = 0xCEED })) {
-        if (actions.saveAria2SeedRatio(state, frame.info.aria2_seed_ratio_path, frame.io)) |ratio| {
-            // Apply immediately to the running daemon + in-flight torrents
-            // (no restart needed); the file persists it for next launch.
-            frame.state.dl_settings.seed_ratio = ratio;
-            frame.dl.send(.{ .reload_settings = frame.state.dl_settings });
-            var msg_buf: [80]u8 = undefined;
-            const m = std.fmt.bufPrint(&msg_buf, "saved — {d:.1}× target applied now", .{ratio}) catch "saved";
-            setAria2SeedRatioMsg(state, m);
-        } else |e| {
-            const m: []const u8 = switch (e) {
-                error.Empty => "ratio cannot be blank",
-                error.BelowFloor => "ratio must be ≥ 1.0",
-                error.NotFinite => "not a finite number",
-                error.InvalidCharacter => "not a valid number",
-                else => "save failed",
-            };
-            setAria2SeedRatioMsg(state, m);
-        }
-    }
-    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
-
-    var live_sr_buf: [48]u8 = undefined;
-    const live_sr = frame.state.dl_settings.seed_ratio;
-    const live_sr_msg = std.fmt.bufPrint(&live_sr_buf, "now using {d:.1}×", .{live_sr}) catch "(set)";
-    dvui.labelNoFmt(@src(), live_sr_msg, .{}, .{
-        .gravity_y = 0.5,
-        .color_text = .{ .color = style.labelDim() },
-    });
-    sr_row.deinit(); // close the horizontal input row here
-
-    if (state.aria2_seed_ratio_msg_len > 0) {
-        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
-        dvui.labelNoFmt(@src(), state.aria2_seed_ratio_msg_buf[0..state.aria2_seed_ratio_msg_len], .{}, .{
-            .color_text = .{ .color = style.labelDim() },
-        });
-    }
-
-    // ----- BitTorrent seed-time cap -----
-    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 12 } });
-    dvui.label(@src(), "Seed time", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
-    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
-    components.settingsHelpText(
-        "Optional cap on how long each completed torrent keeps seeding, in minutes. 0 = no time cap " ++
-            "(seed until the ratio above is met). Applied immediately to the running daemon + in-flight torrents.",
-    );
-    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
-
-    var st_row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
-    // Closed explicitly below (not `defer`) — see the port-row note above.
-
-    dvui.label(@src(), "Minutes", .{}, .{
-        .min_size_content = .{ .w = 60, .h = 20 },
-        .gravity_y = 0.5,
-    });
-    const st_te = style.textEntry(@src(), .{ .text = .{ .buffer = &state.aria2_seed_time_buf } }, .{
-        .min_size_content = .{ .w = 120, .h = 28 },
-        .gravity_y = 0.5,
-    });
-    st_te.deinit();
-    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
-
-    if (style.button(@src(), "Save", .{}, .{ .style = .highlight, .gravity_y = 0.5, .id_extra = 0xCEEE })) {
-        if (actions.saveAria2SeedTime(state, frame.info.aria2_seed_time_path, frame.io)) |minutes| {
-            frame.state.dl_settings.seed_time_min = minutes;
-            frame.dl.send(.{ .reload_settings = frame.state.dl_settings });
-            var msg_buf: [80]u8 = undefined;
-            const m = if (minutes == 0)
-                "saved — no seed-time cap"
-            else
-                std.fmt.bufPrint(&msg_buf, "saved — {d}m cap applied now", .{minutes}) catch "saved";
-            setAria2SeedRatioMsg(state, m);
-        } else |e| {
-            const m: []const u8 = switch (e) {
-                error.Empty => "minutes cannot be blank (use 0 for no cap)",
-                error.InvalidCharacter, error.Overflow => "not a valid whole number",
-                else => "save failed",
-            };
-            setAria2SeedRatioMsg(state, m);
-        }
-    }
-    st_row.deinit(); // close the horizontal input row here
+    // ----- Slots, caps, upload, seeding, watched folder, MEGA (shared
+    // with the Downloads page's Controls panel) -----
+    dl_controls.renderControls(frame);
 
     settingsSectionDivider(8);
 
@@ -1303,30 +1189,6 @@ fn renderSettingsDownloads(frame: *Frame) void {
         if (dvui.button(@src(), "Change downloads folder\u{2026}", .{}, .{ .gravity_y = 0.5 })) pickFolderOverride(frame, "downloads_dir", "Downloads folder set — applies on restart.");
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
         if (dvui.button(@src(), "Reset to default", .{}, .{ .gravity_y = 0.5, .id_extra = 0xD701 })) resetPathOverride(frame, "downloads_dir", "Downloads folder reset to the default (inside your data folder).");
-    }
-
-    settingsSectionDivider(10);
-
-    // ----- Watched folder (browser downloads) -----
-    dvui.label(@src(), "Watched folder", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
-    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
-    components.settingsHelpText(
-        "f69 watches this folder for files your browser downloads and offers them to waiting jobs.",
-    );
-    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
-    {
-        const wd = frame.state.dl_settings.watch_dir;
-        dvui.labelNoFmt(@src(), if (wd.len > 0) wd else "(default: your browser's Downloads folder)", .{}, .{
-            .color_text = .{ .color = style.labelDim() },
-        });
-    }
-    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
-    {
-        var w_row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
-        defer w_row.deinit();
-        if (dvui.button(@src(), "Change watched folder\u{2026}", .{}, .{ .gravity_y = 0.5, .tag = "settings-watch-dir" })) pickWatchDir(frame);
-        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
-        if (dvui.button(@src(), "Use default", .{}, .{ .gravity_y = 0.5, .id_extra = 0x3A7C, .tag = "settings-watch-default" })) actions.setWatchDir(frame, null);
     }
 
     settingsSectionDivider(9);
@@ -1352,12 +1214,6 @@ fn setAria2PortMsg(state: *State, msg: []const u8) void {
     const n = @min(msg.len, state.aria2_port_msg_buf.len);
     @memcpy(state.aria2_port_msg_buf[0..n], msg[0..n]);
     state.aria2_port_msg_len = n;
-}
-
-fn setAria2SeedRatioMsg(state: *State, msg: []const u8) void {
-    const n = @min(msg.len, state.aria2_seed_ratio_msg_buf.len);
-    @memcpy(state.aria2_seed_ratio_msg_buf[0..n], msg[0..n]);
-    state.aria2_seed_ratio_msg_len = n;
 }
 
 /// Master tag list refresh button. The list lives at

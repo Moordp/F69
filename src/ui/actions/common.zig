@@ -153,11 +153,22 @@ pub fn openInBrowser(frame: *Frame, thread_id: u64) void {
 /// rather than synthesised from a thread id. Used by the Downloads
 /// tab's per-link "Open" button.
 pub fn openExternalUrl(frame: *Frame, url: []const u8) void {
+    const chosen = frame.state.browserPathSlice();
+    spawnOpener(frame, if (chosen.len == 0) "xdg-open" else chosen, url);
+}
+
+/// Open a folder in the OS file manager: always the system opener
+/// (`xdg-open` / `open` / `cmd /c start "" <dir>`), never the custom
+/// browser chosen in Settings. Fire-and-forget worker, as `openExternalUrl`.
+pub fn openFolder(frame: *Frame, path: []const u8) void {
+    spawnOpener(frame, "xdg-open", path);
+}
+
+/// Run `systemOpenArgv(exe_src, url)` on a detached worker. "xdg-open"
+/// means the OS default opener.
+fn spawnOpener(frame: *Frame, exe_src: []const u8, url: []const u8) void {
     const alloc = frame.lib.alloc;
     const io = frame.io;
-
-    const chosen = frame.state.browserPathSlice();
-    const exe_src: []const u8 = if (chosen.len == 0) "xdg-open" else chosen;
 
     const job = alloc.create(BrowserJob) catch return;
     const url_owned = alloc.dupe(u8, url) catch {

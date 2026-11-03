@@ -2390,6 +2390,96 @@ test "settings downloads: Use default clears watch_dir and sends reload_settings
     tlog("dl-watch-dir: OK", .{});
 }
 
+test "downloads page: controls edit persists dl_cap_total_kbs and sends reload_settings; history lists a failed job with its reason; Clear history empties it" {
+    tlog("START: dl-controls-history", .{});
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(8) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var env = try TestEnv.init(gpa, "dl-controls-history");
+    defer env.deinit();
+    var t = try dvui.testing.init(.{ .allocator = gpa, .io = io, .window_size = .{ .w = 1280, .h = 800 } });
+    defer t.deinit();
+    ui.registerBundledFonts(t.window);
+    var h = try ui.Harness.init(gpa, io, t.window, env.root);
+    defer h.deinit();
+    var fr = h.frame();
+    dlv2_frame = &fr;
+    defer dlv2_frame = null;
+
+    // A stored failed MEGA job (no engine_ref, so nothing polls it); it
+    // must be in the store before the first step loads it.
+    const msg = "MEGA transfer quota exceeded \u{2014} wait 2 hours";
+    _ = try h.dl.store.insert(&.{ .id = 0, .group_id = 0, .kind = .game, .game_thread_id = 0, .title = "Quota Game", .source_href = "https://mega.nz/file/abc", .host = "MEGA", .engine = .megacmd, .step = .failed, .fail = .quota_exceeded, .fail_msg = msg, .dest_dir = "/tmp/f69-hist", .created_at = 100, .finished_at = 200 });
+    try h.dl.load();
+
+    // 1. Controls: the shared helper writes the file, the UI mirror and
+    //    (after one step) the downloader's settings.
+    try std.testing.expect(ui.setDlSetting(&fr, .cap_total_kbs, 1000));
+    {
+        const file = try env.path("dl_cap_total_kbs");
+        defer gpa.free(file);
+        const on_disk = try std.Io.Dir.cwd().readFileAlloc(io, file, gpa, .limited(64));
+        defer gpa.free(on_disk);
+        try std.testing.expectEqualStrings("1000", on_disk);
+    }
+    try std.testing.expectEqual(@as(u32, 1000), h.state.dl_settings.cap_total_kbs);
+    h.dl.stepOnce(1000);
+    try std.testing.expectEqual(@as(u32, 1000), h.dl.settings.cap_total_kbs);
+    // Out-of-range input is clamped before it is stored.
+    try std.testing.expect(ui.setDlSetting(&fr, .slots_files, 12));
+    {
+        const file = try env.path("dl_slots_files");
+        defer gpa.free(file);
+        const on_disk = try std.Io.Dir.cwd().readFileAlloc(io, file, gpa, .limited(64));
+        defer gpa.free(on_disk);
+        try std.testing.expectEqualStrings("8", on_disk);
+    }
+    h.dl.stepOnce(1000);
+    try std.testing.expectEqual(@as(u8, 8), h.dl.settings.slots_files);
+    try std.testing.expectEqual(@as(u32, 1000), h.dl.settings.cap_total_kbs);
+
+    // 2. History: the failed MEGA job shows with its reason.
+    h.dl.stepOnce(1001);
+    h.state.screen = .downloads;
+    h.state.dl_controls_open = true; // the page's Controls panel renders too
+    _ = try dvui.testing.step(dlv2Render);
+    _ = try dvui.testing.step(dlv2Render);
+    try dvui.testing.expectVisible("dl-job-row");
+    try dvui.testing.expectVisible("dl-history-reason");
+    try dvui.testing.expectVisible("dl-retry");
+    try dvui.testing.expectVisible("dl-remove");
+    try std.testing.expect(dvui.tagGet("dl-ctrl-mega") != null);
+    {
+        const snap = h.dl.snapshot();
+        defer h.dl.releaseSnapshot();
+        try std.testing.expectEqual(@as(usize, 1), snap.jobs.len);
+        const reason = ui.dlFailReasonText(&snap.jobs[0].job).?;
+        try std.testing.expect(std.mem.indexOf(u8, reason, "quota") != null);
+    }
+
+    // 3. Clear history (the header button's command) empties it.
+    try dvui.testing.expectVisible("dl-clear-history");
+    h.dl.send(.clear_history);
+    h.dl.stepOnce(1002);
+    {
+        const snap = h.dl.snapshot();
+        defer h.dl.releaseSnapshot();
+        for (snap.jobs) |v| try std.testing.expect(!v.job.step.isTerminal());
+    }
+    _ = try dvui.testing.step(dlv2Render);
+    try std.testing.expect(dvui.tagGet("dl-history-reason") == null);
+
+    // 4. Settings → Downloads renders the same panel.
+    h.state.screen = .settings;
+    h.state.settings_tab = .downloads;
+    _ = try dvui.testing.step(dlv2Render);
+    _ = try dvui.testing.step(dlv2Render);
+    try std.testing.expect(dvui.tagGet("dl-ctrl-mega") != null);
+    try std.testing.expect(dvui.tagGet("settings-watch-dir") != null);
+    tlog("dl-controls-history: OK", .{});
+}
+
 test "settings accounts: MEGA card shows Not installed when the engine is null; shows the sign-in form when signed out" {
     tlog("START: mega-card", .{});
     const gpa = std.testing.allocator;

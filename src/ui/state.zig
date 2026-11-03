@@ -1289,6 +1289,17 @@ pub const State = struct {
     /// Mirror of the downloader's settings (loaded at startup). Settings
     /// changes edit this copy and send it as `reload_settings`.
     dl_settings: downloads.policy.Settings = .{},
+    /// Controls panel (`dl_controls.zig`, Downloads page + Settings →
+    /// Downloads): one text buffer per `actions.DlSettingField`, filled
+    /// from `dl_settings` on the first render (`dl_ctrl_loaded`).
+    dl_ctrl_bufs: [8][16]u8 = @splat(@splat(0)),
+    dl_ctrl_loaded: bool = false,
+    /// Last Save result and the field it belongs to (index into
+    /// `dl_ctrl_bufs`); shown under that field.
+    dl_ctrl_msg: buf_mod.MessageBuf(96) = .{},
+    dl_ctrl_msg_field: ?u8 = null,
+    /// Downloads page "Controls" expander (collapsed by default).
+    dl_controls_open: bool = false,
     aria2_seed_ratio_msg_buf: [80]u8 = @splat(0),
     aria2_seed_ratio_msg_len: usize = 0,
     /// Status from Settings → Library → "Re-detect engines from installs".

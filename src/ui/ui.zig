@@ -41,6 +41,8 @@ test {
     _ = state_mod;
     _ = @import("catalogue_view.zig");
     _ = @import("dl_rows.zig");
+    _ = @import("dl_controls.zig");
+    _ = @import("screens/downloads.zig");
 }
 
 pub const State = state_mod.State;
@@ -73,6 +75,10 @@ pub const ensureCatalogue = actions.ensureCatalogue;
 pub const drainDownloaderEvents = actions.drainDownloaderEvents;
 pub const dlPasteLink = actions.dlPasteLink;
 pub const setWatchDir = actions.setWatchDir;
+pub const setDlSetting = actions.setDlSetting;
+pub const DlSettingField = actions.DlSettingField;
+pub const openFolder = actions.openFolder;
+pub const dlFailReasonText = @import("dl_rows.zig").failReasonText;
 pub const megaCheckStatus = actions.megaCheckStatus;
 pub const megaSignIn = actions.megaSignIn;
 pub const drainMegaAuth = actions.drainMegaAuth;
