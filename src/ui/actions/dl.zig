@@ -242,6 +242,97 @@ pub fn retryDownload(frame: *Frame, job_id: u64) void {
     frame.dl.send(.{ .retry = job_id });
 }
 
+// ----- "Needs you" (jobs waiting in the browser) -----
+//
+// Thin wrappers so the Downloads screen and the tests go through the same
+// path. The downloader ignores each command (with a log line) unless the
+// job still waits in `awaiting_user`.
+
+/// Open the job's page in the browser again.
+pub fn dlOpenAgain(frame: *Frame, job_id: u64) void {
+    frame.dl.send(.{ .open_again = job_id });
+}
+
+/// Hand the final link the user copied from the browser to the job. An
+/// empty paste is ignored; the downloader trims and checks the rest.
+pub fn dlPasteLink(frame: *Frame, job_id: u64, url: []const u8) void {
+    const trimmed = std.mem.trim(u8, url, " \t\r\n");
+    if (trimmed.len == 0) return;
+    frame.dl.send(.{ .paste_link = .{ .job_id = job_id, .url = trimmed } });
+}
+
+/// Hand a file the user downloaded to the job (moved on a worker).
+pub fn dlPickFile(frame: *Frame, job_id: u64, path: []const u8) void {
+    frame.dl.send(.{ .pick_file = .{ .job_id = job_id, .path = path } });
+}
+
+/// "Pick file…": a native file dialog (synchronous, like every other
+/// picker in f69), then `dlPickFile`. Call with no snapshot held.
+pub fn dlPickFileDialog(frame: *Frame, job_id: u64) void {
+    const file_picker = @import("util_file_picker");
+    const alloc = frame.lib.alloc;
+    const picked = (file_picker.open(alloc, &.{}, null) catch |e| {
+        var buf: [160]u8 = undefined;
+        frame.state.notifyErr(std.fmt.bufPrint(&buf, "File picker failed: {s}", .{@errorName(e)}) catch "File picker failed");
+        return;
+    }) orelse return; // cancelled
+    defer alloc.free(picked);
+    dlPickFile(frame, job_id, picked);
+}
+
+/// Answer the "Found <file> — use it?" prompt.
+pub fn dlAcceptMatch(frame: *Frame, job_id: u64, accept: bool) void {
+    frame.dl.send(.{ .accept_match = .{ .job_id = job_id, .accept = accept } });
+}
+
+/// Set the watched folder (`path`) or go back to the default (null =
+/// the browser's Downloads folder). Writes or deletes
+/// `<data_root>/watch_dir`, updates `state.dl_settings` and sends
+/// `reload_settings`. On a write failure nothing changes.
+pub fn setWatchDir(frame: *Frame, path: ?[]const u8) void {
+    const state = frame.state;
+    const alloc = frame.lib.alloc;
+    var file_buf: [1024]u8 = undefined;
+    const file = std.fmt.bufPrint(&file_buf, "{s}" ++ std.fs.path.sep_str ++ "watch_dir", .{frame.info.data_root}) catch {
+        state.notifyErr("The data folder path is too long");
+        return;
+    };
+    var owned: ?[]u8 = null;
+    if (path) |p| {
+        owned = alloc.dupe(u8, p) catch {
+            state.notifyErr("Out of memory");
+            return;
+        };
+        common.persistTextFile(frame.io, file, p) catch |e| {
+            alloc.free(owned.?);
+            var buf: [160]u8 = undefined;
+            state.notifyErr(std.fmt.bufPrint(&buf, "Couldn't save the watched folder: {s}", .{@errorName(e)}) catch "Couldn't save the watched folder");
+            return;
+        };
+    } else {
+        std.Io.Dir.cwd().deleteFile(frame.io, file) catch |e| switch (e) {
+            error.FileNotFound => {}, // already the default
+            else => {
+                var buf: [160]u8 = undefined;
+                state.notifyErr(std.fmt.bufPrint(&buf, "Couldn't reset the watched folder: {s}", .{@errorName(e)}) catch "Couldn't reset the watched folder");
+                return;
+            },
+        };
+    }
+    // `send` copies the settings, so the old string can go right after.
+    state.dl_settings.watch_dir = owned orelse "";
+    frame.dl.send(.{ .reload_settings = state.dl_settings });
+    if (state.watch_dir_owned) |old| alloc.free(old);
+    state.watch_dir_owned = owned;
+    if (path != null) state.notifyOk("Watched folder set") else state.notifyInfo("Watching your browser's Downloads folder");
+}
+
+/// Free the watched-folder string Settings owns (on quit).
+pub fn freeWatchDir(state: *State, alloc: std.mem.Allocator) void {
+    if (state.watch_dir_owned) |s| alloc.free(s);
+    state.watch_dir_owned = null;
+}
+
 /// True iff a job for this F95 thread is not terminal (queued,
 /// downloading, installing, seeding …). The detail page's Download
 /// button uses this to offer "View download" instead of a duplicate.

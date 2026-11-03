@@ -427,6 +427,19 @@ fn pickFolderOverride(frame: *Frame, name: []const u8, ok_msg: []const u8) void 
     writePathOverride(frame, name, picked, ok_msg);
 }
 
+/// Folder-pick the watched folder; applies at once (`actions.setWatchDir`).
+fn pickWatchDir(frame: *Frame) void {
+    const alloc = frame.lib.alloc;
+    const start: ?[]const u8 = if (frame.state.dl_settings.watch_dir.len > 0) frame.state.dl_settings.watch_dir else null;
+    const picked = (file_picker.openFolder(alloc, start) catch |e| {
+        var buf: [160]u8 = undefined;
+        frame.state.notifyErr(std.fmt.bufPrint(&buf, "Folder picker failed: {s}", .{@errorName(e)}) catch "Folder picker failed");
+        return;
+    }) orelse return;
+    defer alloc.free(picked);
+    actions.setWatchDir(frame, picked);
+}
+
 /// Browse to an aria2c binary and persist it as `<data_root>/aria2_path`. No
 /// extension filter — aria2c is `aria2c.exe` on Windows but extensionless
 /// elsewhere.
@@ -1273,6 +1286,30 @@ fn renderSettingsDownloads(frame: *Frame) void {
         if (dvui.button(@src(), "Change downloads folder\u{2026}", .{}, .{ .gravity_y = 0.5 })) pickFolderOverride(frame, "downloads_dir", "Downloads folder set — applies on restart.");
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
         if (dvui.button(@src(), "Reset to default", .{}, .{ .gravity_y = 0.5, .id_extra = 0xD701 })) resetPathOverride(frame, "downloads_dir", "Downloads folder reset to the default (inside your data folder).");
+    }
+
+    settingsSectionDivider(10);
+
+    // ----- Watched folder (browser downloads) -----
+    dvui.label(@src(), "Watched folder", .{}, .{ .color_text = .{ .color = dcol(tokens.active.acc) } });
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
+    components.settingsHelpText(
+        "f69 watches this folder for files your browser downloads and offers them to waiting jobs.",
+    );
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
+    {
+        const wd = frame.state.dl_settings.watch_dir;
+        dvui.labelNoFmt(@src(), if (wd.len > 0) wd else "(default: your browser's Downloads folder)", .{}, .{
+            .color_text = .{ .color = style.labelDim() },
+        });
+    }
+    _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
+    {
+        var w_row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        defer w_row.deinit();
+        if (dvui.button(@src(), "Change watched folder\u{2026}", .{}, .{ .gravity_y = 0.5, .tag = "settings-watch-dir" })) pickWatchDir(frame);
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
+        if (dvui.button(@src(), "Use default", .{}, .{ .gravity_y = 0.5, .id_extra = 0x3A7C, .tag = "settings-watch-default" })) actions.setWatchDir(frame, null);
     }
 
     settingsSectionDivider(9);

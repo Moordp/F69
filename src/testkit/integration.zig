@@ -2102,6 +2102,237 @@ test "downloads v2: a failed install worker fails the job instead of acking it" 
     tlog("dl-v2-install-fail: OK ({s})", .{j.fail_msg});
 }
 
+/// Resolver for the browser-flow tests: Workupload pages resolve to
+/// `needs_browser` without any request; every request fails.
+const NoHttp = struct {
+    const errs = @import("downloads").errors;
+    const resolve = @import("downloads").resolve;
+    var dummy: u8 = 0;
+    fn get(_: *anyopaque, _: std.mem.Allocator, _: []const u8) errs.Error![]u8 {
+        return errs.Error.NotFound;
+    }
+    fn post(_: *anyopaque, _: std.mem.Allocator, _: []const u8, _: []const u8, _: []const []const u8) errs.Error!resolve.Http.Reply {
+        return errs.Error.NotFound;
+    }
+    fn cookie(_: *anyopaque) ?[]const u8 {
+        return null;
+    }
+    fn ctx() @import("downloads").downloader.ResolverCtx {
+        return .{ .http = .{ .ctx = &dummy, .get = get, .postForm = post, .cookieHeader = cookie } };
+    }
+};
+
+/// Queue a Workupload link and tick until it waits in the browser. The
+/// `open_url` event is drained here, so no frame launches a browser.
+fn awaitBrowserJob(h: *ui.Harness) !u64 {
+    const downloads = @import("downloads");
+    h.dl.resolver = NoHttp.ctx();
+    h.dl.send(.{ .enqueue_url = .{ .url = "https://workupload.com/file/xyz", .kind = .game, .game_thread_id = 0, .title = "Browser Game", .host = "Workupload" } });
+    h.dl.stepOnce(1000);
+    var waited_ms: u32 = 0;
+    while (h.dl.recs.items[0].resolve_worker != null) {
+        if (waited_ms >= 5000) return error.ResolveWorkerTimeout;
+        h.io.sleep(std.Io.Duration.fromMilliseconds(5), .real) catch {};
+        waited_ms += 5;
+        h.dl.stepOnce(1000);
+    }
+    const evs = h.dl.drainEvents(h.gpa);
+    downloads.Downloader.freeEvents(h.gpa, evs);
+    const j = h.dl.recs.items[0].job;
+    try std.testing.expectEqual(downloads.model.Step.awaiting_user, j.step);
+    try std.testing.expectEqual(downloads.model.EngineKind.browser, j.engine);
+    return j.id;
+}
+
+test "downloads page: awaiting_user job renders in Needs you with its buttons; Paste sends paste_link" {
+    tlog("START: dl-needs-you", .{});
+    const gpa = std.testing.allocator;
+    const downloads = @import("downloads");
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(8) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var env = try TestEnv.init(gpa, "dl-needs-you");
+    defer env.deinit();
+    var t = try dvui.testing.init(.{ .allocator = gpa, .io = io, .window_size = .{ .w = 1280, .h = 800 } });
+    defer t.deinit();
+    ui.registerBundledFonts(t.window);
+    var h = try ui.Harness.init(gpa, io, t.window, env.root);
+    defer h.deinit();
+
+    const id = try awaitBrowserJob(h);
+    var fr = h.frame();
+    dlv2_frame = &fr;
+    defer dlv2_frame = null;
+
+    // The Downloads screen shows the job in Needs you with its buttons.
+    h.state.screen = .downloads;
+    _ = try dvui.testing.step(dlv2Render);
+    _ = try dvui.testing.step(dlv2Render);
+    try dvui.testing.expectVisible("dl-needs-you");
+    try dvui.testing.expectVisible("dl-open-again");
+    try dvui.testing.expectVisible("dl-paste");
+    try dvui.testing.expectVisible("dl-pick");
+    try dvui.testing.expectVisible("dl-needs-cancel");
+
+    // Paste (the action the OK button runs) → the job leaves the browser.
+    ui.dlPasteLink(&fr, id, "https://example.com/x.zip");
+    h.dl.stepOnce(1001);
+    const j = h.dl.recs.items[0].job;
+    try std.testing.expectEqual(downloads.model.Step.downloading, j.step);
+    try std.testing.expectEqual(downloads.model.EngineKind.aria2_http, j.engine);
+    try std.testing.expectEqual(@as(usize, 1), h.dl_fake.started);
+    try std.testing.expectEqualStrings("https://example.com/x.zip", j.resolved_url.?);
+    tlog("dl-needs-you: OK", .{});
+}
+
+test "downloads page GUI: clicking Paste link…, typing and OK sends paste_link" {
+    tlog("START: dl-needs-you-gui", .{});
+    const gpa = std.testing.allocator;
+    const downloads = @import("downloads");
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(8) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var env = try TestEnv.init(gpa, "dl-needs-you-gui");
+    defer env.deinit();
+    var t = try dvui.testing.init(.{ .allocator = gpa, .io = io, .window_size = .{ .w = 1280, .h = 800 } });
+    defer t.deinit();
+    ui.registerBundledFonts(t.window);
+    var h = try ui.Harness.init(gpa, io, t.window, env.root);
+    defer h.deinit();
+
+    const id = try awaitBrowserJob(h);
+    var fr = h.frame();
+    dlv2_frame = &fr;
+    defer dlv2_frame = null;
+    h.state.screen = .downloads;
+    _ = try dvui.testing.step(dlv2Render);
+    _ = try dvui.testing.step(dlv2Render);
+
+    // "Paste link…" opens the inline entry for this job.
+    try dvui.testing.moveTo("dl-paste");
+    try dvui.testing.click(.left);
+    _ = try dvui.testing.step(dlv2Render);
+    _ = try dvui.testing.step(dlv2Render);
+    // A new widget gets its size on the frame after it first shows.
+    _ = try dvui.testing.step(dlv2Render);
+    try std.testing.expectEqual(@as(?u64, id), h.state.dl_paste_job);
+    try dvui.testing.expectVisible("dl-paste-entry");
+
+    // Type into it (the page's own URL box must stay empty) and press OK.
+    try dvui.testing.moveTo("dl-paste-entry");
+    try dvui.testing.click(.left);
+    _ = try dvui.testing.step(dlv2Render);
+    try dvui.testing.writeText("  https://example.com/y.zip ");
+    _ = try dvui.testing.step(dlv2Render);
+    _ = try dvui.testing.step(dlv2Render);
+    try std.testing.expectEqualStrings("", h.state.dlUrlSlice());
+    try dvui.testing.moveTo("dl-paste-ok");
+    try dvui.testing.click(.left);
+    _ = try dvui.testing.step(dlv2Render);
+    _ = try dvui.testing.step(dlv2Render);
+    try std.testing.expect(h.state.dl_paste_job == null);
+    try std.testing.expectEqualStrings("", h.state.dlPasteSlice());
+
+    h.dl.stepOnce(1001);
+    const j = h.dl.recs.items[0].job;
+    try std.testing.expectEqual(downloads.model.Step.downloading, j.step);
+    try std.testing.expectEqualStrings("https://example.com/y.zip", j.resolved_url.?);
+    try std.testing.expectEqual(@as(usize, 1), h.dl_fake.started);
+    tlog("dl-needs-you-gui: OK", .{});
+}
+
+test "downloads page GUI: Pick file… hands the picked path to pick_file" {
+    tlog("START: dl-needs-you-pick", .{});
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(8) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var env = try TestEnv.init(gpa, "dl-needs-you-pick");
+    defer env.deinit();
+    var t = try dvui.testing.init(.{ .allocator = gpa, .io = io, .window_size = .{ .w = 1280, .h = 800 } });
+    defer t.deinit();
+    ui.registerBundledFonts(t.window);
+    var h = try ui.Harness.init(gpa, io, t.window, env.root);
+    defer h.deinit();
+
+    try env.writeFile("dl/Game.bin", "picked file");
+    const picked = try env.path("dl/Game.bin");
+    defer gpa.free(picked);
+    _ = try awaitBrowserJob(h);
+    var fr = h.frame();
+    dlv2_frame = &fr;
+    defer dlv2_frame = null;
+    h.state.screen = .downloads;
+    _ = try dvui.testing.step(dlv2Render);
+    _ = try dvui.testing.step(dlv2Render);
+
+    const answers = [_][]const u8{picked};
+    file_picker.test_hook.install(&answers);
+    defer file_picker.test_hook.reset();
+    try dvui.testing.moveTo("dl-pick");
+    try dvui.testing.click(.left);
+    _ = try dvui.testing.step(dlv2Render);
+    _ = try dvui.testing.step(dlv2Render);
+    try std.testing.expectEqual(@as(usize, 1), file_picker.test_hook.calls);
+
+    // The move runs on a worker; tick until the job leaves awaiting_user.
+    var now: i64 = 1001;
+    while (h.dl.recs.items[0].job.step == .awaiting_user and now < 1001 + 1000) : (now += 1) {
+        h.dl.stepOnce(now);
+        h.io.sleep(std.Io.Duration.fromMilliseconds(5), .real) catch {};
+    }
+    const step = h.dl.recs.items[0].job.step;
+    try std.testing.expect(step != .awaiting_user);
+    try std.testing.expect(step != .failed);
+    tlog("dl-needs-you-pick: OK step={s}", .{@tagName(step)});
+}
+
+test "settings downloads: Use default clears watch_dir and sends reload_settings" {
+    tlog("START: dl-watch-dir", .{});
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(8) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var env = try TestEnv.init(gpa, "dl-watch-dir");
+    defer env.deinit();
+    var t = try dvui.testing.init(.{ .allocator = gpa, .io = io, .window_size = .{ .w = 1280, .h = 800 } });
+    defer t.deinit();
+    var h = try ui.Harness.init(gpa, io, t.window, env.root);
+    defer h.deinit();
+    var fr = h.frame();
+
+    const watched = try env.path("watched");
+    defer gpa.free(watched);
+    const file = try env.path("watch_dir");
+    defer gpa.free(file);
+
+    // Set: the file holds the folder, state and downloader follow.
+    ui.setWatchDir(&fr, watched);
+    {
+        const on_disk = try std.Io.Dir.cwd().readFileAlloc(io, file, gpa, .limited(4096));
+        defer gpa.free(on_disk);
+        try std.testing.expectEqualStrings(watched, on_disk);
+    }
+    try std.testing.expectEqualStrings(watched, h.state.dl_settings.watch_dir);
+    h.dl.stepOnce(1000);
+    try std.testing.expectEqualStrings(watched, h.dl.settings.watch_dir);
+
+    // A second set replaces (and frees) the owned copy.
+    ui.setWatchDir(&fr, file);
+    try std.testing.expectEqualStrings(file, h.state.dl_settings.watch_dir);
+
+    // Use default: the file is gone, the setting is empty again.
+    ui.setWatchDir(&fr, null);
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, file, .{}));
+    try std.testing.expectEqualStrings("", h.state.dl_settings.watch_dir);
+    try std.testing.expect(h.state.watch_dir_owned == null);
+    h.dl.stepOnce(1001);
+    try std.testing.expectEqualStrings("", h.dl.settings.watch_dir);
+    // Use default again with nothing on disk is fine.
+    ui.setWatchDir(&fr, null);
+    tlog("dl-watch-dir: OK", .{});
+}
+
 test "hostile: findLauncher dispatch picks the OS-correct launcher from a mixed install" {
     // The production dispatch (launch.zig findLauncher) — NOT the per-OS
     // finders called directly. Walks a tree right after writing it; if this

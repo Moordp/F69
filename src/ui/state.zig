@@ -1246,6 +1246,15 @@ pub const State = struct {
     reload_requested: bool = false,
     /// Editable buffer for the Downloads screen's URL paste field.
     dl_url_buf: [512]u8 = @splat(0),
+    /// "Needs you" → "Paste link…": the job whose inline entry is open
+    /// (null = closed) and its text. Separate from `dl_url_buf`.
+    dl_paste_job: ?u64 = null,
+    dl_paste_buf: [512]u8 = @splat(0),
+    /// The watched-folder string `dl_settings.watch_dir` points at after
+    /// Settings changed it (owned by `lib.alloc`; freed on replace and on
+    /// quit). Null while `watch_dir` is the startup value (main owns it)
+    /// or empty.
+    watch_dir_owned: ?[]u8 = null,
     /// Editable buffer for the Settings → Downloads aria2-port field.
     /// "0" or empty means "random ephemeral port". Persisted to
     /// `<data_root>/aria2_port`; effective on next launch.
@@ -1707,6 +1716,11 @@ pub const State = struct {
     pub fn dlUrlSlice(self: *State) []u8 {
         const end = std.mem.indexOfScalar(u8, &self.dl_url_buf, 0) orelse self.dl_url_buf.len;
         return self.dl_url_buf[0..end];
+    }
+
+    pub fn dlPasteSlice(self: *State) []u8 {
+        const end = std.mem.indexOfScalar(u8, &self.dl_paste_buf, 0) orelse self.dl_paste_buf.len;
+        return self.dl_paste_buf[0..end];
     }
 
     pub fn loginMsg(self: *const State) []const u8 {

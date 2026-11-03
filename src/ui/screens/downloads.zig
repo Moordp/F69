@@ -88,12 +88,17 @@ pub fn downloadsScreen(frame: *Frame) !bool {
         var dl_buf: [24]u8 = undefined;
         var up_buf: [24]u8 = undefined;
         var totals_buf: [192]u8 = undefined;
+        var waiting_buf: [32]u8 = undefined;
+        const waiting_s: []const u8 = if (live.n_waiting > 0)
+            std.fmt.bufPrint(&waiting_buf, " · {d} waiting for you", .{live.n_waiting}) catch ""
+        else
+            "";
         const dl_s = components.humanRate(&dl_buf, live.dl_speed);
         const up_s = components.humanRate(&up_buf, live.up_speed);
         const totals_s = std.fmt.bufPrint(
             &totals_buf,
-            "↓ {s}  ↑ {s}  · {d} dl · {d} seed · {d} done",
-            .{ dl_s, up_s, live.n_downloading, live.n_seeding, live.n_done },
+            "↓ {s}  ↑ {s}  · {d} dl · {d} seed · {d} done{s}",
+            .{ dl_s, up_s, live.n_downloading, live.n_seeding, live.n_done, waiting_s },
         ) catch "";
         dvui.labelNoFmt(@src(), totals_s, .{}, .{ .gravity_y = 0.5 });
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 12, .h = 1 } });
@@ -183,6 +188,32 @@ pub fn renderDownloadsBody(frame: *Frame) void {
     // sent as one command after the loop.
     var pending: RowAction = .none;
 
+    // Needs you: jobs waiting in the browser, at the top. The open
+    // "Paste link…" entry closes when its job no longer waits.
+    {
+        var n_waiting: u32 = 0;
+        var paste_open = false;
+        for (snap.jobs) |*v| {
+            if (classifyJob(&v.job) != .needs_you) continue;
+            n_waiting += 1;
+            if (frame.state.dl_paste_job == v.job.id) paste_open = true;
+        }
+        if (!paste_open and frame.state.dl_paste_job != null) closePaste(frame.state);
+        if (n_waiting > 0) {
+            downloadsSectionHeader("Needs you", n_waiting, @intFromEnum(JobGroup.needs_you));
+            var first = true;
+            for (snap.jobs) |*v| {
+                if (classifyJob(&v.job) != .needs_you) continue;
+                const action = renderNeedsYouRow(frame, v, resolveJobTitle(frame.games, &v.job), first);
+                first = false;
+                switch (action) {
+                    .none => {},
+                    else => pending = action,
+                }
+            }
+        }
+    }
+
     // Render in three sections. Per-section count is computed up
     // front so we can skip the header entirely for empty groups (a
     // lone "Seeding" header with nothing under it just adds noise).
@@ -214,8 +245,22 @@ pub fn renderDownloadsBody(frame: *Frame) void {
         }
     }
 
+    // `snap` is an arena copy: no snapshot lock is held here, so the
+    // native file dialog below may block.
     switch (pending) {
         .none => {},
+        .open_again => |id| actions.dlOpenAgain(frame, id),
+        .paste_toggle => |id| {
+            const was_open = frame.state.dl_paste_job == id;
+            closePaste(frame.state);
+            if (!was_open) frame.state.dl_paste_job = id;
+        },
+        .paste => |p| {
+            actions.dlPasteLink(frame, p.id, p.url);
+            closePaste(frame.state);
+        },
+        .pick => |id| actions.dlPickFileDialog(frame, id),
+        .accept => |a| actions.dlAcceptMatch(frame, a.id, a.ok),
         .cancel => |id| frame.dl.send(.{ .cancel = id }),
         .remove => |id| frame.dl.send(.{ .remove = id }),
         .retry => |id| actions.retryDownload(frame, id),
@@ -300,9 +345,11 @@ const LiveTotals = struct {
     n_downloading: u32 = 0,
     n_seeding: u32 = 0,
     n_done: u32 = 0,
+    n_waiting: u32 = 0,
 
     fn fold(self: *LiveTotals, j: *const Job) void {
         switch (classifyJob(j)) {
+            .needs_you => self.n_waiting += 1,
             .downloading => {
                 self.n_downloading += 1;
                 self.dl_speed += j.dl_speed;
@@ -323,10 +370,11 @@ const LiveTotals = struct {
 /// cancel) plus pending HTTP jobs that complete fast enough we don't
 /// want a separate "queued" header. Keep the int repr stable —
 /// downloadsSectionHeader uses it as the dvui id_extra key.
-const JobGroup = enum(u8) { downloading = 1, seeding = 2, done = 3 };
+const JobGroup = enum(u8) { downloading = 1, seeding = 2, done = 3, needs_you = 4 };
 
 fn classifyJob(j: *const Job) JobGroup {
     return switch (j.step) {
+        .awaiting_user => .needs_you,
         .seeding => .seeding,
         .done, .failed, .cancelled => .done,
         else => .downloading,
@@ -351,7 +399,163 @@ fn downloadsSectionHeader(label_text: []const u8, count: u32, key: u8) void {
     });
 }
 
-const RowAction = union(enum) { none, cancel: u64, remove: u64, retry: u64, retry_install: u64, pause: u64, unpause: u64, stop_seeding: u64 };
+const RowAction = union(enum) {
+    none,
+    cancel: u64,
+    remove: u64,
+    retry: u64,
+    retry_install: u64,
+    pause: u64,
+    unpause: u64,
+    stop_seeding: u64,
+    // Needs you.
+    open_again: u64,
+    /// Open (or close) the "Paste link…" entry of this job.
+    paste_toggle: u64,
+    /// `url` lives in the frame arena.
+    paste: struct { id: u64, url: []const u8 },
+    pick: u64,
+    accept: struct { id: u64, ok: bool },
+};
+
+fn closePaste(state: *types.State) void {
+    state.dl_paste_job = null;
+    @memset(&state.dl_paste_buf, 0);
+}
+
+/// One job waiting in the browser: title + host, the step line, the
+/// "use this file?" prompt when the watched folder found a candidate, and
+/// the ways to hand the file over (open the page again, paste the final
+/// link, pick the file) or Cancel.
+///
+/// Only the first row carries test tags: dvui logs an error for a tag
+/// used twice in one frame.
+fn renderNeedsYouRow(frame: *Frame, v: *const JobView, title: []const u8, tagged: bool) RowAction {
+    const job = &v.job;
+    const tg = struct {
+        fn f(on: bool, name: []const u8) ?[]const u8 {
+            return if (on) name else null;
+        }
+    }.f;
+    const state = frame.state;
+    const t = tokens.active;
+    var action: RowAction = .none;
+    var row = dvui.box(@src(), .{ .dir = .vertical }, .{
+        .id_extra = job.id,
+        .expand = .horizontal,
+        .background = true,
+        .border = style.border_thin,
+        .corners = style.corner_radius,
+        .padding = .{ .x = 10, .y = 6, .w = 10, .h = 6 },
+        .margin = .{ .x = 0, .y = 0, .w = 0, .h = 6 },
+        .color_fill = .{ .color = style.cardFill() },
+        .color_border = .{ .color = tokens.toDvui(t.acc_dim, dvui.Color) },
+        .tag = tg(tagged, "dl-needs-you"),
+    });
+    defer row.deinit();
+
+    // Header: status chip + host chip + title.
+    {
+        var hdr = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+        defer hdr.deinit();
+        const spec = statusChipSpec(job.step, false);
+        comp.chip(@src(), .{
+            .label = spec.label,
+            .fill = spec.color,
+            .text = .{ .r = 0xff, .g = 0xff, .b = 0xff, .a = 0xff },
+            .border = spec.color,
+            .scale = 0.8,
+        }, .{ .id_extra = job.id, .gravity_y = 0.5, .padding = .{ .x = 7, .y = 2, .w = 7, .h = 2 }, .corners = .all(3) });
+        if (job.host.len > 0) {
+            _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 4, .h = 1 } });
+            comp.chip(@src(), .{
+                .label = job.host,
+                .fill = t.bg2,
+                .text = t.ink2,
+                .border = t.line,
+                .scale = 0.7,
+            }, .{ .id_extra = job.id ^ 0x4057, .gravity_y = 0.5, .padding = .{ .x = 5, .y = 2, .w = 5, .h = 2 }, .corners = .all(3) });
+        }
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
+        const truncated = if (title.len > 80) title[0..80] else title;
+        dvui.label(@src(), "{s}{s}", .{ truncated, if (title.len > 80) "…" else "" }, .{
+            .gravity_y = 0.5,
+            .color_text = .{ .color = tokens.toDvui(t.acc, dvui.Color) },
+        });
+    }
+
+    if (job.step_detail.len > 0) {
+        dvui.labelNoFmt(@src(), job.step_detail, .{}, .{ .color_text = .{ .color = style.labelDim() } });
+    }
+
+    // "Found <file> (<size>) — use it?"
+    if (v.awaiting_prompt) |prompt| {
+        var pr = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .expand = .horizontal,
+            .background = true,
+            .border = style.border_thin,
+            .corners = .all(3),
+            .padding = .{ .x = 8, .y = 4, .w = 8, .h = 4 },
+            .margin = .{ .x = 0, .y = 4, .w = 0, .h = 2 },
+            .color_fill = .{ .color = tokens.toDvui(t.bg2, dvui.Color) },
+            .color_border = .{ .color = tokens.toDvui(t.acc, dvui.Color) },
+        });
+        defer pr.deinit();
+        dvui.labelNoFmt(@src(), prompt, .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = tokens.toDvui(t.ink, dvui.Color) } });
+        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+        if (style.button(@src(), "Yes", .{}, .{ .id_extra = job.id, .gravity_y = 0.5, .style = .highlight, .tag = tg(tagged, "dl-yes") })) {
+            action = .{ .accept = .{ .id = job.id, .ok = true } };
+        }
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 6, .h = 1 } });
+        if (style.button(@src(), "No", .{}, .{ .id_extra = job.id, .gravity_y = 0.5, .tag = tg(tagged, "dl-no") })) {
+            action = .{ .accept = .{ .id = job.id, .ok = false } };
+        }
+    }
+
+    // Ways to hand the file over.
+    {
+        var btns = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .x = 0, .y = 4, .w = 0, .h = 0 } });
+        defer btns.deinit();
+        if (style.button(@src(), "Open page again", .{}, .{ .id_extra = job.id, .tag = tg(tagged, "dl-open-again") })) {
+            action = .{ .open_again = job.id };
+        }
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 6, .h = 1 } });
+        if (style.button(@src(), "Paste link\u{2026}", .{}, .{ .id_extra = job.id, .tag = tg(tagged, "dl-paste") })) {
+            action = .{ .paste_toggle = job.id };
+        }
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 6, .h = 1 } });
+        if (style.button(@src(), "Pick file\u{2026}", .{}, .{ .id_extra = job.id, .tag = tg(tagged, "dl-pick") })) {
+            action = .{ .pick = job.id };
+        }
+        _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+        if (style.button(@src(), "Cancel", .{}, .{ .id_extra = job.id, .style = .err, .tag = tg(tagged, "dl-needs-cancel") })) {
+            action = .{ .cancel = job.id };
+        }
+    }
+
+    // Inline paste entry (its own buffer, not the page's URL box).
+    if (state.dl_paste_job == job.id) {
+        var pe = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .margin = .{ .x = 0, .y = 4, .w = 0, .h = 0 } });
+        defer pe.deinit();
+        const te = style.textEntry(@src(), .{
+            .text = .{ .buffer = &state.dl_paste_buf },
+            .placeholder = "Paste the download link from your browser",
+        }, .{ .id_extra = job.id, .expand = .horizontal, .tag = "dl-paste-entry" });
+        const entered = te.enter_pressed;
+        te.deinit();
+        _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 6, .h = 1 } });
+        const ok = style.button(@src(), "OK", .{}, .{ .id_extra = job.id, .style = .highlight, .tag = "dl-paste-ok" });
+        if (entered or ok) {
+            const url = std.mem.trim(u8, state.dlPasteSlice(), " \t\r\n");
+            if (url.len > 0) {
+                if (dvui.currentWindow().arena().dupe(u8, url)) |copy| {
+                    action = .{ .paste = .{ .id = job.id, .url = copy } };
+                } else |_| {}
+            }
+        }
+    }
+    return action;
+}
 
 /// Retry for a failed job: an install failure installs again from the
 /// file on disk; any other failure downloads again.

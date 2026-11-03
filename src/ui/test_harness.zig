@@ -49,6 +49,9 @@ pub const Harness = struct {
     /// started: tests drive it with `dl.stepOnce(now)`.
     dl: downloads.Downloader,
     dl_fake: downloads.engine.FakeEngine,
+    /// Browser-flow engine (stage 3). Jobs reach it only through a
+    /// resolver, which the harness leaves null; tests set `dl.resolver`.
+    dl_browser: downloads.engine_browser.BrowserEngine,
     recipe_repo: recipe.Repo,
     sandbox_backend: sandbox.Sandbox,
     host_launcher: sandbox.NoSandbox,
@@ -103,13 +106,14 @@ pub const Harness = struct {
         self.f95_service = f95.Service.init(gpa, &self.f95_client);
         self.indexer_client = f95_indexer.Client.init(gpa, io, f95_indexer.DEFAULT_BASE_URL);
         self.dl_fake = .{ .alloc = gpa, .script = &.{}, .alive = true };
+        self.dl_browser = .{ .alloc = gpa, .io = io };
         self.dl = downloads.Downloader.init(
             gpa,
             io,
             // Same DB file as the library, as in main.zig: the downloader
             // reads `download_sources` for `enqueue_catalogue`.
             try downloads.store.Store.open(gpa, db_path),
-            .{ .aria2 = self.dl_fake.engine() },
+            .{ .aria2 = self.dl_fake.engine(), .browser = self.dl_browser.engine() },
             .{ .downloads_root = downloads_root, .library_root = library_root, .data_root = try a.dupe(u8, root) },
             .{},
             null,
@@ -270,6 +274,7 @@ pub const Harness = struct {
         if (self.state.sync_queue) |q| lib_alloc.free(q);
         if (self.state.rpdl_token) |t| lib_alloc.free(t);
         actions.freeDetailCatalogue(&self.state);
+        actions.freeWatchDir(&self.state, lib_alloc);
 
         if (self.games.len > 0) self.lib.freeGames(self.games);
         self.mod_jobs.deinit();

@@ -70,6 +70,8 @@ pub const enqueueCatalogue = actions.enqueueCatalogue;
 pub const acceptPartOffer = actions.acceptPartOffer;
 pub const ensureCatalogue = actions.ensureCatalogue;
 pub const drainDownloaderEvents = actions.drainDownloaderEvents;
+pub const dlPasteLink = actions.dlPasteLink;
+pub const setWatchDir = actions.setWatchDir;
 pub const doLogout = actions.doLogout;
 pub const commitFolderImport = actions.commitFolderImport;
 pub const doOpenLogsFolder = actions.doOpenLogsFolder;
@@ -303,6 +305,7 @@ pub fn runMainLoop(
         if (state.sync_queue) |q| lib.alloc.free(q);
         if (state.rpdl_token) |t| lib.alloc.free(t);
         actions.freeDetailCatalogue(&state);
+        actions.freeWatchDir(&state, lib.alloc);
         if (state.tag_colors) |*m| library.Library.freeTagColors(m);
     }
 

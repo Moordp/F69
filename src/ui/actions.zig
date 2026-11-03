@@ -210,6 +210,13 @@ pub const acceptPartOffer = dl.acceptPartOffer;
 pub const SnapCopy = dl.SnapCopy;
 pub const pauseResumeState = dl.pauseResumeState;
 pub const doDownloadGame = dl.doDownloadGame;
+pub const dlOpenAgain = dl.dlOpenAgain;
+pub const dlPasteLink = dl.dlPasteLink;
+pub const dlPickFile = dl.dlPickFile;
+pub const dlPickFileDialog = dl.dlPickFileDialog;
+pub const dlAcceptMatch = dl.dlAcceptMatch;
+pub const setWatchDir = dl.setWatchDir;
+pub const freeWatchDir = dl.freeWatchDir;
 pub const installFromArchive = installer.installFromArchive;
 
 // ---- Refresh tags ----
