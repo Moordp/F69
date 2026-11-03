@@ -144,6 +144,9 @@ pub fn drainThreads(frame: *Frame) void {
             .io => |r| {
                 // Task 15 routes replies to the file cache. Until then
                 // nothing waits on a ticket: free the reply here.
+                // TODO(Task 15): a `done` reply for a copy/delete that
+                // carried an Activity must `book.finish` it, including
+                // "Stopped." and "Stopped before it started.".
                 threads.io_thread.freeReply(frame.events.alloc, r);
                 continue;
             },

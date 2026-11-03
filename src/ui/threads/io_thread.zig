@@ -10,6 +10,7 @@
 //! `err` text in a reply is a static string and is never freed.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const convert = @import("convert");
 const library = @import("library");
 const Mailbox = @import("mailbox.zig").Mailbox;
@@ -48,7 +49,12 @@ pub const IoRequest = union(enum) {
     list_dir: struct { ticket: u64, path: []const u8, kinds: ListKinds },
     probe_install: struct { ticket: u64, install_path: []const u8 },
     /// `activity` (optional) gets phase "Copying file i / n" and progress
-    /// (i, n). The caller owns it and finishes it on the `done` reply.
+    /// (i, n). The caller owns it and must `book.finish` it on every
+    /// `done` reply, including "Stopped." and "Stopped before it started.".
+    /// Merges into `dst`: same-named files are overwritten, files only in
+    /// `dst` stay; to replace, `delete_tree` first. A failed or cancelled
+    /// copy leaves a partial `dst`. Symlinks are never followed: they are
+    /// recreated as links on Linux and skipped (logged) on Windows.
     copy_tree: struct { ticket: u64, src: []const u8, dst: []const u8, activity: ?*Activity },
     delete_tree: struct { ticket: u64, path: []const u8, activity: ?*Activity },
     shutdown: void,
@@ -126,7 +132,10 @@ pub const IoThread = struct {
     /// How long `stop` waits for the thread before detaching it.
     join_budget_ms: u32 = 3000,
 
+    /// `alloc` must be the allocator `events` frees replies with
+    /// (`freeEvent` / `drainThreads` use `events.alloc`).
     pub fn init(alloc: std.mem.Allocator, io: std.Io, events: *Events, deps: Deps) IoThread {
+        std.debug.assert(alloc.ptr == events.alloc.ptr);
         return .{
             .alloc = alloc,
             .io = io,
@@ -308,10 +317,12 @@ fn readFile(alloc: std.mem.Allocator, io: std.Io, ticket: u64, path: []const u8,
 }
 
 /// Kind of `entry`, asking the file system when readdir did not say
-/// (FUSE NTFS / exFAT report every entry as `.unknown`).
-fn resolveKind(dir: std.Io.Dir, io: std.Io, entry: std.Io.Dir.Entry) std.Io.File.Kind {
+/// (FUSE NTFS / exFAT report every entry as `.unknown`). With
+/// `follow = false` a symlink stays `.sym_link`, so a tree walk never
+/// descends into a linked directory.
+fn resolveKind(dir: std.Io.Dir, io: std.Io, entry: std.Io.Dir.Entry, follow: bool) std.Io.File.Kind {
     if (entry.kind != .unknown) return entry.kind;
-    const st = dir.statFile(io, entry.name, .{}) catch return .unknown;
+    const st = dir.statFile(io, entry.name, .{ .follow_symlinks = follow }) catch return .unknown;
     return st.kind;
 }
 
@@ -336,7 +347,7 @@ fn listInto(alloc: std.mem.Allocator, io: std.Io, path: []const u8, kinds: ListK
     defer dir.close(io);
     var it = dir.iterate();
     while (it.next(io) catch |e| return @errorName(e)) |entry| {
-        const kind = resolveKind(dir, io, entry);
+        const kind = resolveKind(dir, io, entry, true);
         const is_dir = kind == .directory;
         if (is_dir and !kinds.dirs) continue;
         if (!is_dir and !kinds.files) continue;
@@ -380,15 +391,21 @@ fn probeInstall(alloc: std.mem.Allocator, io: std.Io, ticket: u64, install_path:
     } } };
 }
 
+const Tree = struct {
+    files: std.ArrayList([]const u8) = .empty,
+    dirs: std.ArrayList([]const u8) = .empty,
+    links: std.ArrayList([]const u8) = .empty,
+};
+
 /// Collects every path under `root_path` (relative, joined with the
-/// native separator) into `files` and `dirs`. Arena-owned.
+/// native separator) into `tree`. Arena-owned. Symlinks go to
+/// `tree.links` and are never followed.
 fn collectTree(
     a: std.mem.Allocator,
     io: std.Io,
     root_path: []const u8,
     rel: []const u8,
-    files: *std.ArrayList([]const u8),
-    dirs: *std.ArrayList([]const u8),
+    tree: *Tree,
 ) !void {
     const abs = if (rel.len == 0) root_path else try std.fmt.allocPrint(a, "{s}" ++ sep ++ "{s}", .{ root_path, rel });
     var dir = try std.Io.Dir.cwd().openDir(io, abs, .{ .iterate = true });
@@ -399,12 +416,13 @@ fn collectTree(
             try a.dupe(u8, entry.name)
         else
             try std.fmt.allocPrint(a, "{s}" ++ sep ++ "{s}", .{ rel, entry.name });
-        switch (resolveKind(dir, io, entry)) {
+        switch (resolveKind(dir, io, entry, false)) {
             .directory => {
-                try dirs.append(a, child);
-                try collectTree(a, io, root_path, child, files, dirs);
+                try tree.dirs.append(a, child);
+                try collectTree(a, io, root_path, child, tree);
             },
-            else => try files.append(a, child),
+            .sym_link => try tree.links.append(a, child),
+            else => try tree.files.append(a, child),
         }
     }
 }
@@ -420,17 +438,20 @@ fn copyTree(alloc: std.mem.Allocator, io: std.Io, src: []const u8, dst: []const 
         act.markRunning(nowSeconds(io));
         act.setPhase(io, "Listing files");
     }
-    var files: std.ArrayList([]const u8) = .empty;
-    var dirs: std.ArrayList([]const u8) = .empty;
-    collectTree(a, io, src, "", &files, &dirs) catch |e| return switch (e) {
+    var tree: Tree = .{};
+    collectTree(a, io, src, "", &tree) catch |e| return switch (e) {
         error.FileNotFound => "The source folder is gone",
         else => @errorName(e),
     };
     std.Io.Dir.cwd().createDirPath(io, dst) catch |e| return @errorName(e);
-    for (dirs.items) |d| {
+    for (tree.dirs.items) |d| {
         const p = std.fmt.allocPrint(a, "{s}" ++ sep ++ "{s}", .{ dst, d }) catch return "Out of memory";
         std.Io.Dir.cwd().createDirPath(io, p) catch |e| return @errorName(e);
     }
+    for (tree.links.items) |l| {
+        if (copyLink(a, io, src, dst, l)) |err| return err;
+    }
+    const files = tree.files;
     const n: u64 = files.items.len;
     if (activity) |act| act.report(0, n);
     for (files.items, 0..) |f, i| {
@@ -448,6 +469,36 @@ fn copyTree(alloc: std.mem.Allocator, io: std.Io, src: []const u8, dst: []const 
         };
         if (activity) |act| act.report(i + 1, n);
     }
+    return null;
+}
+
+/// Recreates the symlink `src/rel` at `dst/rel` with the same target
+/// text (a relative link stays relative). An existing entry at the
+/// destination is replaced. Windows: links need a privilege and may be
+/// junctions, so they are skipped with a log line.
+fn copyLink(a: std.mem.Allocator, io: std.Io, src: []const u8, dst: []const u8, rel: []const u8) ?[]const u8 {
+    const from = std.fmt.allocPrint(a, "{s}" ++ sep ++ "{s}", .{ src, rel }) catch return "Out of memory";
+    if (builtin.os.tag == .windows) {
+        log.info("copy: skipping symlink {s} (not copied on Windows)", .{from});
+        return null;
+    }
+    const to = std.fmt.allocPrint(a, "{s}" ++ sep ++ "{s}", .{ dst, rel }) catch return "Out of memory";
+    var tbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const tlen = std.Io.Dir.cwd().readLink(io, from, &tbuf) catch |e| {
+        log.warn("copy: read symlink {s}: {s}", .{ from, @errorName(e) });
+        return @errorName(e);
+    };
+    std.Io.Dir.cwd().deleteFile(io, to) catch |e| switch (e) {
+        error.FileNotFound => {},
+        else => {
+            log.warn("copy: replace {s}: {s}", .{ to, @errorName(e) });
+            return @errorName(e);
+        },
+    };
+    std.Io.Dir.cwd().symLink(io, tbuf[0..tlen], to, .{}) catch |e| {
+        log.warn("copy: symlink {s} -> {s}: {s}", .{ to, tbuf[0..tlen], @errorName(e) });
+        return @errorName(e);
+    };
     return null;
 }
 
@@ -479,6 +530,14 @@ const TestEnv = struct {
 
     /// Heap-allocated so `t` never moves after `start`.
     fn create() !*TestEnv {
+        const env = try createIdle();
+        errdefer env.destroy();
+        try env.t.start();
+        return env;
+    }
+
+    /// Like `create`, but the thread is not started.
+    fn createIdle() !*TestEnv {
         const alloc = testing.allocator;
         const io = testing.io;
         const env = try alloc.create(TestEnv);
@@ -489,7 +548,6 @@ const TestEnv = struct {
         env.book = activity_mod.Book.init(alloc, io);
         env.ev = Events.init(alloc, io, null);
         env.t = IoThread.init(alloc, io, &env.ev, .{});
-        try env.t.start();
         return env;
     }
 
@@ -645,6 +703,48 @@ test "IoThread: copy_tree copies 5 files with progress, then delete_tree removes
     try testing.expect(exists(env, "src" ++ sep ++ "f1"));
 }
 
+test "IoThread: copy_tree never follows symlinks; recreates them on Linux, no loop" {
+    const env = try TestEnv.create();
+    defer env.destroy();
+    try env.mkdir("src" ++ sep ++ "sub");
+    try env.write("src" ++ sep ++ "real.txt", "real");
+    try env.write("src" ++ sep ++ "sub" ++ sep ++ "inner.txt", "inner");
+    // A file link, and a directory link back to its parent (a loop if
+    // the walk followed it).
+    env.tmp.dir.symLink(testing.io, "real.txt", "src" ++ sep ++ "file_link", .{}) catch return error.SkipZigTest;
+    env.tmp.dir.symLink(testing.io, "..", "src" ++ sep ++ "sub" ++ sep ++ "up", .{ .is_directory = true }) catch return error.SkipZigTest;
+    const src = try env.path("src");
+    defer testing.allocator.free(src);
+    const dst = try env.path("dst");
+    defer testing.allocator.free(dst);
+    const a = try env.book.start(.hash, 1, "copy");
+    try env.t.send(.{ .copy_tree = .{ .ticket = 61, .src = src, .dst = dst, .activity = a } });
+    const r = try env.nextReply();
+    defer freeReply(testing.allocator, r);
+    try testing.expectEqual(@as(u64, 61), r.done.ticket);
+    try testing.expect(r.done.err == null);
+    // Only the two regular files count.
+    try testing.expectEqual(@as(u64, 2), a.prog.get().total);
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("real", try env.tmp.dir.readFile(testing.io, "dst" ++ sep ++ "real.txt", &buf));
+    try testing.expectEqualStrings("inner", try env.tmp.dir.readFile(testing.io, "dst" ++ sep ++ "sub" ++ sep ++ "inner.txt", &buf));
+    if (builtin.os.tag == .windows) {
+        try testing.expect(!exists(env, "dst" ++ sep ++ "file_link"));
+        try testing.expect(!exists(env, "dst" ++ sep ++ "sub" ++ sep ++ "up"));
+    } else {
+        var lbuf: [64]u8 = undefined;
+        const n1 = try env.tmp.dir.readLink(testing.io, "dst" ++ sep ++ "file_link", &lbuf);
+        try testing.expectEqualStrings("real.txt", lbuf[0..n1]);
+        const n2 = try env.tmp.dir.readLink(testing.io, "dst" ++ sep ++ "sub" ++ sep ++ "up", &lbuf);
+        try testing.expectEqualStrings("..", lbuf[0..n2]);
+        // Copying again onto the existing links replaces them.
+        try env.t.send(.{ .copy_tree = .{ .ticket = 62, .src = src, .dst = dst, .activity = null } });
+        const r2 = try env.nextReply();
+        defer freeReply(testing.allocator, r2);
+        try testing.expect(r2.done.err == null);
+    }
+}
+
 test "IoThread: a cancelled copy stops between files" {
     const env = try TestEnv.create();
     defer env.destroy();
@@ -694,6 +794,25 @@ test "IoThread: stop with pending requests returns within 3 s and replies to eac
         try testing.expect(!seen[tk]);
         seen[tk] = true;
     }
+}
+
+test "IoThread: stop replies \"Stopped before it started.\" to every request that never ran" {
+    const env = try TestEnv.createIdle();
+    defer env.destroy();
+    var i: u64 = 0;
+    while (i < 3) : (i += 1) try env.t.send(.{ .read_file = .{ .ticket = i, .path = "x", .max = 1 } });
+    try env.t.send(.{ .delete_tree = .{ .ticket = 3, .path = "x", .activity = null } });
+    env.t.stop();
+    var left: std.ArrayList(events_mod.UiEvent) = .empty;
+    defer left.deinit(testing.allocator);
+    env.ev.drain(testing.allocator, &left);
+    defer for (left.items) |e| events_mod.freeEvent(testing.allocator, e);
+    try testing.expectEqual(@as(usize, 4), left.items.len);
+    for (left.items[0..3], 0..) |e, k| {
+        try testing.expectEqual(@as(u64, k), e.io.file.ticket);
+        try testing.expectEqualStrings(stopped_text, e.io.file.err.?);
+    }
+    try testing.expectEqualStrings(stopped_text, left.items[3].io.done.err.?);
 }
 
 test "IoThread: shutdown request ends the loop" {
