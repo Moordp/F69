@@ -502,6 +502,22 @@ test "copyFile: copies content and refuses an existing destination" {
     try testing.expectEqualStrings("old", old);
 }
 
+test "copyFile: a failing copy removes the partial destination" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    try tmp.dir.createDirPath(testing.io, "srcdir");
+    const src = try std.fs.path.join(testing.allocator, &.{ root, "srcdir" });
+    defer testing.allocator.free(src);
+    const dst = try std.fs.path.join(testing.allocator, &.{ root, "out" });
+    defer testing.allocator.free(dst);
+    // Opening a directory succeeds, the first read fails: dst exists by then.
+    try testing.expect(std.meta.isError(copyFile(testing.io, src, dst)));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(testing.io, "out", .{}));
+}
+
 test "moveIntoDir: same-filesystem rename" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
