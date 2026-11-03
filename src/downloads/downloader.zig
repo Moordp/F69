@@ -280,6 +280,9 @@ const MoveWorker = struct {
     io: std.Io,
     src: []u8,
     dest_dir: []u8,
+    /// The file came from the watched folder (a match), not a pick: if it
+    /// is gone by the time it moves, the job keeps waiting.
+    from_watch: bool = false,
 
     fn run(mw: *MoveWorker) Out {
         return watch.moveIntoDir(mw.io, mw.alloc, mw.src, mw.dest_dir);
@@ -630,7 +633,7 @@ pub const Downloader = struct {
                 self.apply(r, .{ .step = .done, .attempts = r.job.attempts }, now);
             },
             .paste_link => |p| if (self.awaiting(p.job_id)) |r| self.pasteLink(r, p.url, now),
-            .pick_file => |p| if (self.awaiting(p.job_id)) |r| self.adoptFile(r, p.path, now),
+            .pick_file => |p| if (self.awaiting(p.job_id)) |r| self.adoptFile(r, p.path, false, now),
             .accept_match => |m| if (self.awaiting(m.job_id)) |r| self.acceptMatch(r, m.accept, now),
             .open_again => |id| if (self.awaiting(id)) |r| self.pushEvent(.{ .open_url = browserUrl(&r.job) }),
             .install_ack => |id| if (self.find(id)) |r| {
@@ -1440,7 +1443,10 @@ pub const Downloader = struct {
             std.mem.startsWith(u8, url, "magnet:");
         if (!is_url) return self.toast("That is not a link");
         const p = dl_classify.parseHref(url);
-        if (p.wrapper == .masked) {
+        // Same rule as `needsResolve`: a masked link or a file-host page
+        // goes through the resolver; a host page given to aria2 would
+        // download the HTML.
+        if (p.wrapper == .masked or (p.host.isFileHost() and self.resolver != null)) {
             const rc = self.resolver orelse return self.toast("That link cannot be resolved here — paste the final download link");
             self.cancelEngine(r);
             self.apply(r, .{ .step = .resolving, .attempts = r.job.attempts }, now);
@@ -1455,10 +1461,10 @@ pub const Downloader = struct {
 
     /// Move `src` into the job's folder on a worker; `reapMoves` continues
     /// at `file_arrived`. One move per job at a time.
-    fn adoptFile(self: *Downloader, r: *Rec, src: []const u8, now: i64) void {
+    fn adoptFile(self: *Downloader, r: *Rec, src: []const u8, from_watch: bool, now: i64) void {
         if (r.move_worker != null) return;
         const mw = self.alloc.create(MoveWorker) catch return self.moveFailed(r, error.OutOfMemory, now);
-        mw.* = .{ .alloc = self.alloc, .io = self.io, .src = undefined, .dest_dir = undefined };
+        mw.* = .{ .alloc = self.alloc, .io = self.io, .src = undefined, .dest_dir = undefined, .from_watch = from_watch };
         mw.src = self.alloc.dupe(u8, src) catch {
             self.alloc.destroy(mw);
             return self.moveFailed(r, error.OutOfMemory, now);
@@ -1492,11 +1498,20 @@ pub const Downloader = struct {
         for (self.recs.items) |r| {
             const mw = r.move_worker orelse continue;
             const out = mw.w.take() orelse continue;
+            const from_watch = mw.from_watch;
             r.move_worker = null;
             mw.destroy();
             const moved = out catch |e| {
                 log.warn("job {d}: moving the file failed: {s}", .{ r.job.id, @errorName(e) });
-                if (r.job.step == .awaiting_user) self.moveFailed(r, e, now);
+                if (r.job.step != .awaiting_user) continue;
+                // A matched file deleted or renamed before it moved: not
+                // the job's fault, keep waiting for another one.
+                if (from_watch and e == error.FileNotFound) {
+                    self.clearPending(r);
+                    self.toast("That file is gone — still waiting");
+                    continue;
+                }
+                self.moveFailed(r, e, now);
                 continue;
             };
             if (r.job.step != .awaiting_user) {
@@ -1525,7 +1540,7 @@ pub const Downloader = struct {
         const pm = r.pending_match orelse return;
         if (accept) {
             // `adoptFile` copies the path, then clears the prompt.
-            self.adoptFile(r, pm.path, now);
+            self.adoptFile(r, pm.path, true, now);
             self.clearPending(r);
             return;
         }
@@ -1603,7 +1618,15 @@ pub const Downloader = struct {
                 .since = r.awaiting_since,
             }) catch return;
         }
+        // "Only one waiting job" counts every waiting job, also those with a
+        // prompt or a move running, or a stray file would be offered to
+        // the second job while the first is busy.
+        var awaiting_total: usize = 0;
+        for (self.recs.items) |r| {
+            if (r.job.step == .awaiting_user) awaiting_total += 1;
+        }
         while (watch.matchFile(free_cands.items, waiting.items)) |m| {
+            if (m.confidence == .only_one and awaiting_total != 1) break;
             const c = free_cands.orderedRemove(m.candidate_idx);
             for (waiting.items, 0..) |w, i| {
                 if (w.job_id != m.job_id) continue;
@@ -1612,7 +1635,7 @@ pub const Downloader = struct {
             }
             const r = self.find(m.job_id) orelse continue;
             switch (m.confidence) {
-                .name => self.adoptFile(r, c.path, now),
+                .name => self.adoptFile(r, c.path, true, now),
                 .size, .only_one => self.proposeMatch(r, c),
             }
         }
@@ -3279,4 +3302,83 @@ test "browser: expectedName and humanSize" {
     try testing.expectEqualStrings("512 B", humanSize(&buf, 512));
     try testing.expectEqualStrings("1.5 KB", humanSize(&buf, 1536));
     try testing.expectEqualStrings("2.0 GB", humanSize(&buf, 2 * 1024 * 1024 * 1024));
+}
+
+test "browser: paste_link to a file-host page goes through the resolver" {
+    var stub: ResolveStub = .{ .routes = &.{PD_INFO} };
+    var fx = try Fx.createBrowser(.{}, stub.ctx());
+    defer fx.destroy();
+    const id = try awaitBrowser(fx, 0, "https://workupload.com/file/xyz");
+
+    stub.hold.store(true, .release);
+    fx.dl.send(.{ .paste_link = .{ .job_id = id, .url = "https://pixeldrain.com/u/abc" } });
+    fx.dl.stepOnce(1001);
+    try testing.expectEqual(model.Step.resolving, fx.rec(id).job.step);
+    try testing.expectEqual(@as(usize, 0), fx.fake.started);
+    stub.hold.store(false, .release);
+    try settle(fx, 1002);
+
+    const j = fx.rec(id).job;
+    try testing.expectEqual(model.Step.downloading, j.step);
+    try testing.expectEqual(model.EngineKind.aria2_http, j.engine);
+    try testing.expect(std.mem.endsWith(u8, j.resolved_url.?, "?download"));
+    try testing.expectEqual(@as(usize, 1), fx.fake.started);
+}
+
+test "browser: only_one counts every waiting job — a second job is not offered a stray file while the first is prompted" {
+    var stub: ResolveStub = .{ .routes = &.{} };
+    var fx = try Fx.createBrowser(.{}, stub.ctx());
+    defer fx.destroy();
+    try fx.env.mkdirP("watch");
+    const wd = try fx.env.path("watch");
+    defer testing.allocator.free(wd);
+    fx.dl.send(.{ .reload_settings = .{ .watch_dir = wd } });
+    fx.dl.stepOnce(900);
+
+    const a = try awaitBrowser(fx, 0, "https://workupload.com/file/xyz");
+    try fx.env.writeFile("watch/one.bin", "1");
+    fx.dl.stepOnce(1002);
+    fx.dl.stepOnce(1005);
+    var pbuf: [128]u8 = undefined;
+    try testing.expectEqualStrings("Found one.bin (1 B) — use it?", snapPrompt(fx, a, &pbuf).?);
+
+    const b = try awaitBrowser(fx, 1, "https://workupload.com/file/abc");
+    try fx.env.writeFile("watch/two.bin", "22");
+    fx.dl.stepOnce(1008);
+    fx.dl.stepOnce(1011);
+    fx.dl.stepOnce(1014);
+    try testing.expectEqual(@as(?[]const u8, null), snapPrompt(fx, b, &pbuf));
+    try testing.expectEqualStrings("Found one.bin (1 B) — use it?", snapPrompt(fx, a, &pbuf).?);
+}
+
+test "browser: accepting a file that is gone → toast, prompt cleared, still waiting" {
+    var stub: ResolveStub = .{ .routes = &.{} };
+    var fx = try Fx.createBrowser(.{}, stub.ctx());
+    defer fx.destroy();
+    try fx.env.mkdirP("watch");
+    const wd = try fx.env.path("watch");
+    defer testing.allocator.free(wd);
+    fx.dl.send(.{ .reload_settings = .{ .watch_dir = wd } });
+    fx.dl.stepOnce(900);
+
+    const id = try awaitBrowser(fx, 0, "https://workupload.com/file/xyz");
+    Downloader.freeEvents(testing.allocator, fx.dl.drainEvents(testing.allocator));
+    try fx.env.writeFile("watch/gone.bin", "x");
+    fx.dl.stepOnce(1002);
+    fx.dl.stepOnce(1005);
+    var pbuf: [128]u8 = undefined;
+    try testing.expect(snapPrompt(fx, id, &pbuf) != null);
+
+    const gone = try fx.env.path("watch/gone.bin");
+    defer testing.allocator.free(gone);
+    try std.Io.Dir.cwd().deleteFile(fx.env.io, gone);
+    fx.dl.send(.{ .accept_match = .{ .job_id = id, .accept = true } });
+    try waitMoves(fx, 1006);
+
+    try testing.expectEqual(model.Step.awaiting_user, fx.rec(id).job.step);
+    try testing.expectEqual(@as(?[]const u8, null), snapPrompt(fx, id, &pbuf));
+    const evs = fx.dl.drainEvents(testing.allocator);
+    defer Downloader.freeEvents(testing.allocator, evs);
+    try testing.expectEqual(@as(usize, 1), evs.len);
+    try testing.expectEqualStrings("That file is gone — still waiting", evs[0].toast);
 }
