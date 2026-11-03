@@ -274,6 +274,9 @@ pub const Queue = struct {
             if (j.currentPhase() != .queued) continue;
             j.in_flight.store(true, .release);
             j.phase.store(@intFromEnum(Phase.preparing), .release);
+            // On disk the job must read as started, so a crash or a quit
+            // mid-apply makes `recover` roll it back before the retry.
+            self.persistLocked() catch |e| log.warn("persist after takeHead failed: {s}", .{@errorName(e)});
             return j;
         }
         return null;
@@ -586,4 +589,37 @@ test "Queue: enqueue calls on_enqueue once per job with that job" {
     try std.testing.expectEqual(@as(usize, 2), seen.n);
     try std.testing.expectEqual(id1, seen.ids[0]);
     try std.testing.expectEqual(id2, seen.ids[1]);
+}
+
+test "Queue: takeHead persists the job as started, so recovery treats it as interrupted" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root);
+    const path = try std.fmt.allocPrint(gpa, "{s}/mod-queue.json", .{root});
+    defer gpa.free(path);
+
+    {
+        var q = Queue.init(gpa, io, null, noopRunner, null);
+        defer q.deinit();
+        try q.setPersistPath(path);
+        _ = try testEnqueue(&q, 31);
+        const j = q.takeHead().?;
+        _ = j;
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(64 * 1024));
+        defer gpa.free(bytes);
+        try std.testing.expect(std.mem.indexOf(u8, bytes, "\"phase\": \"preparing\"") != null);
+        // The app dies here: no finishHead, no further persist.
+    }
+
+    var fresh = Queue.init(gpa, io, null, noopRunner, null);
+    defer fresh.deinit();
+    try fresh.setPersistPath(path);
+    var rec = (try fresh.loadPersisted()).?;
+    defer rec.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 1), rec.jobs.len);
+    try std.testing.expect(rec.jobs[0].was_running);
+    try std.testing.expectEqual(@as(u64, 31), rec.jobs[0].mod_thread_id);
 }

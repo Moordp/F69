@@ -456,8 +456,9 @@ fn rollbackInterruptedJob(
     const layout = mods_act.modTrackerLayout(io, alloc, install.install_path) catch return;
     defer mods_act.freeModTrackerLayout(alloc, layout);
 
-    var mod_id_buf: [32]u8 = undefined;
-    const mod_id_str = std.fmt.bufPrint(&mod_id_buf, "{d}", .{rec.mod_thread_id}) catch return;
+    // Tracker entries are keyed by the recipe slug (see runOneModJob),
+    // not the thread id.
+    const mod_id_str = rec.mod_recipe_id;
 
     var log_obj = installer_mod.Tracker.load(alloc, io, layout.tracker_path) catch return;
     defer log_obj.deinit(alloc);

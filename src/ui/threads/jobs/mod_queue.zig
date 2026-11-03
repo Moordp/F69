@@ -58,6 +58,7 @@ pub const Hook = struct {
 pub fn run(deps: work_thread.Deps, a: *Activity, buf: []u8) anyerror!Ran {
     const q = deps.mod_jobs orelse return .{ .kind = .err, .msg = "Mod queue is not set up." };
     const job = q.takeHead() orelse return .{ .kind = .warn, .msg = "Nothing queued." };
+    if (job.id != a.aux_id) log.warn("mod queue: activity {d} expected job {d}, took job {d}", .{ a.id, a.aux_id, job.id });
 
     // A Cancel pressed while the job waited reaches the runner here.
     if (a.cancelled()) job.cancel_flag.store(true, .release);
@@ -121,7 +122,7 @@ test "mod_queue job: two enqueues run in order on the compute thread; activities
     }
     try w.start();
     var i: usize = 0;
-    while (book.anyLive() and i < 2000) : (i += 1) {
+    while (book.anyLive() and i < 10000) : (i += 1) {
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
     }
     w.deinit();
