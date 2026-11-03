@@ -70,6 +70,11 @@ pub fn recipeEditorScreen(frame: *Frame) !bool {
         return true;
     };
 
+    // Plan preview (simulation + archive / install folder lists) runs on
+    // the compute thread, once per change of the plan inputs. Every
+    // renderer below reads `w_ptr.sim_cache`, stale or not.
+    actions.ensurePlanSim(frame, game, w_ptr);
+
     // Linear wizard with 2 user-visible steps. Internally we reuse the
     // existing WizardStep enum but only ever resolve to .install or
     // .meta — the old .review / .relations pages were redundant with
@@ -506,24 +511,22 @@ fn wizardBrowseMenu(
     }
 }
 
+/// The cached preview's simulation, if any.
+fn cachedSim(w: *state_mod.WizardState) ?*const installer_mod.SimulationResult {
+    if (w.sim_cache) |*c| {
+        if (c.sim) |*s| return s;
+    }
+    return null;
+}
+
 fn renderWizardInstallBlocks(frame: *Frame, game: *const library.Game, w: *state_mod.WizardState) void {
-    // Simulate the current plan once per paint. Block cards pull
-    // per-step impact lines from the result.
-    var sim_opt = actions.simulateCurrentPlan(frame, game);
-    defer if (sim_opt) |*s| s.deinit();
-    const sim_ptr: ?*const installer_mod.SimulationResult = if (sim_opt) |*s| s else null;
+    _ = game;
+    // Block cards pull per-step impact lines from the cached preview.
+    const sim_ptr = cachedSim(w);
 
     // Suggestion sources for the Browse… menus on each path field.
-    const modfile_id = w.modfile_id_buf[0..w.modfile_id_len];
-    const archive_path_opt = actions.modfileArchivePath(frame, game, modfile_id);
-    defer if (archive_path_opt) |p| frame.lib.alloc.free(p);
-    const archive_dirs_opt = if (archive_path_opt) |p| actions.archiveTopDirs(frame, p) else null;
-    defer if (archive_dirs_opt) |d| actions.freeTopDirs(frame.lib.alloc, d);
-    const archive_dirs: []const []const u8 = if (archive_dirs_opt) |d| @as([]const []const u8, d) else &.{};
-
-    const install_dirs_opt = actions.installTopDirs(frame, game);
-    defer if (install_dirs_opt) |d| actions.freeTopDirs(frame.lib.alloc, d);
-    const install_dirs: []const []const u8 = if (install_dirs_opt) |d| @as([]const []const u8, d) else &.{};
+    const archive_dirs: []const []const u8 = if (w.sim_cache) |*c| @as([]const []const u8, c.archive_dirs) else &.{};
+    const install_dirs: []const []const u8 = if (w.sim_cache) |*c| @as([]const []const u8, c.install_dirs) else &.{};
 
     // Block stack. Each block renders as a self-contained card with
     // its own border / background so the user can see them as
@@ -696,7 +699,7 @@ fn renderSimulationDetail(frame: *Frame, w: *state_mod.WizardState, sim: *const 
 
     // Root header — "<install_path>/" with aggregate counts. The
     // path here is the GAME ROOT (after wrapper-folder detection in
-    // `simulateCurrentPlan`), so it matches where files will actually
+    // the plan-sim job), so it matches where files will actually
     // land on disk.
     {
         var hdr_buf: [768]u8 = undefined;
@@ -1012,20 +1015,28 @@ fn truncMiddle(out_buf: []u8, s: []const u8, max_len: usize) []const u8 {
 /// is the existing simulation panel — what the install dir will look
 /// like after the plan runs.
 fn renderWizardPreviewPane(frame: *Frame, game: *const library.Game, w: *state_mod.WizardState) void {
+    _ = game;
     var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both });
     defer scroll.deinit();
+
+    // The preview job runs on the compute thread; the panes below show
+    // the last result meanwhile.
+    if (w.sim_pending) {
+        dvui.labelNoFmt(@src(), "Updating preview\u{2026}", .{}, .{
+            .color_text = .{ .color = helpTextColor() },
+            .tag = "recipe-preview-updating",
+        });
+    }
 
     // -- Archive tree (top-level entries only) --
     dvui.labelNoFmt(@src(), "Archive contents", .{}, .{ .color_text = .{ .color = tokens.toDvui(tokens.active.acc, dvui.Color) } });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 4 } });
 
-    const modfile_id = w.modfile_id_buf[0..w.modfile_id_len];
-    const archive_path_opt = actions.modfileArchivePath(frame, game, modfile_id);
-    defer if (archive_path_opt) |p| frame.lib.alloc.free(p);
-
-    if (archive_path_opt) |archive_path| {
-        if (actions.archiveTopDirs(frame, archive_path)) |dirs| {
-            defer actions.freeTopDirs(frame.lib.alloc, dirs);
+    if (w.sim_cache == null) {
+        // First preview still on its way.
+    } else if (w.sim_cache.?.archive_linked) {
+        if (w.sim_cache.?.archive_ok) {
+            const dirs = w.sim_cache.?.archive_dirs;
             if (dirs.len == 0) {
                 dvui.label(@src(), "  (archive has no top-level folders — files sit at the root)", .{}, .{
                     .color_text = .{ .color = helpTextColor() },
@@ -1107,9 +1118,7 @@ fn renderWizardPreviewPane(frame: *Frame, game: *const library.Game, w: *state_m
     }
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
 
-    var sim_opt = actions.simulateCurrentPlan(frame, game);
-    defer if (sim_opt) |*s| s.deinit();
-    const sim_ptr: ?*const installer_mod.SimulationResult = if (sim_opt) |*s| s else null;
+    const sim_ptr = cachedSim(w);
     {
         var wrap = dvui.box(@src(), .{ .dir = .vertical }, .{
             .expand = .horizontal,
@@ -1123,13 +1132,11 @@ fn renderWizardPreviewPane(frame: *Frame, game: *const library.Game, w: *state_m
 /// Back-compat helper — used by other call sites that still want the
 /// embedded simulation panel without the archive-tree header.
 fn renderSimulationSummary(frame: *Frame, game: *const library.Game) void {
-    var sim_opt = actions.simulateCurrentPlan(frame, game);
-    defer if (sim_opt) |*s| s.deinit();
-    const sim_ptr: ?*const installer_mod.SimulationResult = if (sim_opt) |*s| s else null;
-
+    _ = game;
     // Use the same panel as the install-blocks step so Review reads
     // identically — same details toggle, same aggregate counts.
     const w = &(frame.state.wizard orelse return);
+    const sim_ptr = cachedSim(w);
     {
         // Distinct parent so the Review preview's widget ids don't
         // collide with the Install-blocks preview (same code, different
@@ -1289,7 +1296,7 @@ fn renderWizardBlockRow(
             _ = dvui.separator(@src(), .{ .expand = .horizontal, .id_extra = idx });
             _ = dvui.spacer(@src(), .{ .id_extra = idx, .min_size_content = .{ .w = 1, .h = 4 } });
             const imp = s.impacts[idx];
-            renderBlockImpactLine(b.kind, imp);
+            renderBlockImpactLine(b.kind, imp, idx);
         }
         // Inline diagnostics for THIS block under the impact line.
         for (s.diagnostics) |d| {
@@ -1310,9 +1317,11 @@ fn renderWizardBlockRow(
 /// One-line "Will write N file(s), X.X MiB" under the block header
 /// when the simulator has data for this block. Helps the user verify
 /// each step before saving.
-fn renderBlockImpactLine(kind: state_mod.WizardBlockKind, imp: installer_mod.simulate_mod.StepImpact) void {
+fn renderBlockImpactLine(kind: state_mod.WizardBlockKind, imp: installer_mod.simulate_mod.StepImpact, idx: usize) void {
+    // Tests find the first block's line by this tag.
+    const tag: ?[]const u8 = if (idx == 0) "recipe-impact-line-0" else null;
     if (imp.no_op) {
-        dvui.label(@src(), "No effect from this step yet.", .{}, .{ .color_text = .{ .color = helpTextColor() } });
+        dvui.label(@src(), "No effect from this step yet.", .{}, .{ .color_text = .{ .color = helpTextColor() }, .tag = tag });
         return;
     }
     switch (kind) {
@@ -1328,23 +1337,23 @@ fn renderBlockImpactLine(kind: state_mod.WizardBlockKind, imp: installer_mod.sim
             const line = std.fmt.bufPrint(&buf, "Will write {d} file(s), {s}{s}", .{
                 imp.files_written, size_txt, mod_part,
             }) catch "";
-            dvui.labelNoFmt(@src(), line, .{}, .{ .color_text = .{ .color = style.labelDim() } });
+            dvui.labelNoFmt(@src(), line, .{}, .{ .color_text = .{ .color = style.labelDim() }, .tag = tag });
         },
         .move => {
             if (imp.files_written == 0) return;
-            dvui.label(@src(), "Will relocate 1 file.", .{}, .{ .color_text = .{ .color = style.labelDim() } });
+            dvui.label(@src(), "Will relocate 1 file.", .{}, .{ .color_text = .{ .color = style.labelDim() }, .tag = tag });
         },
         .delete => {
             if (imp.deletions == 0) return;
             var buf: [64]u8 = undefined;
             const line = std.fmt.bufPrint(&buf, "Will remove {d} path(s).", .{imp.deletions}) catch "";
-            dvui.labelNoFmt(@src(), line, .{}, .{ .color_text = .{ .color = style.labelDim() } });
+            dvui.labelNoFmt(@src(), line, .{}, .{ .color_text = .{ .color = style.labelDim() }, .tag = tag });
         },
         .chmod_x => {
             if (imp.mode_changes == 0) return;
             var buf: [64]u8 = undefined;
             const line = std.fmt.bufPrint(&buf, "Will mark {d} file(s) runnable.", .{imp.mode_changes}) catch "";
-            dvui.labelNoFmt(@src(), line, .{}, .{ .color_text = .{ .color = style.labelDim() } });
+            dvui.labelNoFmt(@src(), line, .{}, .{ .color_text = .{ .color = style.labelDim() }, .tag = tag });
         },
     }
 }

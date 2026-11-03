@@ -55,6 +55,7 @@ test {
     _ = @import("threads/jobs/compat.zig");
     _ = @import("threads/jobs/reanalyse.zig");
     _ = @import("threads/jobs/mod_queue.zig");
+    _ = @import("threads/jobs/plan_sim.zig");
     _ = @import("mod_job_queue.zig");
     _ = @import("dl_controls.zig");
     _ = @import("screens/downloads.zig");
@@ -81,6 +82,9 @@ pub const threads = types.threads;
 pub const FileCache = types.FileCache;
 pub const thumbPath = actions.thumbPath;
 pub const recoverModJobsFromDisk = actions.recoverModJobsFromDisk;
+pub const doAddModfile = actions.doAddModfile;
+pub const modfilesForGame = actions.modfilesForGame;
+pub const openWizardForModfile = actions.openWizardForModfile;
 pub const startSyncAll = actions.startSyncAll;
 pub const syncGame = actions.syncGame;
 pub const doLogin = actions.doLogin;
@@ -303,7 +307,9 @@ pub fn runMainLoop(
     defer {
         // Modfile cache + clash modal both own heap state — release
         // them on shutdown so DebugAllocator doesn't flag leaks.
-        // Wizard state is inline on State (no heap).
+        // Wizard state is inline on State, except its cached plan
+        // preview (owned by the compute worker's allocator, `gpa`).
+        if (state.wizard) |*w| actions.freeWizardSimCache(w, gpa);
         actions.freeModfileCacheState(&state, lib.alloc);
         actions.freeClashModalState(&state, lib.alloc);
         actions.freeCoverLoads(&state, lib.alloc);

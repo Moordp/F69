@@ -3563,3 +3563,116 @@ test "threads: recover() re-enqueues an interrupted mod install and it runs on t
     try std.testing.expect(std.mem.indexOf(u8, after, "mod-r") == null);
     tlog("threads-mod-queue-recover: OK", .{});
 }
+
+/// Steps frames until the open wizard has no preview job in flight
+/// (bounded, ~10 s).
+fn stepUntilPlanSimIdle(h: *ui.Harness, io: std.Io) !void {
+    var i: usize = 0;
+    while (i < 2000) : (i += 1) {
+        _ = try dvui.testing.step(threadsRender);
+        const w = &(h.state.wizard orelse return error.TestUnexpectedResult);
+        if (!w.sim_pending and w.sim_cache != null) return;
+        std.Io.sleep(io, .fromMilliseconds(5), .awake) catch {};
+    }
+    return error.PlanSimDidNotLand;
+}
+
+test "threads: recipe editor simulates the plan on the compute thread, once per change" {
+    tlog("START: threads-plan-sim", .{});
+    // Same std.Io read-after-write park as F6 (reads the archive it just copied).
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(8) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var env = try TestEnv.init(gpa, "threads-plan-sim");
+    defer env.deinit();
+    var t = try dvui.testing.init(.{ .allocator = gpa, .io = io, .window_size = .{ .w = 1280, .h = 1600 } });
+    defer t.deinit();
+    var h = try ui.Harness.init(gpa, io, t.window, env.root);
+    defer h.deinit();
+
+    // Seed: a game with one install (a Ren'Py-ish root) and the F6 mod
+    // archive registered as its modfile.
+    const tid: u64 = 66;
+    try env.writeFile("install/game/script.rpy", "label start:\n");
+    try env.writeFile("install/Game.sh", "#!/bin/sh\n");
+    const install_path = try env.path("install");
+    defer gpa.free(install_path);
+    _ = try h.lib.insertIfMissing(&.{ .f95_thread_id = tid, .name = "Plan Game", .developer = "Dev", .engine = .renpy });
+    try h.lib.upsertInstall(&.{
+        .id = "66666666-5555-6666-7777-888888888888".*,
+        .game_thread_id = tid,
+        .version = "1.0",
+        .install_path = install_path,
+        .recipe_id = "",
+        .installed_at = 0,
+        .source = .manual,
+    });
+    try h.reloadGames();
+    try env.writeFile("mod.tar.gz", @embedFile("fixtures/mod-fixture.tar.gz"));
+    const archive = try env.path("mod.tar.gz");
+    defer gpa.free(archive);
+
+    var fr = h.frame();
+    threads_frame = &fr;
+    defer threads_frame = null;
+    const game = blk: {
+        for (h.games) |*g| if (g.f95_thread_id == tid) break :blk g;
+        return error.TestUnexpectedResult;
+    };
+    ui.doAddModfile(&fr, game, archive);
+    const mods = ui.modfilesForGame(&fr, game);
+    try std.testing.expectEqual(@as(usize, 1), mods.len);
+    var id_buf: [64]u8 = undefined;
+    const id_n = @min(mods[0].id.len, id_buf.len);
+    @memcpy(id_buf[0..id_n], mods[0].id[0..id_n]);
+
+    // Open the editor the way the Mods page does.
+    h.state.screen = .mods_for_game;
+    ui.openWizardForModfile(&fr, game, id_buf[0..id_n]);
+    try std.testing.expectEqual(ui.Screen.recipe_editor, h.state.screen);
+    try std.testing.expect(h.state.wizard != null);
+
+    // 20 frames with an unchanged plan: one preview job, not one per frame.
+    const start_runs = fr.book.started_count.get(.plan_sim);
+    var i: usize = 0;
+    while (i < 20) : (i += 1) {
+        _ = try dvui.testing.step(threadsRender);
+        std.Io.sleep(io, .fromMilliseconds(5), .awake) catch {};
+    }
+    try stepUntilPlanSimIdle(h, io);
+    _ = try dvui.testing.step(threadsRender);
+    try std.testing.expectEqual(start_runs + 1, fr.book.started_count.get(.plan_sim));
+    {
+        const w = &h.state.wizard.?;
+        const c = &w.sim_cache.?;
+        const sim = &(c.sim orelse return error.TestUnexpectedResult);
+        try std.testing.expect(sim.impacts.len >= 1);
+        try std.testing.expect(sim.impacts[0].files_written >= 1);
+        try std.testing.expect(c.archive_ok);
+        try std.testing.expectEqual(@as(usize, 1), c.archive_dirs.len);
+        try std.testing.expectEqualStrings("game", c.archive_dirs[0]);
+        try std.testing.expectEqual(@as(usize, 1), c.install_dirs.len);
+    }
+    try dvui.testing.expectVisible("recipe-impact-line-0");
+    // The quiet activity left the book once its outcome was stored.
+    try std.testing.expectEqual(@as(usize, 0), toolCount(&fr, .plan_sim, tid));
+
+    // Edit a path field (what typing into the block's "to" field does):
+    // exactly one more run.
+    {
+        const w = &h.state.wizard.?;
+        @memset(&w.blocks[0].a_buf, 0);
+        @memcpy(w.blocks[0].a_buf[0..4], "game");
+    }
+    i = 0;
+    while (i < 20) : (i += 1) {
+        _ = try dvui.testing.step(threadsRender);
+        std.Io.sleep(io, .fromMilliseconds(5), .awake) catch {};
+    }
+    try stepUntilPlanSimIdle(h, io);
+    try std.testing.expectEqual(start_runs + 2, fr.book.started_count.get(.plan_sim));
+    try stepUntilBookIdle(&fr, io);
+    tlog("threads-plan-sim: OK", .{});
+}

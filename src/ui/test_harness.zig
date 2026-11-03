@@ -304,6 +304,14 @@ pub const Harness = struct {
         // on State (folder scan, install jobs, caches) leak under the test
         // allocator. Run while the services are still alive.
         const lib_alloc = self.lib.alloc;
+        {
+            // A preview job that ended before the worker stopped may
+            // still sit in the event queue: drain it into the wizard
+            // cache, then free the cache.
+            var f = self.frame();
+            actions.drainThreads(&f);
+            if (self.state.wizard) |*w| actions.freeWizardSimCache(w, self.worker.deps.alloc);
+        }
         actions.freeModfileCacheState(&self.state, lib_alloc);
         actions.freeClashModalState(&self.state, lib_alloc);
         actions.freeCoverLoads(&self.state, lib_alloc);

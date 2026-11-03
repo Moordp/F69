@@ -482,7 +482,15 @@ test "historyOrder: terminal jobs only, newest finished first, created_at fallba
 /// The tool activities of this frame (frame arena copy): live first,
 /// then finished, newest first. Empty on out-of-memory.
 fn toolViews(frame: *Frame) []const ToolView {
-    return frame.book.snapshot(dvui.currentWindow().arena()) catch &.{};
+    const all = frame.book.snapshot(dvui.currentWindow().arena()) catch return &.{};
+    // Quiet activities (the recipe editor's preview) are not tools.
+    var n: usize = 0;
+    for (all) |v| {
+        if (v.kind.quiet()) continue;
+        all[n] = v;
+        n += 1;
+    }
+    return all[0..n];
 }
 
 fn liveToolCount(views: []const ToolView) u32 {

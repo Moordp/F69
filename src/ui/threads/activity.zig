@@ -6,7 +6,28 @@
 const std = @import("std");
 const downloads = @import("downloads");
 
-pub const Kind = enum { convert, decrypt, compat_fix, rpa_extract, hash, reanalyse, plan_sim, folder_scan, mod_install, mod_uninstall, sign_in, launch_probe };
+pub const Kind = enum {
+    convert,
+    decrypt,
+    compat_fix,
+    rpa_extract,
+    hash,
+    reanalyse,
+    plan_sim,
+    folder_scan,
+    mod_install,
+    mod_uninstall,
+    sign_in,
+    launch_probe,
+
+    /// Background work the user did not start as a tool (the recipe
+    /// editor's preview): not listed in the Tools section or the game
+    /// strip, does not block a tool for the game, and is removed from
+    /// the book as soon as its outcome is applied.
+    pub fn quiet(self: Kind) bool {
+        return self == .plan_sim;
+    }
+};
 pub const Status = enum(u8) { queued, running, done, failed, cancelled };
 pub const ResultKind = enum(u8) { ok, warn, err };
 
@@ -103,6 +124,9 @@ pub const Book = struct {
     lock: std.Io.Mutex = .init,
     items: std.ArrayList(*Activity) = .empty,
     next_id: u64 = 1,
+    /// Activities started since `init`, by kind. Tests count runs with it
+    /// (quiet activities are removed from `items` once they end).
+    started_count: std.EnumArray(Kind, u32) = .initFill(0),
 
     pub fn init(alloc: std.mem.Allocator, io: std.Io) Book {
         return .{ .alloc = alloc, .io = io };
@@ -124,6 +148,7 @@ pub const Book = struct {
         a.title_len = copyTrunc(&a.title, title);
         try self.items.append(self.alloc, a);
         self.next_id += 1;
+        self.started_count.getPtr(kind).* += 1;
         return a;
     }
 
@@ -208,10 +233,12 @@ pub const Book = struct {
         return false;
     }
 
+    /// True while a tool (not a quiet activity) is queued or running for
+    /// `tid`.
     pub fn liveForGame(self: *Book, tid: u64) bool {
         self.lock.lockUncancelable(self.io);
         defer self.lock.unlock(self.io);
-        for (self.items.items) |a| if (a.isLive() and a.game_thread_id == tid) return true;
+        for (self.items.items) |a| if (a.isLive() and a.game_thread_id == tid and !a.kind.quiet()) return true;
         return false;
     }
 
@@ -275,4 +302,19 @@ test "Book: snapshot orders live first, then finished newest first; phase trunca
     const long: [150]u8 = @splat('p');
     live.setPhase(std.testing.io, &long);
     try std.testing.expectEqual(@as(u8, 96), live.phase_len);
+}
+
+test "Book: a quiet kind does not block a tool for the game; started_count counts every start" {
+    var book = Book.init(std.testing.allocator, std.testing.io);
+    defer book.deinit();
+    try std.testing.expect(Kind.plan_sim.quiet() and !Kind.decrypt.quiet());
+    const p = try book.start(.plan_sim, 7, "Plan");
+    try std.testing.expect(!book.liveForGame(7));
+    const d = try book.start(.decrypt, 7, "Decrypt");
+    try std.testing.expect(book.liveForGame(7));
+    book.finish(p, .ok, "x", 1);
+    book.finish(d, .ok, "x", 1);
+    book.remove(p.id);
+    try std.testing.expectEqual(@as(u32, 1), book.started_count.get(.plan_sim));
+    try std.testing.expectEqual(@as(u32, 1), book.started_count.get(.decrypt));
 }

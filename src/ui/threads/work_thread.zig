@@ -18,6 +18,7 @@ const rpa_job = @import("jobs/rpa.zig");
 const compat_job = @import("jobs/compat.zig");
 const reanalyse_job = @import("jobs/reanalyse.zig");
 const mod_queue_job = @import("jobs/mod_queue.zig");
+const plan_sim_job = @import("jobs/plan_sim.zig");
 
 const Activity = activity_mod.Activity;
 const Book = activity_mod.Book;
@@ -42,6 +43,9 @@ pub const WorkOutcome = union(enum) {
     compat: CompatOutcome,
     /// Owns `updates`; `handleWorkDone` writes and frees them.
     reanalyse: ReanalyseOutcome,
+    /// Owns the simulation and folder lists; `handleWorkDone` stores it
+    /// in the recipe editor's cache (or frees it).
+    plan_sim: PlanSimOutcome,
     /// Tests only.
     fake: struct { steps: u32 },
 };
@@ -63,6 +67,7 @@ pub const WorkJob = union(enum) {
     rpa_extract: RpaJob,
     compat_fix: CompatJob,
     reanalyse: ReanalyseJob,
+    plan_sim: PlanSimJob,
     fake: FakeJob,
 };
 
@@ -74,6 +79,8 @@ pub const CompatJob = compat_job.CompatJob;
 pub const CompatOutcome = compat_job.CompatOutcome;
 pub const ReanalyseJob = reanalyse_job.ReanalyseJob;
 pub const ReanalyseOutcome = reanalyse_job.ReanalyseOutcome;
+pub const PlanSimJob = plan_sim_job.PlanSimJob;
+pub const PlanSimOutcome = plan_sim_job.PlanSimOutcome;
 
 /// Frees what a job owns. Called once per job: after it ran, or when it
 /// is dropped without running.
@@ -84,6 +91,7 @@ fn freeJob(job: WorkJob) void {
         .rpa_extract => |r| r.deinit(),
         .compat_fix => |c| c.deinit(),
         .reanalyse => |r| r.deinit(),
+        .plan_sim => |p| p.deinit(),
         .mod_queue, .fake => {},
     }
 }
@@ -159,6 +167,10 @@ fn run(deps: Deps, job: WorkJob, a: *Activity, buf: []u8) anyerror!Done {
         .reanalyse => |j| blk: {
             const r = try reanalyse_job.run(deps, j, a, buf);
             break :blk .{ .outcome = .{ .reanalyse = r.outcome }, .kind = r.kind, .msg = r.msg };
+        },
+        .plan_sim => |j| blk: {
+            const r = try plan_sim_job.run(deps, j, a, buf);
+            break :blk .{ .outcome = .{ .plan_sim = r.outcome }, .kind = r.kind, .msg = r.msg };
         },
         .fake => |f| runFake(deps.io, f, a, buf),
     };

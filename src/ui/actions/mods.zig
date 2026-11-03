@@ -8,7 +8,9 @@
 //   - resolve helpers used by mods page + launch + installer
 //     (`resolveModsPageInstall`, `resolveConvertSpec`,
 //     `resolveGameRoot`, `modTrackerLayout`, `archiveTopDirs`,
-//     `installTopDirs`, `simulateCurrentPlan`, `modfileArchivePath`).
+//     `installTopDirs`, `simulatePlan`, `modfileArchivePath`).
+//   - recipe editor preview job (`planInputHash`, `ensurePlanSim`,
+//     `applyPlanSimOutcome`, `freeWizardSimCache`).
 //   - recipe wizard (`openWizardForModfile`, `wizardAddBlock`,
 //     `wizardRemoveBlock`, `wizardSave`, `closeWizard` + internals).
 //   - mod-recipe delete (armed + unarmed) + `clearPendingDelete`.
@@ -28,6 +30,7 @@ const common = @import("common.zig");
 const threads_act = @import("threads.zig");
 const launch_act = @import("launch.zig");
 const reanalyse_job = @import("../threads/jobs/reanalyse.zig");
+const plan_sim_job = @import("../threads/jobs/plan_sim.zig");
 
 const Frame = types.Frame;
 const State = types.State;
@@ -876,10 +879,10 @@ pub fn modfileArchivePath(
 /// roots (`game/`, `BepInEx/`, etc.), so the picker gives the user
 /// real labels to pick instead of asking them to remember paths.
 ///
-/// Caller frees with `freeTopDirs`.
-pub fn archiveTopDirs(frame: *Frame, archive_path: []const u8) ?[][]u8 {
+/// Opens the archive: compute thread only (the plan-sim job). Null when
+/// the archive cannot be read. Caller frees with `freeTopDirs`.
+pub fn archiveTopDirs(alloc: std.mem.Allocator, archive_path: []const u8) ?[][]u8 {
     const archive = installer_mod.preset_detect; // re-exports listEntries/freeEntryList
-    const alloc = frame.lib.alloc;
     const entries = archive.listEntries(alloc, archive_path) catch return null;
     defer archive.freeEntryList(alloc, entries);
 
@@ -924,26 +927,16 @@ pub fn freeTopDirs(alloc: std.mem.Allocator, dirs: [][]u8) void {
     if (dirs.len > 0) alloc.free(dirs);
 }
 
-/// Sorted, deduped first-level directory names from the game's install
-/// dir. Lets the wizard's Browse… menu suggest real install-side paths
-/// (`game/`, `lib/`, `renpy/`, etc.) for destination fields.
+/// Sorted, deduped first-level directory names of `root` (the game
+/// root the installer will target). Lets the wizard's Browse… menu
+/// suggest real install-side paths (`game/`, `lib/`, `renpy/`, etc.)
+/// for destination fields. Skips f69's own dot-dirs.
 ///
-/// Uses the latest install row's `install_path` — same source as
-/// `doLaunchGame`'s fallback. Caller frees with `freeTopDirs`.
-pub fn installTopDirs(frame: *Frame, parent_game: *const library.Game) ?[][]u8 {
-    const alloc = frame.lib.alloc;
-    const install_opt = frame.lib.latestInstallForGame(parent_game.f95_thread_id) catch null;
-    const install = install_opt orelse return null;
-    defer frame.lib.freeInstall(install);
-
-    // Suggestions reflect the game-root view, not the bare extract,
-    // so users see the same dirs the installer will actually target.
-    const root = resolveGameRoot(frame.io, install.install_path, alloc) catch null;
-    const probe = root orelse install.install_path;
-    defer if (root) |r| alloc.free(r);
-
-    var dir = std.Io.Dir.cwd().openDir(frame.io, probe, .{ .iterate = true }) catch return null;
-    defer dir.close(frame.io);
+/// Lists a directory: compute thread only (the plan-sim job). Null when
+/// `root` cannot be opened. Caller frees with `freeTopDirs`.
+pub fn installTopDirs(alloc: std.mem.Allocator, io: std.Io, root: []const u8) ?[][]u8 {
+    var dir = std.Io.Dir.cwd().openDir(io, root, .{ .iterate = true }) catch return null;
+    defer dir.close(io);
 
     var seen: std.StringHashMap(void) = .init(alloc);
     defer {
@@ -958,7 +951,7 @@ pub fn installTopDirs(frame: *Frame, parent_game: *const library.Game) ?[][]u8 {
     }
 
     var iter = dir.iterate();
-    while (iter.next(frame.io) catch null) |entry| {
+    while (iter.next(io) catch null) |entry| {
         if (entry.kind != .directory) continue;
         // Skip f69's own bookkeeping subdirs so they don't pollute
         // the Browse menu.
@@ -983,82 +976,58 @@ pub fn installTopDirs(frame: *Frame, parent_game: *const library.Game) ?[][]u8 {
     return out.toOwnedSlice(alloc) catch null;
 }
 
-/// Build a SimulationResult for the wizard's current state. Returns
-/// null on lookup failure (no modfile, no install dir, no archive
-/// readable). Caller owns the returned `SimulationResult` and must
-/// call `deinit`. Cheap enough (~sub-ms for typical mods) to invoke
-/// every paint of the install-blocks / Review steps.
-pub fn simulateCurrentPlan(frame: *Frame, parent_game: *const library.Game) ?installer_mod.SimulationResult {
-    const state = frame.state;
-    const alloc = frame.lib.alloc;
-    const w = &(state.wizard orelse return null);
-
-    // 1. Locate the archive on disk via modfile lookup.
-    const modfile_id = w.modfile_id_buf[0..w.modfile_id_len];
-    if (modfile_id.len == 0) return null;
-    const mods = modfilesForGame(frame, parent_game);
-    var disk_name: []const u8 = "";
-    for (mods) |m| {
-        if (std.mem.eql(u8, m.id, modfile_id)) {
-            disk_name = m.disk_name;
-            break;
-        }
-    }
-    if (disk_name.len == 0) return null;
-    const archive_path = std.fmt.allocPrint(alloc, "{s}/{d}/{s}", .{
-        frame.info.mod_archives_dir,
-        parent_game.f95_thread_id,
-        disk_name,
-    }) catch return null;
-    defer alloc.free(archive_path);
-
-    // 2. Resolve the install dir from the wizard's picked version,
-    //    falling back to `latestInstallForGame` when the buffer is
-    //    empty (e.g. before the user touched the version dropdown).
-    var install_buf: [768]u8 = undefined;
-    const for_game_version = w.for_game_version_buf[0..std.mem.indexOfScalar(u8, &w.for_game_version_buf, 0) orelse w.for_game_version_buf.len];
-    const raw_install: []const u8 = blk: {
-        if (for_game_version.len > 0) {
-            const installs = frame.lib.listInstalls(parent_game.f95_thread_id) catch break :blk "";
-            defer if (installs.len > 0) frame.lib.freeInstalls(installs);
-            for (installs) |inst| {
-                if (std.mem.eql(u8, inst.version, for_game_version)) {
-                    break :blk std.fmt.bufPrint(&install_buf, "{s}", .{inst.install_path}) catch break :blk "";
-                }
-            }
-        }
-        const latest = frame.lib.latestInstallForGame(parent_game.f95_thread_id) catch null;
-        if (latest) |i| {
-            defer frame.lib.freeInstall(i);
-            break :blk std.fmt.bufPrint(&install_buf, "{s}", .{i.install_path}) catch break :blk "";
-        }
-        break :blk "";
-    };
-    if (raw_install.len == 0) return null;
-
-    // 2.5 Resolve the game root inside the install dir. F95 archives
-    //     commonly nest the game one folder deep (`Game_v1.2/www/...`);
-    //     mods target the game's content tree, not the bare extract.
-    //     The simulator preview shows the resolved root in its header
-    //     so the user can sanity-check.
-    const game_root = resolveGameRoot(frame.io, raw_install, alloc) catch return null;
-    defer alloc.free(game_root);
-
-    // 3. Tracker path is conventional — `<game_root>/.f69-mods.json`.
+/// Simulates `steps` from `archive_path` against `game_root` (already
+/// resolved with `resolveGameRoot`), reading the game's mod tracker for
+/// overwrite annotations. Opens the archive and walks the install:
+/// compute thread only (the plan-sim job). Null on failure. Caller
+/// owns the result and must call `deinit`.
+pub fn simulatePlan(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    archive_path: []const u8,
+    steps: []const recipe.InstallStep,
+    game_root: []const u8,
+) ?installer_mod.SimulationResult {
+    // Tracker path is conventional — `<game_root>/.f69-mods.json`.
     var tracker_buf: [1024]u8 = undefined;
     const tracker_path = std.fmt.bufPrint(&tracker_buf, "{s}/.f69-mods.json", .{game_root}) catch null;
+    return installer_mod.simulateInstall(alloc, io, archive_path, steps, game_root, tracker_path) catch null;
+}
 
-    // 4. Materialize the plan from wizard blocks. We use a scratch
-    //    arena so cleanup is single-deinit; the simulator copies any
-    //    strings it needs into its own arena.
-    var scratch = std.heap.ArenaAllocator.init(alloc);
-    defer scratch.deinit();
-    const scratch_alloc = scratch.allocator();
+/// Hash of every wizard input the plan preview depends on: the modfile,
+/// its archive path, the picked game version and each install block
+/// (kind, strip, both path fields). Pure — the editor calls it every
+/// frame and submits a new preview job only when it changes.
+pub fn planInputHash(w: *const state_mod.WizardState, archive_path: ?[]const u8, modfile_id: []const u8) u64 {
+    var h = std.hash.Wyhash.init(0);
+    const Feed = struct {
+        fn bytes(hp: *std.hash.Wyhash, s: []const u8) void {
+            // Length prefix keeps ("ab","c") and ("a","bc") apart.
+            hp.update(std.mem.asBytes(&s.len));
+            hp.update(s);
+        }
+    };
+    Feed.bytes(&h, modfile_id);
+    if (archive_path) |p| {
+        h.update(&.{1});
+        Feed.bytes(&h, p);
+    } else h.update(&.{0});
+    Feed.bytes(&h, sliceFromBuf(&w.for_game_version_buf));
+    const n = @min(w.block_count, w.blocks.len);
+    h.update(std.mem.asBytes(&n));
+    for (w.blocks[0..n]) |*b| {
+        h.update(&.{ @intFromEnum(b.kind), b.strip });
+        Feed.bytes(&h, sliceFromBuf(&b.a_buf));
+        Feed.bytes(&h, sliceFromBuf(&b.b_buf));
+    }
+    return h.final();
+}
 
+/// The wizard's blocks as install steps. Strings borrow the wizard's
+/// buffers; `scratch` owns only the `chmod_x` path arrays and the list.
+fn wizardPlanSteps(scratch: std.mem.Allocator, w: *const state_mod.WizardState) ![]recipe.InstallStep {
     var steps: std.ArrayList(recipe.InstallStep) = .empty;
-    var i: usize = 0;
-    while (i < w.block_count) : (i += 1) {
-        const b = &w.blocks[i];
+    for (w.blocks[0..@min(w.block_count, w.blocks.len)]) |*b| {
         const a = sliceFromBuf(&b.a_buf);
         const b_s = sliceFromBuf(&b.b_buf);
         const step: recipe.InstallStep = switch (b.kind) {
@@ -1068,16 +1037,101 @@ pub fn simulateCurrentPlan(frame: *Frame, parent_game: *const library.Game) ?ins
             .move => .{ .move = .{ .src = a, .dest = b_s } },
             .delete => .{ .delete = .{ .path = a } },
             .chmod_x => blk: {
-                const paths_arr = scratch_alloc.alloc([]const u8, 1) catch return null;
+                const paths_arr = try scratch.alloc([]const u8, 1);
                 paths_arr[0] = a;
                 break :blk .{ .chmod_x = .{ .paths = paths_arr } };
             },
         };
-        steps.append(scratch_alloc, step) catch return null;
+        try steps.append(scratch, step);
     }
+    return steps.items;
+}
 
-    // 5. Run against the resolved game root, not the bare install dir.
-    return installer_mod.simulateInstall(alloc, frame.io, archive_path, steps.items, game_root, tracker_path) catch null;
+/// Install dir for the wizard's picked game version, falling back to
+/// the latest install row when nothing matches (e.g. before the user
+/// touched the version dropdown). SQL only — no disk access. Caller
+/// frees; null when the game has no install.
+fn wizardInstallPath(frame: *Frame, tid: u64, w: *const state_mod.WizardState) ?[]u8 {
+    const alloc = frame.lib.alloc;
+    const for_game_version = sliceFromBuf(&w.for_game_version_buf);
+    if (for_game_version.len > 0) {
+        const none: []library.Install = &.{};
+        const installs = frame.lib.listInstalls(tid) catch none;
+        defer if (installs.len > 0) frame.lib.freeInstalls(installs);
+        for (installs) |inst| {
+            if (std.mem.eql(u8, inst.version, for_game_version)) return alloc.dupe(u8, inst.install_path) catch null;
+        }
+    }
+    const latest = (frame.lib.latestInstallForGame(tid) catch null) orelse return null;
+    defer frame.lib.freeInstall(latest);
+    return alloc.dupe(u8, latest.install_path) catch null;
+}
+
+/// Per frame, from the recipe editor: when the wizard's plan inputs
+/// changed since the last submitted preview and none is in flight,
+/// reads the install row (SQL, UI thread) and submits one `plan_sim`
+/// compute job. The editor renders `w.sim_cache` meanwhile.
+pub fn ensurePlanSim(frame: *Frame, parent_game: *const library.Game, w: *state_mod.WizardState) void {
+    if (w.sim_pending) return;
+    const alloc = frame.lib.alloc;
+    const modfile_id = w.modfile_id_buf[0..w.modfile_id_len];
+    const archive_path = modfileArchivePath(frame, parent_game, modfile_id);
+    defer if (archive_path) |p| alloc.free(p);
+    const hash = planInputHash(w, archive_path, modfile_id);
+    if (w.sim_cache != null and hash == w.sim_input_hash) return;
+
+    const tid = parent_game.f95_thread_id;
+    const install_path = wizardInstallPath(frame, tid, w);
+    defer if (install_path) |p| alloc.free(p);
+
+    var scratch = std.heap.ArenaAllocator.init(alloc);
+    defer scratch.deinit();
+    const steps = wizardPlanSteps(scratch.allocator(), w) catch return;
+
+    const job = plan_sim_job.PlanSimJob.create(alloc, .{
+        .tid = tid,
+        .archive_path = archive_path,
+        .install_path = install_path orelse "",
+        .steps = steps,
+        .input_hash = hash,
+    }) catch return;
+    const a = frame.book.start(.plan_sim, tid, "Plan") catch {
+        job.deinit();
+        return;
+    };
+    frame.work.submit(.{ .plan_sim = job }, a) catch {
+        // The worker freed the job; the activity never reached it.
+        const now = std.Io.Clock.Timestamp.now(frame.io, .real).raw.toSeconds();
+        frame.book.finish(a, .err, "Out of memory.", now);
+        frame.book.remove(a.id);
+        return;
+    };
+    w.sim_pending = true;
+    w.sim_input_hash = hash;
+}
+
+/// `.plan_sim` outcome, on the UI thread: replaces the wizard's cached
+/// preview, or frees the outcome when the wizard closed meanwhile. A
+/// stale outcome (inputs changed while it ran) is stored too; the next
+/// frame sees the hash differ and submits again.
+pub fn applyPlanSimOutcome(frame: *Frame, outcome: plan_sim_job.PlanSimOutcome) void {
+    const alloc = frame.work.deps.alloc;
+    var o = outcome;
+    if (frame.state.wizard) |*w| {
+        freeWizardSimCache(w, alloc);
+        w.sim_cache = o;
+        w.sim_pending = false;
+    } else {
+        plan_sim_job.freeOutcome(alloc, &o);
+    }
+}
+
+/// Frees the wizard's cached preview and clears the pending flag.
+/// `alloc` is the compute worker's allocator (`frame.work.deps.alloc`).
+pub fn freeWizardSimCache(w: *state_mod.WizardState, alloc: std.mem.Allocator) void {
+    if (w.sim_cache) |*c| plan_sim_job.freeOutcome(alloc, c);
+    w.sim_cache = null;
+    w.sim_pending = false;
 }
 
 /// Two-click delete on a user preset. First call arms; second call on
@@ -1677,6 +1731,9 @@ pub fn openWizardForModfile(frame: *Frame, parent_game: *const library.Game, mod
     // `return_screen` was set at WizardState construction — see the
     // `var w = …` line above. closeWizard / wizardSave use it to
     // bounce back to the right page.
+    // A wizard that is still open (re-open without close) drops its
+    // cached preview first.
+    if (state.wizard) |*old| freeWizardSimCache(old, frame.work.deps.alloc);
     state.wizard = w;
     // Navigate to the full-page recipe editor. The modal wizard has
     // been retired — the editor is its own screen so the preview pane
@@ -1763,6 +1820,7 @@ fn copyToBuf(buf: []u8, src: []const u8) void {
 pub fn closeWizard(frame: *Frame) void {
     const state = frame.state;
     const return_to: state_mod.Screen = if (state.wizard) |*w| w.return_screen else .detail;
+    if (state.wizard) |*w| freeWizardSimCache(w, frame.work.deps.alloc);
     state.wizard = null;
     if (state.screen == .recipe_editor) state.screen = return_to;
 }
@@ -2013,4 +2071,23 @@ test "parseF95Thread: picks the last all-numeric segment" {
         @as(u64, 123),
         parseF95Thread("https://f95zone.to/threads/summertime-saga.123/"),
     );
+}
+
+test "planInputHash: changes when a block path changes, not otherwise" {
+    var a = state_mod.WizardState{ .return_screen = .detail };
+    a.block_count = 1;
+    a.blocks[0] = .{ .kind = .extract, .strip = 1 };
+    @memcpy(a.blocks[0].a_buf[0..1], ".");
+    var b = a;
+    // Fields the preview does not read leave the hash alone.
+    b.step = .meta;
+    b.sim_details_expanded = true;
+    @memcpy(b.name_buf[0..3], "Mod");
+    const h_a = planInputHash(&a, "/m/1/x.zip", "id1");
+    try std.testing.expectEqual(h_a, planInputHash(&b, "/m/1/x.zip", "id1"));
+    // A block path, the archive and the modfile each change it.
+    @memcpy(b.blocks[0].a_buf[0..4], "game");
+    try std.testing.expect(h_a != planInputHash(&b, "/m/1/x.zip", "id1"));
+    try std.testing.expect(h_a != planInputHash(&a, null, "id1"));
+    try std.testing.expect(h_a != planInputHash(&a, "/m/1/x.zip", "id2"));
 }

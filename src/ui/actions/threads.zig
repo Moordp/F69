@@ -104,7 +104,7 @@ fn liveKindForGame(frame: *Frame, tid: u64) ?Kind {
     defer arena.deinit();
     const views = frame.book.snapshot(arena.allocator()) catch return null;
     for (views) |v| {
-        if (v.game_thread_id != tid) continue;
+        if (v.game_thread_id != tid or v.kind.quiet()) continue;
         if (v.status == .queued or v.status == .running) return v.kind;
     }
     return null;
@@ -114,7 +114,7 @@ fn liveKindForGame(frame: *Frame, tid: u64) ?Kind {
 pub fn liveViewForGame(frame: *Frame, arena: std.mem.Allocator, tid: u64) ?threads.activity.View {
     const views = frame.book.snapshot(arena) catch return null;
     for (views) |v| {
-        if (v.game_thread_id != tid) continue;
+        if (v.game_thread_id != tid or v.kind.quiet()) continue;
         if (v.status == .queued or v.status == .running) return v;
     }
     return null;
@@ -179,6 +179,13 @@ fn handleWorkDone(frame: *Frame, activity_id: u64, outcome: threads.work_thread.
         .reanalyse => |r| {
             defer reanalyse_job.freeOutcome(frame.work.deps.alloc, r);
             mods_act.applyReanalyseOutcome(frame, r);
+        },
+        // The recipe editor's preview: cached on the wizard, no toast,
+        // and the quiet activity leaves the book right away.
+        .plan_sim => |p| {
+            mods_act.applyPlanSimOutcome(frame, p);
+            frame.book.remove(activity_id);
+            return;
         },
     }
 

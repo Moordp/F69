@@ -9,6 +9,7 @@ const buf_mod = @import("buf.zig");
 const owned = @import("owned.zig");
 const import_job_mod = @import("import_job.zig");
 const folder_import_job_mod = @import("folder_import_job.zig");
+const plan_sim_job = @import("threads/jobs/plan_sim.zig");
 pub const catalogue_view = @import("catalogue_view.zig");
 
 /// The Downloads tab's multi-part offer: after Part `from - 1` (href in
@@ -321,6 +322,17 @@ pub const WizardState = struct {
     /// case-insensitive. The buffer is fixed-size so the wizard
     /// stays alloc-free.
     preview_search_buf: [128]u8 = @splat(0),
+
+    /// Last plan preview from the compute thread (simulation + archive
+    /// and install folder lists). The editor renders from it, stale or
+    /// not; owned by the worker's allocator, freed with
+    /// `actions.freeWizardSimCache` (closeWizard does it).
+    sim_cache: ?plan_sim_job.PlanSimOutcome = null,
+    /// `planInputHash` of the last submitted preview job.
+    sim_input_hash: u64 = 0,
+    /// A preview job is queued or running; no second one is submitted
+    /// until it lands.
+    sim_pending: bool = false,
 };
 
 /// Lifecycle of a single Sync click. Driven by the UI thread off

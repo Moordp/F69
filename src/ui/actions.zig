@@ -42,7 +42,7 @@
 //                      isModInstalled, doUninstallMod, preset cache
 //                      wiring, recipe wizard, mod-recipe delete,
 //                      doScanModfiles, doDeleteModfile,
-//                      simulateCurrentPlan, archive/install top-dirs,
+//                      plan preview job (ensurePlanSim), archive/install top-dirs,
 //                      modTrackerLayout, openSettingsTab,
 //                      resolveModsPageInstall / resolveConvertSpec /
 //                      resolveGameRoot. Owns ModfileCache,
@@ -336,10 +336,10 @@ pub const modfilesForGame = mods.modfilesForGame;
 pub const doAddModfile = mods.doAddModfile;
 pub const doImportModRecipe = mods.doImportModRecipe;
 pub const modfileArchivePath = mods.modfileArchivePath;
-pub const archiveTopDirs = mods.archiveTopDirs;
 pub const freeTopDirs = mods.freeTopDirs;
-pub const installTopDirs = mods.installTopDirs;
-pub const simulateCurrentPlan = mods.simulateCurrentPlan;
+pub const planInputHash = mods.planInputHash;
+pub const ensurePlanSim = mods.ensurePlanSim;
+pub const freeWizardSimCache = mods.freeWizardSimCache;
 pub const doDeleteUserPresetArmed = mods.doDeleteUserPresetArmed;
 pub const getMergedPresets = mods.getMergedPresets;
 pub const invalidatePresetCache = mods.invalidatePresetCache;
