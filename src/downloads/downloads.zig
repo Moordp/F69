@@ -47,6 +47,9 @@ pub const http_f95 = @import("http_f95.zig");
 
 /// Watched-folder scanner + file matcher for the browser engine.
 pub const watch = @import("watch.zig");
+
+/// MEGAcmd output parsers + client locator (pure).
+pub const megacmd = @import("megacmd.zig");
 pub const Downloader = downloader.Downloader;
 pub const Command = downloader.Command;
 pub const UiEvent = downloader.UiEvent;
@@ -71,5 +74,6 @@ test {
     _ = workers;
     _ = resolve;
     _ = watch;
+    _ = megacmd;
     _ = @import("http_f95.zig");
 }
