@@ -423,19 +423,25 @@ fn renderHeroConvert(frame: *Frame, game: *const library.Game) void {
     const tid = game.f95_thread_id;
     if (frame.state.last_play_needs_convert != tid) return;
     if (actions.installDotState(frame, game) == .none) return;
-    var opts: dvui.Options = if (frame.book.liveForGame(tid)) toolBusyOpts() else .{};
+    var opts = toolButtonOpts(frame, tid, "hero-convert");
     opts.gravity_y = 0.5;
-    opts.tag = "hero-convert";
     if (components.iconButton(@src(), "Convert", entypo.cycle, opts)) {
         actions.doConvertGame(frame, game);
     }
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
 }
 
-/// Grey `.control` look for a tool button while a tool runs for the game
-/// (same as the busy Download button).
-fn toolBusyOpts() dvui.Options {
-    return .{ .style = .control, .color_text = .{ .color = .{ .r = 0x80, .g = 0x80, .b = 0x80 } } };
+/// Options of a long-tool button (Convert, Fix Compat, Decrypt, Extract
+/// .rpa, hero Convert): the grey `.control` look of the busy Download
+/// button while a tool runs for `tid`, plain otherwise. A click on a grey
+/// one only toasts "<Tool> is already running" (`actions.startTool`).
+fn toolButtonOpts(frame: *Frame, tid: u64, tag: []const u8) dvui.Options {
+    var opts: dvui.Options = if (frame.book.liveForGame(tid))
+        .{ .style = .control, .color_text = .{ .color = .{ .r = 0x80, .g = 0x80, .b = 0x80 } } }
+    else
+        .{};
+    opts.tag = tag;
+    return opts;
 }
 
 fn renderHeroPlay(frame: *Frame, game: *const library.Game) void {
@@ -2488,10 +2494,8 @@ fn renderEngineTools(frame: *Frame, game: *library.Game) void {
     defer row.deinit();
     // A running tool greys every long tool for this game; a click on a
     // grey one toasts "<Tool> is already running" (`actions.startTool`).
-    const busy = frame.book.liveForGame(game.f95_thread_id);
-    var convert_opts: dvui.Options = if (busy) toolBusyOpts() else .{};
-    convert_opts.tag = "tools-convert";
-    if (components.iconButton(@src(), "Convert (Win\u{2192}Linux)", entypo.cycle, convert_opts)) {
+    const tid = game.f95_thread_id;
+    if (components.iconButton(@src(), "Convert (Win\u{2192}Linux)", entypo.cycle, toolButtonOpts(frame, tid, "tools-convert"))) {
         actions.doConvertGame(frame, game);
     }
     if (components.iconOnly(@src(), "Help", entypo.help, .{
@@ -2500,15 +2504,11 @@ fn renderEngineTools(frame: *Frame, game: *library.Game) void {
     })) {
         state.convert_help_open = !state.convert_help_open;
     }
-    var compat_opts: dvui.Options = if (busy) toolBusyOpts() else .{};
-    compat_opts.tag = "tools-compat";
-    if (components.iconButton(@src(), "Fix Compat", entypo.tools, compat_opts)) {
+    if (components.iconButton(@src(), "Fix Compat", entypo.tools, toolButtonOpts(frame, tid, "tools-compat"))) {
         doCompatFixForActiveInstall(frame, game);
     }
     if (game.engine == .rpgm_mv or game.engine == .rpgm_mz) {
-        var decrypt_opts: dvui.Options = if (busy) toolBusyOpts() else .{};
-        decrypt_opts.tag = "tools-decrypt";
-        if (components.iconButton(@src(), "Decrypt RPGM assets", entypo.tools, decrypt_opts)) {
+        if (components.iconButton(@src(), "Decrypt RPGM assets", entypo.tools, toolButtonOpts(frame, tid, "tools-decrypt"))) {
             actions.decryptRpgmAssets(frame, game.f95_thread_id);
         }
     }
@@ -2516,9 +2516,7 @@ fn renderEngineTools(frame: *Frame, game: *library.Game) void {
         if (components.iconButton(@src(), "Enable Ren'Py console", entypo.tools, .{})) {
             actions.enableRenpyConsole(frame, game.f95_thread_id);
         }
-        var rpa_opts: dvui.Options = if (busy) toolBusyOpts() else .{};
-        rpa_opts.tag = "tools-rpa";
-        if (components.iconButton(@src(), "Extract .rpa", entypo.archive, rpa_opts)) {
+        if (components.iconButton(@src(), "Extract .rpa", entypo.archive, toolButtonOpts(frame, tid, "tools-rpa"))) {
             actions.extractRpaArchives(frame, game.f95_thread_id);
         }
     }
@@ -2850,7 +2848,7 @@ fn renderDetailStatusLine(frame: *Frame, game: *const library.Game) void {
     const state = frame.state;
 
     // A per-game tool (Convert, …) on the compute thread: title, phase,
-    // progress and Cancel. Task 12 polishes this strip.
+    // progress (a sweep with no total) and Cancel.
     if (actions.liveViewForGame(frame, dvui.currentWindow().arena(), game.f95_thread_id)) |v| {
         var msg_buf: [240]u8 = undefined;
         const msg = toolStripText(&msg_buf, v.title, v.phase, v.status == .queued);
@@ -2861,6 +2859,7 @@ fn renderDetailStatusLine(frame: *Frame, game: *const library.Game) void {
             .progress = if (v.total > 0) @as(u32, downloads.progress.percent(v.done, v.total)) else null,
             .view_link = false,
             .cancel_id = v.id,
+            .tag = "detail-tool-strip",
         });
         return;
     }
@@ -2960,6 +2959,8 @@ const StatusStripArgs = struct {
     view_link: bool,
     /// Activity id: shows a Cancel button (tag `tools-cancel`).
     cancel_id: ?u64 = null,
+    /// Test tag of the strip box.
+    tag: ?[]const u8 = null,
 };
 
 /// "Convert · Game — Copying runtime file 3 / 10" / "… — waiting".
@@ -2987,6 +2988,7 @@ fn renderStatusStrip(frame: *Frame, args: StatusStripArgs) void {
         .corners = style.corner_radius,
         .color_fill = .{ .color = style.cardFill() },
         .color_border = .{ .color = style.borderColor() },
+        .tag = args.tag,
     });
     defer wrap.deinit();
 
@@ -3020,7 +3022,7 @@ fn renderStatusStrip(frame: *Frame, args: StatusStripArgs) void {
                 .padding = .{ .x = 6, .y = 2, .w = 6, .h = 2 },
                 .tag = "tools-cancel",
             })) {
-                frame.book.requestCancel(aid);
+                actions.cancelTool(frame, aid);
             }
         }
     }

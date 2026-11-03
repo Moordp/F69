@@ -77,6 +77,7 @@ pub const drainThreads = threads_act.drainThreads;
 pub const startTool = threads_act.startTool;
 pub const liveViewForGame = threads_act.liveViewForGame;
 pub const toolKindLabel = threads_act.kindLabel;
+pub const cancelTool = threads_act.cancelTool;
 
 // ---- Public type aliases (kept identical to pre-R9 names) ----
 pub const ModsTabCounts = mods.ModsTabCounts;

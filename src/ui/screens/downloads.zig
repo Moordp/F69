@@ -14,9 +14,11 @@ const components = @import("../components.zig");
 const comp = @import("ui_comp");
 const dl_rows = @import("../dl_rows.zig");
 const dl_controls = @import("../dl_controls.zig");
+const tool_rows = @import("../tool_rows.zig");
 
 const Frame = types.Frame;
 const JobView = downloads.JobView;
+const ToolView = types.threads.activity.View;
 const Job = downloads.model.Job;
 const Step = downloads.model.Step;
 const RowAction = dl_rows.RowAction;
@@ -72,10 +74,12 @@ pub fn downloadsScreen(frame: *Frame) !bool {
             "";
         const dl_s = components.humanRate(&dl_buf, live.dl_speed);
         const up_s = components.humanRate(&up_buf, live.up_speed);
+        var tools_buf: [32]u8 = undefined;
+        const tools_s = toolsTotalText(&tools_buf, liveToolCount(toolViews(frame)));
         const totals_s = std.fmt.bufPrint(
             &totals_buf,
-            "↓ {s}  ↑ {s}  · {d} active · {d} seeding · {d} in history{s}",
-            .{ dl_s, up_s, live.n_active, live.n_seeding, live.n_history, waiting_s },
+            "↓ {s}  ↑ {s}  · {d} active · {d} seeding · {d} in history{s}{s}",
+            .{ dl_s, up_s, live.n_active, live.n_seeding, live.n_history, waiting_s, tools_s },
         ) catch "";
         dvui.labelNoFmt(@src(), totals_s, .{}, .{ .gravity_y = 0.5 });
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 12, .h = 1 } });
@@ -167,7 +171,8 @@ pub fn downloadsScreen(frame: *Frame) !bool {
 /// Downloads screen and the bottom Activity drawer (`renderActivityDrawer`).
 pub fn renderDownloadsBody(frame: *Frame, mode: RowMode) void {
     const snap = snapCopy(frame);
-    if (snap.jobs.len == 0) {
+    const tools = toolViews(frame);
+    if (snap.jobs.len == 0 and tools.len == 0) {
         components.emptyState(entypo.download, "No downloads yet", "Start one from a game's Download button, or paste a URL via + Add.");
         return;
     }
@@ -242,9 +247,9 @@ pub fn renderDownloadsBody(frame: *Frame, mode: RowMode) void {
         }
     }
 
-    // Tools: compute-thread activities (mod installs / uninstalls,
-    // Convert, ...) that are queued or running.
-    renderToolsSection(frame);
+    // Tools: compute-thread activities (Convert, Decrypt, mod installs,
+    // ...) that are queued or running.
+    var tool_action = renderToolList(frame, tools, true, "Tools", TOOLS_HEADER_KEY, mode == .full);
 
     // History: done / failed / cancelled, newest first.
     {
@@ -262,6 +267,15 @@ pub fn renderDownloadsBody(frame: *Frame, mode: RowMode) void {
             }
         }
     }
+
+    // Tools history: finished tools, newest first, after the download
+    // history rows.
+    {
+        const a = renderToolList(frame, tools, false, "Tools history", TOOLS_HISTORY_HEADER_KEY, mode == .full);
+        if (a != .none) tool_action = a;
+    }
+    // `tools` is an arena copy: no book lock is held here.
+    applyToolAction(frame, tool_action);
 
     // `snap` is an arena copy: no snapshot lock is held here, so the
     // native file dialog below may block.
@@ -390,9 +404,10 @@ const LiveTotals = struct {
 /// is everything terminal (done / failed / cancelled). Keep the int repr
 /// stable — downloadsSectionHeader uses it as the dvui id_extra key.
 const JobGroup = enum(u8) { active = 1, seeding = 2, history = 3, needs_you = 4 };
-/// Header key of the Tools section (not a job group: its rows come from
-/// the activity book).
+/// Header keys of the Tools and Tools history sections (not job groups:
+/// their rows come from the activity book).
 const TOOLS_HEADER_KEY: u8 = 5;
+const TOOLS_HISTORY_HEADER_KEY: u8 = 6;
 
 fn classifyJob(j: *const Job) JobGroup {
     return switch (j.step) {
@@ -455,59 +470,60 @@ test "historyOrder: terminal jobs only, newest finished first, created_at fallba
     try std.testing.expectEqualSlices(usize, &.{ 2, 3, 0 }, order);
 }
 
-/// "Mod install · Mod v1 · Installing · 3 / 10". Empty parts are left out.
-fn toolsLineText(buf: []u8, kind_label: []const u8, title: []const u8, phase: []const u8, queued: bool, done: u64, total: u64) []const u8 {
-    const shown_phase: []const u8 = if (queued) "Queued" else phase;
-    var w: std.Io.Writer = .fixed(buf);
-    w.print("{s} \u{00B7} {s}", .{ kind_label, title }) catch return w.buffered();
-    if (shown_phase.len > 0) w.print(" \u{00B7} {s}", .{shown_phase}) catch return w.buffered();
-    if (total > 0) w.print(" \u{00B7} {d} / {d}", .{ done, total }) catch return w.buffered();
-    return w.buffered();
+/// The tool activities of this frame (frame arena copy): live first,
+/// then finished, newest first. Empty on out-of-memory.
+fn toolViews(frame: *Frame) []const ToolView {
+    return frame.book.snapshot(dvui.currentWindow().arena()) catch &.{};
 }
 
-test "toolsLineText" {
-    var buf: [128]u8 = undefined;
-    try std.testing.expectEqualStrings("Mod install \u{00B7} Mod v1 \u{00B7} Queued", toolsLineText(&buf, "Mod install", "Mod v1", "", true, 0, 0));
-    try std.testing.expectEqualStrings("Mod install \u{00B7} Mod v1 \u{00B7} Installing \u{00B7} 3 / 10", toolsLineText(&buf, "Mod install", "Mod v1", "Installing", false, 3, 10));
-}
-
-/// The "Tools" section: every queued or running compute activity, one
-/// line each with Cancel (tag `tools-cancel` on the first). Minimal until
-/// the proper Tools rows land.
-fn renderToolsSection(frame: *Frame) void {
-    const arena = dvui.currentWindow().arena();
-    const views = frame.book.snapshot(arena) catch return;
+fn liveToolCount(views: []const ToolView) u32 {
     var n: u32 = 0;
     for (views) |v| {
-        if (v.status == .queued or v.status == .running) n += 1;
+        if (tool_rows.isLive(v.status)) n += 1;
     }
-    if (n == 0) return;
-    downloadsSectionHeader("Tools", n, TOOLS_HEADER_KEY);
-    var first = true;
+    return n;
+}
+
+/// " · 2 tools" for the top-bar totals; empty with no live tool.
+fn toolsTotalText(buf: []u8, n_live: u32) []const u8 {
+    if (n_live == 0) return "";
+    return std.fmt.bufPrint(buf, " \u{00B7} {d} tool{s}", .{ n_live, if (n_live == 1) "" else "s" }) catch "";
+}
+
+test "toolsTotalText" {
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("", toolsTotalText(&buf, 0));
+    try std.testing.expectEqualStrings(" \u{00B7} 1 tool", toolsTotalText(&buf, 1));
+    try std.testing.expectEqualStrings(" \u{00B7} 3 tools", toolsTotalText(&buf, 3));
+}
+
+/// Renders the live (`want_live`) or finished tool rows under a section
+/// header. Only the page tags its first row (`tagged`); the drawer does
+/// not, as the same rows may render twice in one frame.
+fn renderToolList(frame: *Frame, views: []const ToolView, want_live: bool, header: []const u8, key: u8, tagged: bool) tool_rows.ToolAction {
+    var n: u32 = 0;
     for (views) |v| {
-        if (v.status != .queued and v.status != .running) continue;
-        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .id_extra = @intCast(v.id),
-            .expand = .horizontal,
-            .background = true,
-            .border = style.border_thin,
-            .corners = style.corner_radius,
-            .padding = .{ .x = 10, .y = 6, .w = 10, .h = 6 },
-            .margin = .{ .x = 0, .y = 0, .w = 0, .h = 6 },
-            .color_fill = .{ .color = style.cardFill() },
-            .color_border = .{ .color = style.borderColor() },
-            .tag = if (first) "dl-tool-row" else null,
-        });
-        defer row.deinit();
-        var buf: [320]u8 = undefined;
-        const line = toolsLineText(&buf, actions.toolKindLabel(v.kind), v.title, v.phase, v.status == .queued, v.done, v.total);
-        dvui.labelNoFmt(@src(), line, .{}, .{ .gravity_y = 0.5, .expand = .horizontal, .color_text = .{ .color = tokens.toDvui(tokens.active.acc, dvui.Color) } });
-        if (components.iconButton(@src(), "Cancel", entypo.cross, .{ .id_extra = @intCast(v.id), .style = .err, .gravity_y = 0.5, .tag = if (first) "tools-cancel" else null })) {
-            frame.book.requestCancel(v.id);
-            // A mod job that has not started yet must also leave the queue.
-            if (v.kind == .mod_install or v.kind == .mod_uninstall) frame.mod_jobs.cancel(v.aux_id);
-        }
+        if (tool_rows.isLive(v.status) == want_live) n += 1;
+    }
+    if (n == 0) return .none;
+    downloadsSectionHeader(header, n, key);
+    const now = std.Io.Clock.Timestamp.now(frame.io, .real).raw.toSeconds();
+    var first = tagged;
+    var action: tool_rows.ToolAction = .none;
+    for (views) |v| {
+        if (tool_rows.isLive(v.status) != want_live) continue;
+        const a = tool_rows.renderToolRow(frame, v, now, first);
         first = false;
+        if (a != .none) action = a;
+    }
+    return action;
+}
+
+fn applyToolAction(frame: *Frame, a: tool_rows.ToolAction) void {
+    switch (a) {
+        .none => {},
+        .cancel => |id| actions.cancelTool(frame, id),
+        .remove => |id| frame.book.remove(id),
     }
 }
 

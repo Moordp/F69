@@ -55,6 +55,20 @@ pub fn startTool(frame: *Frame, kind: Kind, tid: u64, title: []const u8) ?*threa
     };
 }
 
+/// Cancel of a tool row or strip: flags the activity, and a mod job that
+/// has not started yet also leaves the mod queue (`aux_id` is its job id).
+pub fn cancelTool(frame: *Frame, id: u64) void {
+    frame.book.requestCancel(id);
+    var arena = std.heap.ArenaAllocator.init(frame.lib.alloc);
+    defer arena.deinit();
+    const views = frame.book.snapshot(arena.allocator()) catch return;
+    for (views) |v| {
+        if (v.id != id) continue;
+        if ((v.kind == .mod_install or v.kind == .mod_uninstall) and v.aux_id != 0) frame.mod_jobs.cancel(v.aux_id);
+        return;
+    }
+}
+
 /// Ends an activity that never reached the worker, with an error toast.
 pub fn failTool(frame: *Frame, a: *threads.Activity, msg: []const u8) void {
     const now = std.Io.Clock.Timestamp.now(frame.io, .real).raw.toSeconds();

@@ -959,8 +959,7 @@ fn renderModJobBanner(frame: *Frame, game: *const library.Game) void {
 
     _ = dvui.spacer(@src(), .{ .expand = .horizontal });
     if (style.button(@src(), "Cancel", .{}, .{ .style = .err, .gravity_y = 0.5 })) {
-        frame.book.requestCancel(h.id);
-        frame.mod_jobs.cancel(h.aux_id);
+        actions.cancelTool(frame, h.id);
     }
 }
 

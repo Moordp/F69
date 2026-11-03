@@ -2405,6 +2405,126 @@ test "threads: Cancel stops a running Convert; a second Convert then completes" 
     tlog("threads-convert-cancel: OK", .{});
 }
 
+/// Steps frames until `tag` is on screen (bounded, ~2 s).
+fn stepUntilTagVisible(io: std.Io, tag: []const u8) !void {
+    var k: usize = 0;
+    while (k < 400) : (k += 1) {
+        _ = try dvui.testing.step(threadsRender);
+        if (dvui.tagGet(tag)) |td| if (td.visible) return;
+        std.Io.sleep(io, .fromMilliseconds(5), .awake) catch {};
+    }
+    std.debug.print("tag \"{s}\" never visible\n", .{tag});
+    return error.TagNotVisible;
+}
+
+fn activityStatus(fr: *ui.Frame, id: u64) ?ui.threads.activity.Status {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const views = fr.book.snapshot(arena_state.allocator()) catch return null;
+    for (views) |v| if (v.id == id) return v.status;
+    return null;
+}
+
+test "threads: Downloads Tools section shows a running tool; Cancel moves it to Tools history; Remove drops it" {
+    tlog("START: threads-tools-section", .{});
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(8) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var env = try TestEnv.init(gpa, "threads-tools-section");
+    defer env.deinit();
+    var t = try dvui.testing.init(.{ .allocator = gpa, .io = io, .window_size = .{ .w = 1280, .h = 1200 } });
+    defer t.deinit();
+    var h = try ui.Harness.init(gpa, io, t.window, env.root);
+    defer h.deinit();
+
+    var fr = h.frame();
+    threads_frame = &fr;
+    defer threads_frame = null;
+    h.state.screen = .downloads;
+
+    const a = try fr.book.start(.hash, 42, "Hash \u{00B7} test");
+    const aid = a.id;
+    try fr.work.submit(.{ .fake = .{ .steps = 50, .sleep_ms = 20 } }, a);
+
+    try stepUntilTagVisible(io, "tools-row");
+    try stepUntilTagVisible(io, "tools-cancel");
+    try dvui.testing.moveTo("tools-cancel");
+    try dvui.testing.click(.left);
+    {
+        var k: usize = 0;
+        while (true) : (k += 1) {
+            if (k > 1000) return error.ToolNotCancelled;
+            _ = try dvui.testing.step(threadsRender);
+            if (activityStatus(&fr, aid) == .cancelled) break;
+            std.Io.sleep(io, .fromMilliseconds(5), .awake) catch {};
+        }
+    }
+    try stepUntilTagVisible(io, "tools-history-row");
+    try stepUntilTagVisible(io, "tools-remove");
+    try std.testing.expect(dvui.tagGet("tools-row") == null);
+    try dvui.testing.moveTo("tools-remove");
+    try dvui.testing.click(.left);
+    _ = try dvui.testing.step(threadsRender);
+    _ = try dvui.testing.step(threadsRender);
+    try std.testing.expect(activityStatus(&fr, aid) == null);
+    try std.testing.expect(dvui.tagGet("tools-history-row") == null);
+    try std.testing.expect(dvui.tagGet("tools-remove") == null);
+    tlog("threads-tools-section: OK", .{});
+}
+
+test "threads: the game page strip shows a running tool; another game's Convert stays live" {
+    tlog("START: threads-tool-strip", .{});
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(8) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var env = try TestEnv.init(gpa, "threads-tool-strip");
+    defer env.deinit();
+    var t = try dvui.testing.init(.{ .allocator = gpa, .io = io, .window_size = .{ .w = 1280, .h = 1600 } });
+    defer t.deinit();
+    var h = try ui.Harness.init(gpa, io, t.window, env.root);
+    defer h.deinit();
+
+    _ = try h.lib.insertIfMissing(&.{ .f95_thread_id = 42, .name = "Busy Game", .developer = "Dev", .engine = .renpy });
+    const install_path = try seedConvertGame(h, &env, 7, 0);
+    defer gpa.free(install_path);
+
+    var fr = h.frame();
+    threads_frame = &fr;
+    defer threads_frame = null;
+
+    const a = try fr.book.start(.hash, 42, "Hash \u{00B7} test");
+    try fr.work.submit(.{ .fake = .{ .steps = 50, .sleep_ms = 20 } }, a);
+
+    // Game 42: the Tools tab shows the strip with its Cancel.
+    h.state.screen = .detail;
+    h.state.selected_thread = 42;
+    _ = try dvui.testing.step(threadsRender);
+    _ = try dvui.testing.step(threadsRender);
+    try openToolsTab(h);
+    try stepUntilTagVisible(io, "detail-tool-strip");
+    try stepUntilTagVisible(io, "tools-cancel");
+
+    // Game 7 has no tool running: its Convert is live, so a click starts
+    // a new convert activity (it queues behind the fake job).
+    h.state.selected_thread = 7;
+    _ = try dvui.testing.step(threadsRender);
+    _ = try dvui.testing.step(threadsRender);
+    if (h.state.detail_tab != .tools) try openToolsTab(h);
+    try std.testing.expect(dvui.tagGet("detail-tool-strip") == null);
+    try stepUntilTagVisible(io, "tools-convert");
+    try dvui.testing.moveTo("tools-convert");
+    try dvui.testing.click(.left);
+    _ = try dvui.testing.step(threadsRender);
+    {
+        var arena_state = std.heap.ArenaAllocator.init(gpa);
+        defer arena_state.deinit();
+        try std.testing.expect(convertView(&fr, arena_state.allocator(), 7) != null);
+    }
+    tlog("threads-tool-strip: OK", .{});
+}
+
 /// A small tar.gz built in memory: `files` as (path, bytes) pairs.
 /// Stored (uncompressed) deflate blocks, so no compressor tuning is
 /// needed; the reader does not care.
