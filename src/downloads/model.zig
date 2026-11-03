@@ -121,6 +121,10 @@ pub const Job = struct {
     dest_dir: []const u8,
     /// The archive once it exists.
     final_path: ?[]const u8 = null,
+    /// The library folder this job extracts into, set when its extract
+    /// starts (`<library_root>/<tid>/<version>[ (<platform>)][ (N)]/`).
+    /// Stored, so a restart or "Install again" uses the same folder.
+    extract_dir: ?[]const u8 = null,
     expected_sha256: ?[32]u8 = null,
     bytes_done: u64 = 0,
     bytes_total: ?u64 = null,

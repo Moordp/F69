@@ -2279,8 +2279,10 @@ test "downloads page renders trail chips and buttons per step" {
     const Case = struct { step: downloads.model.Step, fail: ?downloads.model.FailReason = null, tags: []const []const u8 };
     const cases = [_]Case{
         .{ .step = .seeding, .tags = &.{ "dl-stop-seeding", "dl-open-folder" } },
-        .{ .step = .downloading, .tags = &.{ "dl-pause", "dl-open-folder" } },
-        .{ .step = .paused, .tags = &.{"dl-resume"} },
+        .{ .step = .downloading, .tags = &.{ "dl-pause", "dl-cancel", "dl-open-folder" } },
+        .{ .step = .paused, .tags = &.{ "dl-resume", "dl-cancel" } },
+        .{ .step = .queued, .tags = &.{"dl-cancel"} },
+        .{ .step = .installing, .tags = &.{"dl-cancel"} },
         .{ .step = .failed, .fail = .network, .tags = &.{ "dl-retry", "dl-remove" } },
         .{ .step = .done, .tags = &.{ "dl-remove", "dl-open-folder" } },
     };
@@ -2296,6 +2298,48 @@ test "downloads page renders trail chips and buttons per step" {
         for (c.tags) |tag| try dvui.testing.expectVisible(tag);
     }
     tlog("dl-trail: OK", .{});
+}
+
+test "downloads page: Retry on an expired donor link asks for a new one (or says to open the game); the old row stays when that is refused" {
+    tlog("START: dl-donor-retry", .{});
+    const downloads = @import("downloads");
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(8) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var env = try TestEnv.init(gpa, "dl-donor-retry");
+    defer env.deinit();
+    var t = try dvui.testing.init(.{ .allocator = gpa, .io = io, .window_size = .{ .w = 1280, .h = 800 } });
+    defer t.deinit();
+    var h = try ui.Harness.init(gpa, io, t.window, env.root);
+    defer h.deinit();
+
+    // Two failed donor jobs: one for a game in the library, one for a
+    // game that is gone. No engine_ref, so nothing polls them.
+    _ = try h.lib.insertIfMissing(&.{ .f95_thread_id = 6161, .name = "Donor Game" });
+    try h.reloadGames();
+    const known = try h.dl.store.insert(&.{ .id = 0, .group_id = 0, .kind = .game, .game_thread_id = 6161, .title = "Donor Game", .source_href = "https://attachments.f95zone.to/a.zip", .host = downloads.downloader.HOST_DONOR, .engine = .aria2_http, .step = .failed, .fail = .auth_required, .dest_dir = "/tmp/f69-donor-a" });
+    const orphan = try h.dl.store.insert(&.{ .id = 0, .group_id = 0, .kind = .game, .game_thread_id = 6262, .title = "Gone Game", .source_href = "https://attachments.f95zone.to/b.zip", .host = downloads.downloader.HOST_DONOR, .engine = .aria2_http, .step = .failed, .fail = .host_gone, .dest_dir = "/tmp/f69-donor-b" });
+    try h.dl.load();
+    h.dl.stepOnce(1000);
+    var fr = h.frame(); // after reloadGames: the frame carries the games
+
+    // Not signed in: the new-link request is refused, the row stays failed
+    // and is not retried with the dead link.
+    h.state.login_status = .logged_out;
+    ui.retryDownload(&fr, known);
+    try std.testing.expect(hasToast(h, "donor DDL: log into F95 first (Settings → Accounts)"));
+    h.dl.stepOnce(1001);
+    try std.testing.expectEqual(downloads.model.Step.failed, h.dl.find(known).?.job.step);
+    try std.testing.expectEqual(@as(usize, 0), h.dl_fake.started);
+
+    // No game row: a toast says what to do; the row stays.
+    ui.retryDownload(&fr, orphan);
+    try std.testing.expect(hasToast(h, "Link expired — open the game and click Download"));
+    h.dl.stepOnce(1002);
+    try std.testing.expectEqual(downloads.model.Step.failed, h.dl.find(orphan).?.job.step);
+    try std.testing.expectEqual(@as(usize, 0), h.dl_fake.started);
+    tlog("dl-donor-retry: OK", .{});
 }
 
 test "downloads page GUI: Pick file… hands the picked path to pick_file" {

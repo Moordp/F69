@@ -47,6 +47,19 @@ pub fn Worker(comptime Result: type) type {
             if (self.thr) |t| t.join();
             self.thr = null;
         }
+
+        /// True while the thread has not stored its result yet.
+        pub fn running(self: *const Self) bool {
+            return self.thr != null and self.phase.load(.acquire) == @backingInt(Phase.pending);
+        }
+
+        /// Let a still-running thread go (quit only). The owner must then
+        /// never free this worker or anything its thread reads: the memory
+        /// stays allocated until the process exits.
+        pub fn detach(self: *Self) void {
+            if (self.thr) |t| t.detach();
+            self.thr = null;
+        }
     };
 }
 

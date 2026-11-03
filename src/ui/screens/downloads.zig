@@ -24,12 +24,6 @@ const RowMode = dl_rows.RowMode;
 const statusChipSpec = dl_rows.statusChipSpec;
 const isTorrent = dl_rows.isTorrent;
 
-/// Donor DDL jobs: plain HTTP with no seeding obligation, so Cancel and
-/// Remove are always offered.
-fn isDonor(j: *const Job) bool {
-    return std.mem.eql(u8, j.host, downloads.downloader.HOST_DONOR);
-}
-
 /// The snapshot copied into the dvui per-frame arena (no lock held while
 /// widgets are built).
 fn snapCopy(frame: *Frame) actions.SnapCopy {
@@ -237,7 +231,7 @@ pub fn renderDownloadsBody(frame: *Frame, mode: RowMode) void {
             // An install worker still moving the file / applying a mod
             // shows "Extracting" instead of a stale "Installing" pill.
             const extracting = actions.isExtracting(frame, job.id);
-            const action = dl_rows.renderJobRow(frame, v, title, extracting, seedRatioTarget(frame), isDonor(job), mode, first_row);
+            const action = dl_rows.renderJobRow(frame, v, title, extracting, seedRatioTarget(frame), mode, first_row);
             first_row = false;
             switch (action) {
                 .none => {},
@@ -253,7 +247,7 @@ pub fn renderDownloadsBody(frame: *Frame, mode: RowMode) void {
             downloadsSectionHeader("History", @intCast(order.len), @intFromEnum(JobGroup.history));
             for (order) |i| {
                 const v = &snap.jobs[i];
-                const action = dl_rows.renderJobRow(frame, v, resolveJobTitle(frame.games, &v.job), false, seedRatioTarget(frame), isDonor(&v.job), .history, first_row);
+                const action = dl_rows.renderJobRow(frame, v, resolveJobTitle(frame.games, &v.job), false, seedRatioTarget(frame), .history, first_row);
                 first_row = false;
                 switch (action) {
                     .none => {},

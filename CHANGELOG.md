@@ -6,6 +6,7 @@ All notable, user-facing changes. Dates are YYYY-MM-DD.
 
 ### Added
 - Downloads page: controls panel (slots, speed caps, torrent share, upload caps, seeding, watched folder, MEGA status), step trail per job, history with failure reasons, Open folder.
+- Fixes from the final review: versioned install folders, bounded quit, Cancel for every running download, raw URLs just download, expired donor links say so, multi-part sets and mods are downloaded without auto-install, safer Windows link opening.
 
 ## [0.15.19] - 2026-11-03
 

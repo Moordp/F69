@@ -42,7 +42,12 @@ const COLS =
     "id, group_id, kind, game_thread_id, mod_id, title, source_href, host, engine, platform, part, version, " ++
     "step, step_detail, resume_step, fail, fail_msg, attempts, next_retry_at, resolved_url, resolved_headers, " ++
     "resolved_at, engine_ref, dest_dir, final_path, expected_sha256, bytes_done, bytes_total, bytes_uploaded, " ++
-    "created_at, updated_at, finished_at";
+    "created_at, updated_at, finished_at, extract_dir";
+
+/// Added after migration 25 shipped: `open` adds it to an older table
+/// (additive and nullable, so no schema-version bump and an older build
+/// still reads and writes the table).
+const EXTRACT_DIR_DDL = "ALTER TABLE dl_jobs ADD COLUMN extract_dir TEXT";
 
 pub const Event = struct { at: i64, step: model.Step, msg: []const u8 };
 
@@ -74,7 +79,13 @@ pub const Store = struct {
         conn.exec("PRAGMA busy_timeout = 5000") catch return errs.Error.StoreFailed;
         conn.exec("PRAGMA journal_mode = WAL") catch return errs.Error.StoreFailed;
         conn.exec("PRAGMA mmap_size = 0") catch return errs.Error.StoreFailed;
+        // WAL + NORMAL: a commit is durable once the WAL is synced at a
+        // checkpoint; the per-tick job writes no longer fsync each time.
+        conn.exec("PRAGMA synchronous = NORMAL") catch return errs.Error.StoreFailed;
         conn.execScript(alloc, SCHEMA_SQL) catch return errs.Error.StoreFailed;
+        if (!hasColumn(&conn, "dl_jobs", "extract_dir")) {
+            conn.exec(EXTRACT_DIR_DDL) catch return errs.Error.StoreFailed;
+        }
         return .{ .alloc = alloc, .conn = conn };
     }
 
@@ -98,7 +109,7 @@ pub const Store = struct {
         defer self.alloc.free(headers);
         const sha: ?dbu_blob = if (job.expected_sha256) |*s| dbu.blob(s) else null;
         self.conn.inner.exec(
-            "INSERT INTO dl_jobs (" ++ COLS[4..] ++ ") VALUES (" ++ "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?" ++ ")",
+            "INSERT INTO dl_jobs (" ++ COLS[4..] ++ ") VALUES (" ++ "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?" ++ ")",
             .{
                 i64Of(job.group_id), @tagName(job.kind),      i64Of(job.game_thread_id), optI64(job.mod_id),
                 job.title,           job.source_href,         job.host,                  @tagName(job.engine),
@@ -107,7 +118,7 @@ pub const Store = struct {
                 job.attempts,        job.next_retry_at,       job.resolved_url,          headers,
                 job.resolved_at,     job.engine_ref,          job.dest_dir,              job.final_path,
                 sha,                 i64Of(job.bytes_done),   optI64(job.bytes_total),   i64Of(job.bytes_uploaded),
-                job.created_at,      job.updated_at,          job.finished_at,
+                job.created_at,      job.updated_at,          job.finished_at,           job.extract_dir,
             },
         ) catch return self.fail();
         const id: u64 = @intCast(self.conn.inner.lastInsertedRowId());
@@ -127,7 +138,7 @@ pub const Store = struct {
             \\  engine=?, platform=?, part=?, version=?, step=?, step_detail=?, resume_step=?, fail=?, fail_msg=?,
             \\  attempts=?, next_retry_at=?, resolved_url=?, resolved_headers=?, resolved_at=?, engine_ref=?,
             \\  dest_dir=?, final_path=?, expected_sha256=?, bytes_done=?, bytes_total=?, bytes_uploaded=?,
-            \\  created_at=?, updated_at=?, finished_at=?
+            \\  created_at=?, updated_at=?, finished_at=?, extract_dir=?
             \\WHERE id=?
         ,
             .{
@@ -138,7 +149,8 @@ pub const Store = struct {
                 job.attempts,        job.next_retry_at,       job.resolved_url,          headers,
                 job.resolved_at,     job.engine_ref,          job.dest_dir,              job.final_path,
                 sha,                 i64Of(job.bytes_done),   optI64(job.bytes_total),   i64Of(job.bytes_uploaded),
-                job.created_at,      job.updated_at,          job.finished_at,           i64Of(job.id),
+                job.created_at,      job.updated_at,          job.finished_at,           job.extract_dir,
+                i64Of(job.id),
             },
         ) catch return self.fail();
     }
@@ -289,12 +301,33 @@ pub const Store = struct {
     const LegacyFile = struct { version: u32 = 1, next_id: u64 = 0, jobs: []const LegacyEntry = &.{} };
 
     /// One-time import of the old `manager_jobs.json` (spec §3.3). Returns
-    /// the number of jobs imported and renames the file to `<path>.imported`.
-    /// A missing file imports nothing (returns 0). aria2's own session file
-    /// is untouched, so `engine_ref` (the gid) stays valid.
+    /// the number of jobs imported. A missing file imports nothing
+    /// (returns 0). aria2's own session file is untouched, so `engine_ref`
+    /// (the gid) stays valid.
+    ///
+    /// The file is renamed to `<path>.importing` before it is read, the
+    /// rows go in as one transaction, then it becomes `<path>.imported`.
+    /// A failure after the first rename leaves `.importing` behind and the
+    /// next start skips it (with a warning), so the import never runs
+    /// twice.
     pub fn importLegacyJson(self: *Store, alloc: std.mem.Allocator, io: std.Io, path: []const u8) errs.Error!u32 {
-        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(4 * 1024 * 1024)) catch |e| switch (e) {
-            error.FileNotFound => return 0,
+        const cwd = std.Io.Dir.cwd();
+        var ibuf: [std.fs.max_path_bytes]u8 = undefined;
+        const importing = std.fmt.bufPrint(&ibuf, "{s}.importing", .{path}) catch return errs.Error.StoreFailed;
+        var dbuf: [std.fs.max_path_bytes]u8 = undefined;
+        const imported = std.fmt.bufPrint(&dbuf, "{s}.imported", .{path}) catch return errs.Error.StoreFailed;
+        cwd.rename(path, cwd, importing, io) catch |e| switch (e) {
+            error.FileNotFound => {
+                if ((cwd.access(io, importing, .{}) catch null) != null)
+                    log.warn("'{s}' is left from an earlier import that did not finish; skipped (rename it back to import again)", .{importing});
+                return 0;
+            },
+            else => {
+                log.warn("legacy jobs rename failed: {s}", .{@errorName(e)});
+                return errs.Error.StoreFailed;
+            },
+        };
+        const bytes = cwd.readFileAlloc(io, importing, alloc, .limited(4 * 1024 * 1024)) catch |e| switch (e) {
             error.OutOfMemory => return errs.Error.OutOfMemory,
             else => {
                 log.warn("legacy jobs read failed: {s}", .{@errorName(e)});
@@ -345,17 +378,25 @@ pub const Store = struct {
         }
         self.conn.exec("COMMIT") catch return self.fail();
 
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const dest = std.fmt.bufPrint(&buf, "{s}.imported", .{path}) catch return errs.Error.StoreFailed;
-        std.Io.Dir.cwd().rename(path, std.Io.Dir.cwd(), dest, io) catch |e| {
-            log.warn("legacy jobs rename failed: {s}", .{@errorName(e)});
-            return errs.Error.StoreFailed;
-        };
+        // The rows are in: a failed rename only leaves `.importing`, which
+        // the next start skips.
+        cwd.rename(importing, cwd, imported, io) catch |e|
+            log.warn("legacy jobs rename to '{s}' failed: {s}", .{ imported, @errorName(e) });
         return count;
     }
 };
 
 const dbu_blob = @TypeOf(dbu.blob(""));
+
+/// `table` has a column named `name` (false on any query error).
+fn hasColumn(conn: *dbu.Conn, comptime table: []const u8, name: []const u8) bool {
+    var rows = conn.inner.rows("SELECT name FROM pragma_table_info('" ++ table ++ "')", .{}) catch return false;
+    defer rows.deinit();
+    while (rows.next()) |r| {
+        if (std.mem.eql(u8, r.text(0), name)) return true;
+    }
+    return false;
+}
 
 fn dupe(alloc: std.mem.Allocator, s: []const u8) errs.Error![]u8 {
     return alloc.dupe(u8, s) catch errs.Error.OutOfMemory;
@@ -410,6 +451,7 @@ fn readJob(alloc: std.mem.Allocator, r: anytype) errs.Error!model.Job {
     j.engine_ref = try dupeOpt(alloc, r.nullableText(22));
     j.dest_dir = try dupe(alloc, r.text(23));
     j.final_path = try dupeOpt(alloc, r.nullableText(24));
+    j.extract_dir = try dupeOpt(alloc, r.nullableText(32));
 
     const hs = r.text(20);
     if (hs.len > 0) {
@@ -441,6 +483,7 @@ fn freeJob(alloc: std.mem.Allocator, j: *model.Job) void {
     if (j.engine_ref) |s| freeStr(alloc, s);
     freeStr(alloc, j.dest_dir);
     if (j.final_path) |s| freeStr(alloc, s);
+    if (j.extract_dir) |s| freeStr(alloc, s);
     if (j.resolved_headers.len > 0) {
         for (j.resolved_headers) |h| alloc.free(h);
         alloc.free(j.resolved_headers);
@@ -686,7 +729,68 @@ test "store: importLegacyJson maps statuses and renames the file" {
     try testing.expectEqualStrings("v1", jobs[0].version.?);
     try testing.expectEqualStrings("", jobs[0].dest_dir);
     try testing.expectError(error.FileNotFound, tmp.dir.access(testing.io, "manager_jobs.json", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(testing.io, "manager_jobs.json.importing", .{}));
     try tmp.dir.access(testing.io, "manager_jobs.json.imported", .{});
     // Missing file is not an error.
     try testing.expectEqual(@as(u32, 0), try st.importLegacyJson(testing.allocator, testing.io, path));
+}
+
+test "store: importLegacyJson renames before reading — a failed import is never retried" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(dir);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/manager_jobs.json", .{dir});
+    defer testing.allocator.free(path);
+    var st = try Store.openMemory(testing.allocator);
+    defer st.close();
+
+    // Unparseable: the import fails and the file stays `.importing`.
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "manager_jobs.json", .data = "{not json" });
+    try testing.expectError(errs.Error.StoreFailed, st.importLegacyJson(testing.allocator, testing.io, path));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(testing.io, "manager_jobs.json", .{}));
+    try tmp.dir.access(testing.io, "manager_jobs.json.importing", .{});
+
+    // A run that crashed after committing also leaves `.importing`: the
+    // next start skips it, so its rows are not inserted a second time.
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "manager_jobs.json.importing", .data =
+        \\{"version":1,"jobs":[{"id":1,"gid":"g1","url":"https://a/b.zip","status":"done","game_id":11}]}
+    });
+    try testing.expectEqual(@as(u32, 0), try st.importLegacyJson(testing.allocator, testing.io, path));
+    const jobs = try st.loadAll(testing.allocator);
+    defer Store.freeJobs(testing.allocator, jobs);
+    try testing.expectEqual(@as(usize, 0), jobs.len);
+}
+
+test "store: open adds extract_dir to a table made by migration 25, and it round-trips" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(dir);
+    const path = try std.fmt.allocPrint(testing.allocator, "{s}/old.db", .{dir});
+    defer testing.allocator.free(path);
+    {
+        // The table as migration 25 creates it (no extract_dir).
+        var conn = try dbu.Conn.open(path, testing.allocator, .{});
+        defer conn.close();
+        try conn.execScript(testing.allocator, SCHEMA_SQL);
+        try testing.expect(!hasColumn(&conn, "dl_jobs", "extract_dir"));
+    }
+    var st = try Store.open(testing.allocator, path);
+    defer st.close();
+    try testing.expect(hasColumn(&st.conn, "dl_jobs", "extract_dir"));
+    var j = fullJob();
+    j.extract_dir = "/lib/4242/v1.2 (Linux)/";
+    const id = try st.insert(&j);
+    {
+        const jobs = try st.loadAll(testing.allocator);
+        defer Store.freeJobs(testing.allocator, jobs);
+        try testing.expectEqualStrings("/lib/4242/v1.2 (Linux)/", jobs[0].extract_dir.?);
+    }
+    j.id = id;
+    j.extract_dir = null;
+    try st.update(&j);
+    const jobs = try st.loadAll(testing.allocator);
+    defer Store.freeJobs(testing.allocator, jobs);
+    try testing.expect(jobs[0].extract_dir == null);
 }

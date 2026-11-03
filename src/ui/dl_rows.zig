@@ -213,6 +213,22 @@ test "retryAction: install failure re-installs, other failures re-download" {
 /// seed-ratio target. Used to gate the "Remove" button — without
 /// this you can stop seeding manually, which goes against the
 /// "give back what you took" RPDL contract.
+/// Cancel is offered for every job that is still running, except a
+/// seeding torrent (Stop seeding / Remove cover that one).
+pub fn showsCancel(step: Step) bool {
+    return !step.isTerminal() and step != .seeding;
+}
+
+test "showsCancel: every running step but seeding; never a finished row" {
+    for (std.enums.values(Step)) |st| {
+        const want = switch (st) {
+            .seeding, .done, .failed, .cancelled => false,
+            else => true,
+        };
+        try std.testing.expectEqual(want, showsCancel(st));
+    }
+}
+
 pub fn ratioMet(job: *const Job, ratio_target: f32) bool {
     if (!isTorrent(job)) return true; // HTTP downloads have no obligation
     const total = job.bytes_total orelse return false;
@@ -230,7 +246,6 @@ pub fn renderJobRow(
     title: []const u8,
     extracting: bool,
     ratio_target: f32,
-    is_donor: bool,
     mode: RowMode,
     tagged: bool,
 ) RowAction {
@@ -317,19 +332,13 @@ pub fn renderJobRow(
         //   - Cancelled / Done → Remove (a done torrent is no longer
         //     seeding).
         //   - Seeding, ratio met → Remove; before that → Stop seeding.
-        //   - Downloading donor DDL → Cancel + Remove allowed (plain
-        //     HTTP, no community obligation).
-        //   - Anything else mid-flight → no button.
+        //   - Anything else still running (queued … installing, any
+        //     engine) → Cancel; Remove once it is cancelled.
         const ratio_met = ratioMet(job, ratio_target);
         const removable = switch (job.step) {
             .failed, .cancelled, .done => true,
             .seeding => ratio_met,
-            // Donor DDL has no community seeding obligation, so Remove
-            // is always safe on those — and necessary, because a job
-            // resumed from disk with an expired signed URL sits in
-            // `.queued` / `.paused` forever and Cancel→Remove was a
-            // two-step the user shouldn't have to discover.
-            else => is_donor,
+            else => false,
         };
         if (job.step == .failed) {
             if (components.iconButton(@src(), "Retry", entypo.cycle, .{ .id_extra = job.id, .tag = tg(tagged, "dl-retry"), .style = .highlight })) {
@@ -352,18 +361,11 @@ pub fn renderJobRow(
             },
             else => {},
         }
-        // Cancel button for non-terminal donor jobs — still useful when
-        // the user wants to stop a download mid-flight without dropping
-        // the row. Coexists with the always-visible Remove (below) so
-        // the user has both "stop, keep history" and "stop, forget it".
-        if (is_donor) {
-            switch (job.step) {
-                .queued, .resolving, .fetching_metadata, .finding_peers, .downloading, .paused => {
-                    if (components.iconButton(@src(), "Cancel", entypo.cross, .{ .id_extra = job.id, .tag = tg(tagged, "dl-cancel"), .style = .err })) {
-                        action = .{ .cancel = job.id };
-                    }
-                },
-                else => {},
+        // Cancel every job that is still running, except a seeding
+        // torrent (that one has the ratio-gated Stop seeding below).
+        if (showsCancel(job.step)) {
+            if (components.iconButton(@src(), "Cancel", entypo.cross, .{ .id_extra = job.id, .tag = tg(tagged, "dl-cancel"), .style = .err })) {
+                action = .{ .cancel = job.id };
             }
         }
         if (job.dest_dir.len > 0 and (!job.step.isTerminal() or job.step == .done)) {

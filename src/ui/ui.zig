@@ -79,6 +79,7 @@ pub const setDlSetting = actions.setDlSetting;
 pub const DlSettingField = actions.DlSettingField;
 pub const openFolder = actions.openFolder;
 pub const dlFailReasonText = @import("dl_rows.zig").failReasonText;
+pub const retryDownload = actions.retryDownload;
 pub const megaCheckStatus = actions.megaCheckStatus;
 pub const megaSignIn = actions.megaSignIn;
 pub const drainMegaAuth = actions.drainMegaAuth;

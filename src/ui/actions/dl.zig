@@ -181,6 +181,7 @@ pub fn enqueueCatalogue(frame: *Frame, game: *const library.Game, href: []const 
         .href = href,
         .title = game.name,
         .group_with = null,
+        .version = game.latest_version,
     } });
 
     state.detail_part_offer = null;
@@ -229,6 +230,7 @@ pub fn acceptPartOffer(frame: *Frame, game: *const library.Game) void {
             .href = cat.row(it).href,
             .title = game.name,
             .group_with = group,
+            .version = game.latest_version,
         } });
         sent += 1;
     }
@@ -238,8 +240,64 @@ pub fn acceptPartOffer(frame: *Frame, game: *const library.Game) void {
 
 /// Retry a failed download (the downloader requeues it with the same
 /// source; a checksum / bad-archive failure deletes the file first).
+///
+/// A failed F95 donor job with no automatic retry pending has no usable
+/// link any more (the signed URL expired, and the downloader drops the
+/// cookie of a finished row): a new signed URL is requested for the game
+/// instead, and the old row goes once that request has started. Without
+/// the game row, a toast says what to do.
 pub fn retryDownload(frame: *Frame, job_id: u64) void {
-    frame.dl.send(.{ .retry = job_id });
+    const tid = donorToRenew(frame, job_id) orelse return frame.dl.send(.{ .retry = job_id });
+    for (frame.games) |*g| {
+        if (g.f95_thread_id != tid) continue;
+        const state = frame.state;
+        const before = state.pending_donor_download;
+        flows.startDonorDownload(frame, g);
+        // Refused (not signed in, another request running): keep the row;
+        // `startDonorDownload` already said why.
+        const after = state.pending_donor_download orelse return;
+        if (before != null and before.? == after) return;
+        frame.dl.send(.{ .remove = job_id });
+        return;
+    }
+    frame.state.setDownloadMsg("Link expired — open the game and click Download");
+}
+
+/// The game of `job_id` when it is a failed donor job that a plain Retry
+/// cannot restart (see `retryDownload`); else null. One snapshot read,
+/// released before returning.
+fn donorToRenew(frame: *Frame, job_id: u64) ?u64 {
+    const snap = frame.dl.snapshot();
+    defer frame.dl.releaseSnapshot();
+    for (snap.jobs) |v| {
+        if (v.job.id != job_id) continue;
+        return if (needsNewDonorLink(&v.job)) v.job.game_thread_id else null;
+    }
+    return null;
+}
+
+/// A failed donor job with no automatic retry pending: its link expired
+/// (auth_required / host_gone) or its cookie is gone.
+pub fn needsNewDonorLink(j: *const downloads.model.Job) bool {
+    return j.step == .failed and j.next_retry_at == null and
+        std.mem.eql(u8, j.host, downloads.downloader.HOST_DONOR);
+}
+
+test "needsNewDonorLink: only failed donor jobs without a pending retry" {
+    var j: downloads.model.Job = .{ .id = 1, .group_id = 1, .kind = .game, .game_thread_id = 5, .source_href = "https://x", .host = downloads.downloader.HOST_DONOR, .engine = .aria2_http, .step = .failed, .fail = .auth_required, .dest_dir = "" };
+    try std.testing.expect(needsNewDonorLink(&j));
+    j.fail = .host_gone;
+    try std.testing.expect(needsNewDonorLink(&j));
+    j.fail = .network;
+    j.next_retry_at = 100; // the downloader retries it with its cookie
+    try std.testing.expect(!needsNewDonorLink(&j));
+    j.next_retry_at = null;
+    try std.testing.expect(needsNewDonorLink(&j));
+    j.host = "raw";
+    try std.testing.expect(!needsNewDonorLink(&j));
+    j.host = downloads.downloader.HOST_DONOR;
+    j.step = .downloading;
+    try std.testing.expect(!needsNewDonorLink(&j));
 }
 
 // ----- "Needs you" (jobs waiting in the browser) -----

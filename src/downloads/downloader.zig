@@ -42,6 +42,14 @@ const FOLDER_EXISTS = "Folder already exists — registering";
 const MOD_ARCHIVE = "Mod archive — installed by the mod manager";
 /// Written into an extract destination while f69 extracts into it.
 const EXTRACT_MARKER = ".f69-extracting";
+/// Detail while another job's extract writes into the same folder.
+const EXTRACT_WAIT = "Waiting for another extraction into the same folder";
+/// Donor DDL link refused (expired signed URL / cookie).
+const LINK_EXPIRED = "Link expired — click Download again";
+/// `deinit` waits at most this long for running workers, then lets them go.
+const QUIT_WAIT_MS: u32 = 3000;
+/// Sibling folders tried after `<dir>` (`<dir> (2)` … `<dir> (99)`).
+const MAX_SIBLINGS: u32 = 99;
 const BROWSER_STAGE2 = "This host needs the browser flow (coming in 0.15.18)";
 /// A resolved link older than this is resolved again on retry (spec §3.6).
 const RESOLVE_CACHE_S: i64 = 3600;
@@ -87,12 +95,14 @@ pub const EnqueueTorrent = struct {
     version: ?[]const u8 = null,
 };
 
-/// Defined now; handled in stage 2 (Task 8).
+/// A catalogue link of a game (spec §3.8); the downloader reads the row.
 pub const EnqueueCatalogue = struct {
     game_thread_id: u64,
     href: []const u8,
     title: []const u8,
     group_with: ?u64 = null,
+    /// The game's latest version (spec §3.7): names the install folder.
+    version: ?[]const u8 = null,
 };
 
 /// UI → downloader. `send` deep-copies every string, so the caller's
@@ -200,6 +210,11 @@ fn slotOf(e: model.EngineKind) EngineSlot {
 }
 
 const PostKind = enum { verify, extract };
+
+/// `fresh`: the extract that follows a download; a non-empty folder that
+/// is not this job's goes to a new sibling. `again`: reconcile or
+/// "Install again" — an existing folder is registered as it is.
+const ExtractMode = enum { fresh, again };
 
 /// A verify or extract run. Owns copies of its paths so the job record may
 /// change or go away while the thread runs.
@@ -322,6 +337,9 @@ pub const Rec = struct {
     /// with it there); watched-folder files older than this are ignored.
     awaiting_since: i64 = 0,
     pending_match: ?PendingMatch = null,
+    /// Extract held back while another job extracts into the same folder;
+    /// retried each tick with this mode. Null = not waiting.
+    extract_wait: ?ExtractMode = null,
     /// Watched-folder files the user said "no" to (owned paths). They are
     /// not offered again, to this job or any other.
     rejected: std.ArrayList([]u8) = .empty,
@@ -415,18 +433,40 @@ pub const Downloader = struct {
         };
     }
 
-    /// Stops the thread if running, waits for workers, frees everything and
-    /// closes the store. Engines belong to the caller.
+    /// Stops the thread if running, frees everything and closes the store.
+    /// Engines belong to the caller. Running workers (extract, verify,
+    /// resolve, move) get at most `QUIT_WAIT_MS` in total; any still
+    /// running after that is detached and its memory left allocated (the
+    /// process is quitting). An interrupted extract keeps its marker and is
+    /// redone by the next start's reconcile.
     pub fn deinit(self: *Downloader) void {
         self.stop();
         for (self.recs.items) |r| self.freeRec(r);
         self.recs.deinit(self.alloc);
-        for (self.orphans.items) |pw| pw.destroy();
+        self.waitOrphans(QUIT_WAIT_MS);
+        var left: usize = 0;
+        for (self.orphans.items) |pw| {
+            if (pw.w.running()) {
+                pw.w.detach();
+                left += 1;
+            } else pw.destroy();
+        }
         self.orphans.deinit(self.alloc);
-        for (self.resolve_orphans.items) |rw| rw.destroy();
+        for (self.resolve_orphans.items) |rw| {
+            if (rw.w.running()) {
+                rw.w.detach();
+                left += 1;
+            } else rw.destroy();
+        }
         self.resolve_orphans.deinit(self.alloc);
-        for (self.move_orphans.items) |mw| mw.destroy();
+        for (self.move_orphans.items) |mw| {
+            if (mw.w.running()) {
+                mw.w.detach();
+                left += 1;
+            } else mw.destroy();
+        }
         self.move_orphans.deinit(self.alloc);
+        if (left > 0) log.warn("quit: {d} background task(s) still running after {d} ms were left to end with the process", .{ left, QUIT_WAIT_MS });
         self.dropScanner();
         for (self.cmds.items) |*q| q.arena.deinit();
         self.cmds.deinit(self.alloc);
@@ -435,6 +475,19 @@ pub const Downloader = struct {
         for (&self.snap_arenas) |*a| a.deinit();
         if (self.settings_arena) |*a| a.deinit();
         self.store.close();
+    }
+
+    /// Sleep in short steps until no orphaned worker runs or `max_ms` pass.
+    fn waitOrphans(self: *Downloader, max_ms: u32) void {
+        var waited: u32 = 0;
+        while (waited < max_ms) : (waited += 20) {
+            var busy = false;
+            for (self.orphans.items) |pw| busy = busy or pw.w.running();
+            for (self.resolve_orphans.items) |rw| busy = busy or rw.w.running();
+            for (self.move_orphans.items) |mw| busy = busy or mw.w.running();
+            if (!busy) return;
+            self.io.sleep(std.Io.Duration.fromMilliseconds(20), .real) catch return;
+        }
     }
 
     // ------------------------------------------------------------ public API
@@ -558,6 +611,7 @@ pub const Downloader = struct {
         self.schedule(now);
         self.pollEngines(now);
         self.reapWorkers(now);
+        self.retryWaitingExtracts(now);
         self.reapResolves(now);
         self.reapMoves(now);
         self.scanWatched(now);
@@ -653,6 +707,11 @@ pub const Downloader = struct {
 
     fn retryInstall(self: *Downloader, r: *Rec, now: i64) void {
         const j = &r.job;
+        var buf: [1200]u8 = undefined;
+        if (self.downloadOnlyDetail(r, &buf) != null) {
+            log.info("job {d}: retry_install ignored: not installed automatically", .{j.id});
+            return self.toast("This download is not installed automatically — open its folder");
+        }
         if (j.step == .seeding) return self.raiseInstall(r);
         const again = j.step == .done or (j.step == .failed and j.fail == .install_failed);
         if (!again) {
@@ -660,7 +719,7 @@ pub const Downloader = struct {
             return;
         }
         self.apply(r, .{ .step = .extracting, .attempts = j.attempts }, now);
-        self.startExtract(r, now);
+        self.startExtract(r, now, .again);
     }
 
     fn userInput(self: *Downloader, id: u64, input: model.Input, now: i64) void {
@@ -759,7 +818,9 @@ pub const Downloader = struct {
         const job: model.Job = .{
             .id = 0,
             .group_id = e.group_with orelse 0,
-            .kind = switch (entry.kind) {
+            // An update-only patch is not a full game: it is downloaded and
+            // applied by hand, like extras (`downloadOnlyDetail`).
+            .kind = if (entry.update_only) .extra else switch (entry.kind) {
                 .game => .game,
                 .mod => .mod,
                 .extra, .translation => .extra,
@@ -771,6 +832,7 @@ pub const Downloader = struct {
             .engine = resolve.engineFor(entry, e.href),
             .platform = plat,
             .part = entry.part,
+            .version = e.version,
             .step = .queued,
             .dest_dir = "",
             .created_at = now,
@@ -1132,7 +1194,10 @@ pub const Downloader = struct {
             }
             if (j.final_path != null) r.dirty = true;
         }
-        self.transition(r, .{ .engine_progress = .{ .p = p, .now = now } }, now, null);
+        // A donor link the CDN refuses has expired: only a new Download
+        // click (a fresh signed URL) helps; F95 sign-in does not.
+        const expired = p.phase == .failed and isDonor(j) and (p.fail == .auth_required or p.fail == .host_gone);
+        self.transition(r, .{ .engine_progress = .{ .p = p, .now = now } }, now, if (expired) LINK_EXPIRED else null);
     }
 
     fn tickRetries(self: *Downloader, now: i64) void {
@@ -1188,7 +1253,12 @@ pub const Downloader = struct {
         }
         r.dirty = true;
         self.touched = true;
-        if (step_changed and t.step.isTerminal()) self.trim_due = true;
+        if (step_changed and t.step.isTerminal()) {
+            self.trim_due = true;
+            // Cookies never stay on a finished row. A failure with an
+            // automatic retry pending keeps them until that retry runs.
+            if (!(t.step == .failed and t.next_retry_at != null)) dropSecrets(self.alloc, j);
+        }
         if (step_changed or detail_changed or fail_changed) {
             self.store.addEvent(j.id, now, j.step, j.step_detail) catch |e|
                 log.warn("job {d}: event not stored: {s}", .{ j.id, @errorName(e) });
@@ -1205,7 +1275,7 @@ pub const Downloader = struct {
             .resume_engine => if (r.job.engine_ref) |ref| if (self.engineFor(r.job.engine)) |eng|
                 eng.unpause(ref) catch |e| log.warn("job {d}: resume failed: {s}", .{ r.job.id, @errorName(e) }),
             .start_verify => self.startVerify(r, now),
-            .start_extract => self.startExtract(r, now),
+            .start_extract => self.startExtract(r, now, .fresh),
             .raise_install => self.raiseInstall(r),
             .delete_file_and_restart => {
                 if (r.job.final_path) |fp| {
@@ -1250,28 +1320,57 @@ pub const Downloader = struct {
         self.transition(r, .verify_ok, now, detail);
     }
 
-    fn startExtract(self: *Downloader, r: *Rec, now: i64) void {
+    /// After verify (and on reconcile / "Install again"): extract the
+    /// archive into the job's library folder, or finish without extracting
+    /// for downloads that are not installed automatically.
+    fn startExtract(self: *Downloader, r: *Rec, now: i64, mode: ExtractMode) void {
+        r.extract_wait = null;
         const path = r.job.final_path orelse
             return self.transition(r, .{ .extract_err = .bad_archive }, now, "The downloaded file could not be found");
+        var why_buf: [1200]u8 = undefined;
+        if (self.downloadOnlyDetail(r, &why_buf)) |why| return self.finishDownloadOnly(r, why, now);
         if (archive.detectFormat(path) == .unknown) return self.transition(r, .extract_ok, now, NOT_ARCHIVE);
         if (r.job.kind == .mod) return self.transition(r, .extract_ok, now, MOD_ARCHIVE);
-        const dir = self.extractDir(&r.job) catch
+        var dir: []u8 = (if (r.job.extract_dir) |d| self.alloc.dupe(u8, d) else self.extractDirN(&r.job, 1)) catch
             return self.transition(r, .{ .extract_err = .unknown }, now, "Out of memory");
-        const marker = std.fmt.allocPrint(self.alloc, "{s}" ++ EXTRACT_MARKER, .{dir}) catch {
+        // Never two extracts into one folder: wait for the other job's
+        // worker (it always ends; a waiting job holds no worker, so two
+        // waiting jobs never wait on each other).
+        if (self.extractBusy(r, dir)) {
+            self.alloc.free(dir);
+            r.extract_wait = mode;
+            self.apply(r, .{ .step = .extracting, .detail = EXTRACT_WAIT, .attempts = r.job.attempts }, now);
+            return;
+        }
+        var marker = std.fmt.allocPrint(self.alloc, "{s}" ++ EXTRACT_MARKER, .{dir}) catch {
             self.alloc.free(dir);
             return self.transition(r, .{ .extract_err = .unknown }, now, "Out of memory");
         };
         const cwd = std.Io.Dir.cwd();
         if ((cwd.access(self.io, marker, .{}) catch null) != null) {
-            // Our own interrupted extract: start over from an empty folder.
+            // An interrupted extract (no worker runs there): start over.
             log.info("job {d}: clearing half-extracted '{s}'", .{ r.job.id, dir });
             cwd.deleteTree(self.io, dir) catch |e|
                 log.warn("job {d}: clearing '{s}' failed: {s}", .{ r.job.id, dir, @errorName(e) });
         } else if (dirHasEntries(self.io, dir)) {
             self.alloc.free(marker);
+            if (mode == .again or r.job.extract_dir != null) {
+                // This job's own finished extract (or "Install again" of
+                // what is on disk): register the folder as it is.
+                self.setExtractDir(r, dir);
+                self.alloc.free(dir);
+                return self.transition(r, .extract_ok, now, FOLDER_EXISTS);
+            }
+            // Someone else's files: never register them under this job.
             self.alloc.free(dir);
-            return self.transition(r, .extract_ok, now, FOLDER_EXISTS);
+            dir = self.freeSibling(r) orelse
+                return self.transition(r, .{ .extract_err = .unknown }, now, "No free folder for this version in the library");
+            marker = std.fmt.allocPrint(self.alloc, "{s}" ++ EXTRACT_MARKER, .{dir}) catch {
+                self.alloc.free(dir);
+                return self.transition(r, .{ .extract_err = .unknown }, now, "Out of memory");
+            };
         }
+        self.setExtractDir(r, dir);
         writeMarker(self.io, dir, marker);
         const pw = self.newWorker(.extract, path, dir, marker) catch {
             self.alloc.free(marker);
@@ -1279,6 +1378,104 @@ pub const Downloader = struct {
             return self.transition(r, .{ .extract_err = .unknown }, now, "Could not start extracting");
         };
         self.spawnWorker(r, pw, now);
+        if (std.mem.eql(u8, r.job.step_detail, EXTRACT_WAIT))
+            self.apply(r, .{ .step = r.job.step, .attempts = r.job.attempts }, now);
+    }
+
+    /// Jobs held by `extract_wait` try again (after `reapWorkers`, so a
+    /// folder freed this tick is seen at once).
+    fn retryWaitingExtracts(self: *Downloader, now: i64) void {
+        for (self.recs.items) |r| {
+            const mode = r.extract_wait orelse continue;
+            if (r.job.step != .extracting or r.worker != null) {
+                r.extract_wait = null;
+                continue;
+            }
+            self.startExtract(r, now, mode);
+        }
+    }
+
+    /// Another job's (or an orphaned) extract worker writes into `dir`.
+    fn extractBusy(self: *Downloader, r: *const Rec, dir: []const u8) bool {
+        for (self.recs.items) |o| {
+            if (o == r) continue;
+            const pw = o.worker orelse continue;
+            if (pw.kind == .extract and std.mem.eql(u8, pw.dest, dir)) return true;
+        }
+        for (self.orphans.items) |pw| {
+            if (pw.kind == .extract and pw.w.running() and std.mem.eql(u8, pw.dest, dir)) return true;
+        }
+        return false;
+    }
+
+    /// The first `<dir> (N)` (N = 2…) that is missing or empty and not in
+    /// use; null when all are taken. Owned.
+    fn freeSibling(self: *Downloader, r: *const Rec) ?[]u8 {
+        var n: u32 = 2;
+        while (n <= MAX_SIBLINGS) : (n += 1) {
+            const cand = self.extractDirN(&r.job, n) catch return null;
+            if (!self.extractBusy(r, cand) and !dirHasEntries(self.io, cand)) return cand;
+            self.alloc.free(cand);
+        }
+        return null;
+    }
+
+    /// Remember (and store at once, so a crash cannot lose it) the folder
+    /// the job extracts into.
+    fn setExtractDir(self: *Downloader, r: *Rec, dir: []const u8) void {
+        if (r.job.extract_dir) |old| {
+            if (std.mem.eql(u8, old, dir)) return;
+        }
+        const copy = self.alloc.dupe(u8, dir) catch {
+            log.warn("job {d}: extract folder not remembered (out of memory)", .{r.job.id});
+            return;
+        };
+        if (r.job.extract_dir) |old| freeStr(self.alloc, old);
+        r.job.extract_dir = copy;
+        r.dirty = true;
+        self.store.update(&r.job) catch |e|
+            log.warn("job {d}: extract folder not stored yet: {s}", .{ r.job.id, @errorName(e) });
+    }
+
+    /// Why this job is downloaded but not extracted / installed, or null
+    /// when it installs normally:
+    ///   - a pasted URL with no game (`game_thread_id == 0`);
+    ///   - an extra / translation / update-only patch, or a mod without a
+    ///     mod id (only the mod manager's own jobs have one);
+    ///   - one part of a multi-part set (part 1 must be extracted by hand
+    ///     once every part is there).
+    fn downloadOnlyDetail(self: *Downloader, r: *const Rec, buf: []u8) ?[]const u8 {
+        const j = &r.job;
+        if (j.game_thread_id == 0)
+            return std.fmt.bufPrint(buf, "Downloaded to {s}", .{j.dest_dir}) catch "Downloaded";
+        if (j.kind == .extra or (j.kind == .mod and j.mod_id == null))
+            return std.fmt.bufPrint(buf, "Downloaded to {s} — apply it by hand (Mods / patch)", .{j.dest_dir}) catch "Downloaded — apply it by hand (Mods / patch)";
+        if (self.isMultiPart(r)) {
+            const tail = " — extract part 1 by hand once all parts are here";
+            if (j.part) |n| return std.fmt.bufPrint(buf, "Downloaded part {d}" ++ tail, .{n}) catch "Downloaded this part" ++ tail;
+            return "Downloaded this part" ++ tail;
+        }
+        return null;
+    }
+
+    /// Part of a set: grouped with an earlier job, or a numbered part
+    /// whose group has more than one job.
+    fn isMultiPart(self: *Downloader, r: *const Rec) bool {
+        const j = &r.job;
+        if (j.group_id != j.id) return true;
+        if (j.part == null) return false;
+        var n: usize = 0;
+        for (self.recs.items) |o| {
+            if (o.job.group_id == j.group_id) n += 1;
+        }
+        return n > 1;
+    }
+
+    /// End a download-only job: `done` with `why`, or `seeding` for a
+    /// torrent still held by aria2 (it seeds like any finished torrent).
+    fn finishDownloadOnly(self: *Downloader, r: *Rec, why: []const u8, now: i64) void {
+        const step: model.Step = if (r.job.engine == .aria2_torrent and r.job.engine_ref != null) .seeding else .done;
+        self.apply(r, .{ .step = step, .detail = why, .attempts = r.job.attempts }, now);
     }
 
     /// Takes ownership of `dest` and `marker` on success.
@@ -1337,16 +1534,30 @@ pub const Downloader = struct {
         }
     }
 
-    /// `<library_root>/<game_thread_id>/<version or "unversioned">/`.
-    fn extractDir(self: *Downloader, j: *const model.Job) ![]u8 {
+    /// `<library_root>/<game_thread_id>/<version or "unversioned">` plus
+    /// ` (<platform>)` when the link names one and ` (<n>)` for n > 1, and
+    /// a trailing separator; e.g. `…/9/v1.2 (Linux)/`. Owned.
+    fn extractDirN(self: *Downloader, j: *const model.Job, n: u32) ![]u8 {
         var vbuf: [128]u8 = undefined;
         const v = safeSegment(&vbuf, j.version);
-        return std.fmt.allocPrint(self.alloc, "{s}" ++ sep ++ "{d}" ++ sep ++ "{s}" ++ sep, .{ self.roots.library_root, j.game_thread_id, v });
+        var sbuf: [96]u8 = undefined;
+        var sn: usize = 0;
+        if (j.platform) |p| if (p.len > 0) {
+            var pbuf: [48]u8 = undefined;
+            if (std.fmt.bufPrint(sbuf[sn..], " ({s})", .{safeSegment(&pbuf, p)})) |w| sn += w.len else |_| {}
+        };
+        if (n > 1) {
+            if (std.fmt.bufPrint(sbuf[sn..], " ({d})", .{n})) |w| sn += w.len else |_| {}
+        }
+        return std.fmt.allocPrint(self.alloc, "{s}" ++ sep ++ "{d}" ++ sep ++ "{s}{s}" ++ sep, .{ self.roots.library_root, j.game_thread_id, v, sbuf[0..sn] });
     }
 
     fn installReady(self: *Downloader, j: *const model.Job) !InstallReady {
         const archive_path = j.final_path orelse "";
-        const extracted: ?[]u8 = if (j.kind != .mod and archive.detectFormat(archive_path) != .unknown) try self.extractDir(j) else null;
+        const extracted: ?[]u8 = if (j.kind != .mod and archive.detectFormat(archive_path) != .unknown)
+            (if (j.extract_dir) |d| try self.alloc.dupe(u8, d) else try self.extractDirN(j, 1))
+        else
+            null;
         return .{
             .job_id = j.id,
             .game_thread_id = j.game_thread_id,
@@ -1647,10 +1858,17 @@ pub const Downloader = struct {
     fn reconcileOne(self: *Downloader, r: *Rec, now: i64) void {
         const j = &r.job;
         switch (j.step) {
-            .done, .failed, .cancelled, .queued => {},
+            .done, .failed, .cancelled => {
+                // Rows finished by an older build may still hold cookies.
+                if (j.resolved_headers.len > 0 and !(j.step == .failed and j.next_retry_at != null)) {
+                    dropSecrets(self.alloc, j);
+                    r.dirty = true;
+                }
+            },
+            .queued => {},
             .installing => self.raiseInstall(r),
             .verifying => self.startVerify(r, now),
-            .extracting => self.startExtract(r, now),
+            .extracting => self.startExtract(r, now, .again),
             // Browser jobs keep waiting; the page is not opened again (the
             // row offers "Open page again"). Files downloaded while f69
             // was closed are older than `awaiting_since` and not matched.
@@ -1698,7 +1916,11 @@ pub const Downloader = struct {
     fn persist(self: *Downloader, now: i64) void {
         for (self.recs.items) |r| {
             if (r.dirty) {
-                self.store.update(&r.job) catch log.err("job {d}: store update failed", .{r.job.id});
+                // On failure the row stays dirty and is written next tick.
+                self.store.update(&r.job) catch {
+                    log.err("job {d}: store update failed", .{r.job.id});
+                    continue;
+                };
                 r.dirty = false;
                 r.bytes_dirty = false;
                 r.bytes_saved_at = now;
@@ -1847,6 +2069,20 @@ pub const Downloader = struct {
         self.alloc.destroy(r);
     }
 };
+
+/// An F95 donor DDL job (signed URL + cookie from the UI).
+fn isDonor(j: *const model.Job) bool {
+    return std.mem.eql(u8, j.host, HOST_DONOR);
+}
+
+/// Forget the job's request headers (cookies) and when its link was
+/// resolved, so a later Retry resolves again instead of reusing a link
+/// without its headers.
+fn dropSecrets(a: std.mem.Allocator, j: *model.Job) void {
+    freeList(a, j.resolved_headers);
+    j.resolved_headers = &.{};
+    j.resolved_at = null;
+}
 
 /// True when the job's link must go through the resolver: every catalogue
 /// job (its host is a `dl_classify.Host` label), and a pasted (`HOST_RAW`)
@@ -2043,6 +2279,7 @@ pub fn cloneJob(a: std.mem.Allocator, j: model.Job) !model.Job {
     c.engine_ref = null;
     c.dest_dir = "";
     c.final_path = null;
+    c.extract_dir = null;
     errdefer freeJobStrings(a, &c);
     c.title = try dupeStr(a, j.title);
     c.source_href = try dupeStr(a, j.source_href);
@@ -2056,6 +2293,7 @@ pub fn cloneJob(a: std.mem.Allocator, j: model.Job) !model.Job {
     c.engine_ref = try dupeOpt(a, j.engine_ref);
     c.dest_dir = try dupeStr(a, j.dest_dir);
     c.final_path = try dupeOpt(a, j.final_path);
+    c.extract_dir = try dupeOpt(a, j.extract_dir);
     return c;
 }
 
@@ -2075,6 +2313,7 @@ fn freeJobStrings(a: std.mem.Allocator, j: *model.Job) void {
     if (j.engine_ref) |s| freeStr(a, s);
     freeStr(a, j.dest_dir);
     if (j.final_path) |s| freeStr(a, s);
+    if (j.extract_dir) |s| freeStr(a, s);
     if (j.resolved_headers.len > 0) {
         for (j.resolved_headers) |h| freeStr(a, h);
         a.free(j.resolved_headers);
@@ -2104,6 +2343,7 @@ fn cloneCommand(a: std.mem.Allocator, cmd: Command) !Command {
         .enqueue_catalogue => |*e| {
             e.href = try a.dupe(u8, e.href);
             e.title = try a.dupe(u8, e.title);
+            if (e.version) |v| e.version = try a.dupe(u8, v);
         },
         .paste_link => |*e| e.url = try a.dupe(u8, e.url),
         .pick_file => |*e| e.path = try a.dupe(u8, e.path),
@@ -2781,6 +3021,8 @@ const ResolveStub = struct {
     hits: std.atomic.Value(u32) = .init(0),
     /// While true, every call waits (to catch a job mid-resolve).
     hold: std.atomic.Value(bool) = .init(false),
+    /// Each call first sleeps this long (a slow host).
+    sleep_ms: i64 = 0,
 
     fn ctx(self: *ResolveStub) ResolverCtx {
         return .{ .http = .{ .ctx = self, .get = get, .postForm = post, .cookieHeader = cookieHeader } };
@@ -2795,6 +3037,7 @@ const ResolveStub = struct {
     fn get(p: *anyopaque, alloc: std.mem.Allocator, url: []const u8) errs.Error![]u8 {
         const self = cast(p);
         _ = self.hits.fetchAdd(1, .monotonic);
+        if (self.sleep_ms > 0) testing.io.sleep(std.Io.Duration.fromMilliseconds(self.sleep_ms), .real) catch {};
         while (self.hold.load(.acquire)) std.Thread.yield() catch {};
         const r = self.find(url) orelse return errs.Error.NotFound;
         return alloc.dupe(u8, r.body) catch errs.Error.OutOfMemory;
@@ -3382,4 +3625,289 @@ test "browser: accepting a file that is gone → toast, prompt cleared, still wa
     defer Downloader.freeEvents(testing.allocator, evs);
     try testing.expectEqual(@as(usize, 1), evs.len);
     try testing.expectEqualStrings("That file is gone — still waiting", evs[0].toast);
+}
+
+// ---------------------------------------------------------------- final-review fixes
+
+/// Tick until no job has a verify/extract worker; gives up after 5 s.
+fn waitWorkers(fx: *Fx, now: i64) !void {
+    fx.dl.stepOnce(now);
+    var waited_ms: u32 = 0;
+    while (blk: {
+        for (fx.dl.recs.items) |r| if (r.worker != null or r.extract_wait != null) break :blk true;
+        break :blk false;
+    }) {
+        if (waited_ms >= 5000) return error.WorkerTimeout;
+        fx.env.io.sleep(std.Io.Duration.fromMilliseconds(5), .real) catch {};
+        waited_ms += 5;
+        fx.dl.stepOnce(now);
+    }
+}
+
+fn countInstallReady(fx: *Fx) usize {
+    const evs = fx.dl.drainEvents(testing.allocator);
+    defer Downloader.freeEvents(testing.allocator, evs);
+    return countEvents(evs, .install_ready);
+}
+
+test "downloader: catalogue jobs of one game get versioned, per-platform extract folders (version sent with the command)" {
+    var fx = try Fx.create(.{});
+    defer fx.destroy();
+    try fx.env.writeFile("payload/g.zip", "not really a zip");
+    const zip = try fx.env.path("payload/g.zip");
+    defer testing.allocator.free(zip);
+    const script = [_]model.Progress{.{ .phase = .transfer_done, .final_path = zip }};
+    fx.fake.script = &script;
+    try seedCatalogue(fx, 9, 0, "https://pixeldrain.com/u/abc", "Pixeldrain", "Win");
+    try seedCatalogue(fx, 9, 1, "https://pixeldrain.com/u/def", "Pixeldrain", "Linux");
+    fx.dl.send(.{ .enqueue_catalogue = .{ .game_thread_id = 9, .href = "https://pixeldrain.com/u/abc", .title = "G", .version = "v1" } });
+    fx.dl.send(.{ .enqueue_catalogue = .{ .game_thread_id = 9, .href = "https://pixeldrain.com/u/def", .title = "G", .version = "v2/beta" } });
+    fx.dl.stepOnce(1000);
+
+    const a = fx.dl.recs.items[0];
+    const b = fx.dl.recs.items[1];
+    try testing.expectEqualStrings("v1", a.job.version.?);
+    // The extract started (it may already have failed on the fake zip).
+    const want_a = try std.fmt.allocPrint(testing.allocator, "{s}" ++ sep ++ "9" ++ sep ++ "v1 (Win)" ++ sep, .{fx.lib_root});
+    defer testing.allocator.free(want_a);
+    const want_b = try std.fmt.allocPrint(testing.allocator, "{s}" ++ sep ++ "9" ++ sep ++ "v2_beta (Linux)" ++ sep, .{fx.lib_root});
+    defer testing.allocator.free(want_b);
+    try testing.expectEqualStrings(want_a, a.job.extract_dir.?);
+    try testing.expectEqualStrings(want_b, b.job.extract_dir.?);
+    // Stored at once, before the extract ends.
+    {
+        const rows = try fx.dl.store.loadAll(testing.allocator);
+        defer store_mod.Store.freeJobs(testing.allocator, rows);
+        try testing.expectEqualStrings(want_a, rows[0].extract_dir.?);
+    }
+    try waitWorkers(fx, 1001);
+}
+
+test "downloader: two extracts into the same folder at once → the second waits, then runs" {
+    var fx = try Fx.create(.{});
+    defer fx.destroy();
+    try fx.env.writeFile("payload/g.zip", "not really a zip");
+    const zip = try fx.env.path("payload/g.zip");
+    defer testing.allocator.free(zip);
+    // Two jobs of one game and version, both verified (e.g. two mirrors).
+    var j = storedJob(.extracting);
+    j.game_thread_id = 9;
+    j.version = "v1";
+    j.final_path = zip;
+    const id_a = try fx.dl.store.insert(&j);
+    const id_b = try fx.dl.store.insert(&j);
+    try fx.dl.load();
+    const a = fx.rec(id_a);
+    const b = fx.rec(id_b);
+    // Start both before any worker result is read (as one tick would).
+    fx.dl.startExtract(a, 1000, .fresh);
+    fx.dl.startExtract(b, 1000, .fresh);
+    try testing.expect(a.worker != null);
+    try testing.expectEqual(model.Step.extracting, b.job.step);
+    try testing.expect(b.worker == null);
+    try testing.expectEqual(@as(?ExtractMode, .fresh), b.extract_wait);
+    try testing.expectEqualStrings(EXTRACT_WAIT, b.job.step_detail);
+    try testing.expectEqualStrings(a.job.extract_dir.?, a.worker.?.dest);
+
+    try waitWorkers(fx, 1001);
+    // Both extracts ran (and failed on the fake zip); neither still waits.
+    try testing.expectEqual(model.Step.failed, a.job.step);
+    try testing.expectEqual(model.Step.failed, b.job.step);
+    try testing.expectEqual(model.FailReason.bad_archive, b.job.fail.?);
+    try testing.expect(b.extract_wait == null);
+    try testing.expect(b.job.extract_dir != null);
+}
+
+test "downloader: a fresh download never registers someone else's folder — it extracts into '<dir> (2)'" {
+    var fx = try Fx.create(.{});
+    defer fx.destroy();
+    try fx.env.writeFile("payload/g.zip", "not really a zip");
+    const zip = try fx.env.path("payload/g.zip");
+    defer testing.allocator.free(zip);
+    try fx.env.writeFile("lib/77/unversioned/user.txt", "mine");
+    const script = [_]model.Progress{.{ .phase = .transfer_done, .final_path = zip }};
+    fx.fake.script = &script;
+    fx.enqueue("https://example.invalid/g.zip");
+    fx.dl.stepOnce(1000);
+    const r = fx.dl.recs.items[0];
+    try testing.expect(std.mem.endsWith(u8, r.job.extract_dir.?, "77" ++ sep ++ "unversioned (2)" ++ sep));
+    try testing.expect(!std.mem.eql(u8, r.job.step_detail, FOLDER_EXISTS));
+    try waitWorkers(fx, 1001);
+    const user = try fx.env.path("lib/77/unversioned/user.txt");
+    defer testing.allocator.free(user);
+    try testing.expect(fileExists(fx, user));
+}
+
+test "downloader: retry_install still registers the folder on disk" {
+    var fx = try Fx.create(.{});
+    defer fx.destroy();
+    try fx.env.writeFile("payload/g.zip", "not really a zip");
+    const zip = try fx.env.path("payload/g.zip");
+    defer testing.allocator.free(zip);
+    try fx.env.writeFile("lib/9/v3/game.exe", "x");
+    var d = storedJob(.done);
+    d.game_thread_id = 9;
+    d.version = "v3";
+    d.final_path = zip;
+    const id = try fx.dl.store.insert(&d);
+    try fx.dl.load();
+    fx.dl.send(.{ .retry_install = id });
+    fx.dl.stepOnce(1000);
+    try testing.expectEqual(model.Step.installing, fx.rec(id).job.step);
+    try testing.expectEqualStrings(FOLDER_EXISTS, fx.rec(id).job.step_detail);
+    const want = try std.fmt.allocPrint(testing.allocator, "{s}" ++ sep ++ "9" ++ sep ++ "v3" ++ sep, .{fx.lib_root});
+    defer testing.allocator.free(want);
+    try testing.expectEqualStrings(want, fx.rec(id).job.extract_dir.?);
+    const evs = fx.dl.drainEvents(testing.allocator);
+    defer Downloader.freeEvents(testing.allocator, evs);
+    try testing.expectEqual(@as(usize, 1), evs.len);
+    try testing.expectEqualStrings(want, evs[0].install_ready.extracted_dir.?);
+}
+
+test "downloader: a pasted URL with no game (game_thread_id 0) just downloads — done, no extract, no install" {
+    var fx = try Fx.create(.{});
+    defer fx.destroy();
+    try fx.env.writeFile("payload/g.zip", "not really a zip");
+    const zip = try fx.env.path("payload/g.zip");
+    defer testing.allocator.free(zip);
+    const script = [_]model.Progress{.{ .phase = .transfer_done, .final_path = zip }};
+    fx.fake.script = &script;
+    fx.dl.send(.{ .enqueue_url = .{ .url = "https://example.invalid/g.zip", .kind = .game, .game_thread_id = 0, .title = "g.zip", .host = HOST_RAW } });
+    fx.dl.stepOnce(1000);
+    const r = fx.dl.recs.items[0];
+    try testing.expectEqual(model.Step.done, r.job.step);
+    try testing.expect(r.worker == null);
+    try testing.expect(r.job.extract_dir == null);
+    try testing.expect(std.mem.startsWith(u8, r.job.step_detail, "Downloaded to "));
+    try testing.expect(std.mem.endsWith(u8, r.job.step_detail, r.job.dest_dir));
+    try testing.expectEqual(@as(usize, 0), countInstallReady(fx));
+    // "Install again" has nothing to install.
+    fx.dl.send(.{ .retry_install = r.job.id });
+    fx.dl.stepOnce(1001);
+    try testing.expectEqual(model.Step.done, r.job.step);
+    try testing.expectEqual(@as(usize, 0), countInstallReady(fx));
+}
+
+test "downloader: parts of a multi-part set are downloaded and verified only" {
+    var fx = try Fx.create(.{});
+    defer fx.destroy();
+    try fx.env.writeFile("payload/g.zip", "not really a zip");
+    const zip = try fx.env.path("payload/g.zip");
+    defer testing.allocator.free(zip);
+    const script = [_]model.Progress{.{ .phase = .transfer_done, .final_path = zip }};
+    fx.fake.script = &script;
+    try seedCatalogue(fx, 9, 0, "https://pixeldrain.com/u/p1", "Pixeldrain", "Part 1");
+    try seedCatalogue(fx, 9, 1, "https://pixeldrain.com/u/p2", "Pixeldrain", "Part 2");
+    fx.dl.send(.{ .enqueue_catalogue = .{ .game_thread_id = 9, .href = "https://pixeldrain.com/u/p1", .title = "G", .version = "v1" } });
+    fx.dl.send(.{ .enqueue_catalogue = .{ .game_thread_id = 9, .href = "https://pixeldrain.com/u/p2", .title = "G", .version = "v1", .group_with = 1 } });
+    fx.dl.stepOnce(1000);
+    const p1 = fx.dl.recs.items[0];
+    const p2 = fx.dl.recs.items[1];
+    try testing.expectEqual(p1.job.id, p2.job.group_id);
+    try testing.expectEqual(model.Step.done, p1.job.step);
+    try testing.expectEqual(model.Step.done, p2.job.step);
+    try testing.expectEqualStrings("Downloaded part 1 — extract part 1 by hand once all parts are here", p1.job.step_detail);
+    try testing.expectEqualStrings("Downloaded part 2 — extract part 1 by hand once all parts are here", p2.job.step_detail);
+    try testing.expect(p1.worker == null and p2.worker == null);
+    try testing.expectEqual(@as(usize, 0), countInstallReady(fx));
+}
+
+test "downloader: extras, update-only patches and mods without a mod id are downloaded only; a mod-manager mod still installs" {
+    var fx = try Fx.create(.{ .slots_files = 8 });
+    defer fx.destroy();
+    try fx.env.writeFile("payload/g.zip", "not really a zip");
+    const zip = try fx.env.path("payload/g.zip");
+    defer testing.allocator.free(zip);
+    const script = [_]model.Progress{.{ .phase = .transfer_done, .final_path = zip }};
+    fx.fake.script = &script;
+    try seedCatalogue(fx, 9, 0, "https://pixeldrain.com/u/upd", "Pixeldrain", "Update only (v1 to v2)");
+    fx.dl.send(.{ .enqueue_url = .{ .url = "https://example.invalid/extra.zip", .kind = .extra, .game_thread_id = 77, .title = "Extra", .host = HOST_RAW } });
+    fx.dl.send(.{ .enqueue_url = .{ .url = "https://example.invalid/mod.zip", .kind = .mod, .game_thread_id = 77, .title = "Mod", .host = HOST_RAW } });
+    fx.dl.send(.{ .enqueue_catalogue = .{ .game_thread_id = 9, .href = "https://pixeldrain.com/u/upd", .title = "G" } });
+    fx.dl.send(.{ .enqueue_url = .{ .url = "https://example.invalid/mm.zip", .kind = .mod, .mod_id = 5, .game_thread_id = 77, .title = "Managed mod", .host = HOST_RAW } });
+    fx.dl.stepOnce(1000);
+    for (fx.dl.recs.items[0..3]) |r| {
+        try testing.expectEqual(model.Step.done, r.job.step);
+        try testing.expect(std.mem.endsWith(u8, r.job.step_detail, "apply it by hand (Mods / patch)"));
+        try testing.expect(r.worker == null);
+    }
+    try testing.expectEqual(model.Kind.extra, fx.dl.recs.items[2].job.kind);
+    const mm = fx.dl.recs.items[3];
+    try testing.expectEqual(model.Step.installing, mm.job.step);
+    try testing.expectEqualStrings(MOD_ARCHIVE, mm.job.step_detail);
+    try testing.expectEqual(@as(usize, 1), countInstallReady(fx));
+}
+
+test "downloader: a refused donor link says it expired, is not retried, and its cookie is dropped; a retryable failure keeps it" {
+    var fx = try Fx.create(.{});
+    defer fx.destroy();
+    const net = [_]model.Progress{.{ .phase = .failed, .fail = .network, .msg = "reset" }};
+    fx.fake.script = &net;
+    fx.dl.send(.{ .enqueue_url = .{ .url = "https://attachments.f95zone.to/x.zip", .kind = .game, .game_thread_id = 77, .title = "G", .host = HOST_DONOR, .headers = &.{"Cookie: xf_session=secret"} } });
+    fx.dl.stepOnce(1000);
+    const r = fx.dl.recs.items[0];
+    try testing.expectEqual(model.Step.failed, r.job.step);
+    try testing.expect(r.job.next_retry_at != null);
+    // An automatic retry is pending: it still needs the cookie.
+    try testing.expectEqual(@as(usize, 1), r.job.resolved_headers.len);
+
+    const gone = [_]model.Progress{.{ .phase = .failed, .fail = .auth_required, .msg = "aria2 exit 24" }};
+    fx.fake.script = &gone;
+    fx.fake.idx = 0;
+    fx.dl.stepOnce(1030); // the retry starts …
+    fx.dl.stepOnce(1031); // … and the CDN refuses it
+    try testing.expectEqual(model.Step.failed, r.job.step);
+    try testing.expectEqual(model.FailReason.auth_required, r.job.fail.?);
+    try testing.expectEqualStrings(LINK_EXPIRED, r.job.step_detail);
+    try testing.expectEqual(@as(?i64, null), r.job.next_retry_at);
+    try testing.expectEqual(@as(usize, 0), r.job.resolved_headers.len);
+    const rows = try fx.dl.store.loadAll(testing.allocator);
+    defer store_mod.Store.freeJobs(testing.allocator, rows);
+    try testing.expectEqual(@as(usize, 0), rows[0].resolved_headers.len);
+    // No automatic retry, however long we wait.
+    const started = fx.fake.started;
+    fx.dl.stepOnce(99_999);
+    try testing.expectEqual(started, fx.fake.started);
+}
+
+test "downloader: deinit returns within 4 s while a worker still runs (the worker is detached)" {
+    // The worker outlives this test: its stub and allocator must too.
+    const S = struct {
+        var stub: ResolveStub = .{ .routes = &.{}, .sleep_ms = 10_000 };
+    };
+    const a = std.heap.smp_allocator;
+    var fake: engine_mod.FakeEngine = .{ .alloc = a, .script = &.{} };
+    var dl = Downloader.init(a, testing.io, try store_mod.Store.openMemory(a), .{ .aria2 = fake.engine() }, .{
+        .downloads_root = "/nonexistent/f69-dl",
+        .library_root = "/nonexistent/f69-lib",
+        .data_root = "/nonexistent/f69-data",
+    }, .{}, S.stub.ctx());
+    dl.send(.{ .enqueue_url = .{ .url = "https://pixeldrain.com/u/slow", .kind = .game, .game_thread_id = 77, .title = "G", .host = HOST_RAW } });
+    dl.stepOnce(1000);
+    try testing.expect(dl.recs.items[0].resolve_worker != null);
+    const t0 = std.Io.Clock.Timestamp.now(testing.io, .awake).raw.toMilliseconds();
+    dl.deinit();
+    const ms = std.Io.Clock.Timestamp.now(testing.io, .awake).raw.toMilliseconds() - t0;
+    try testing.expect(ms < 4000);
+    try testing.expect(ms >= QUIT_WAIT_MS - 100);
+}
+
+test "downloader: reconcile drops cookies left on finished rows; a failure with a retry pending keeps them" {
+    var fx = try Fx.create(.{});
+    defer fx.destroy();
+    var d = storedJob(.done);
+    d.resolved_headers = &.{"Cookie: a=b"};
+    const id_d = try fx.dl.store.insert(&d);
+    var f = storedJob(.failed);
+    f.fail = .network;
+    f.next_retry_at = 99_999;
+    f.resolved_headers = &.{"Cookie: c=d"};
+    const id_f = try fx.dl.store.insert(&f);
+    try fx.dl.load();
+    fx.dl.reconcile();
+    try testing.expectEqual(@as(usize, 0), fx.rec(id_d).job.resolved_headers.len);
+    try testing.expectEqual(@as(usize, 1), fx.rec(id_f).job.resolved_headers.len);
+    const rows = try fx.dl.store.loadAll(testing.allocator);
+    defer store_mod.Store.freeJobs(testing.allocator, rows);
+    try testing.expectEqual(@as(usize, 0), rows[0].resolved_headers.len);
 }
