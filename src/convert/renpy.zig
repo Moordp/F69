@@ -42,11 +42,16 @@ pub fn detectVersion(
 /// Symlinks are preserved (Ren'Py SDKs ship `lib/python` as a symlink
 /// to the real `lib/python3.9` etc — losing it breaks the runtime).
 /// File modes are preserved (the python interpreter is +x).
+///
+/// Counts every file + symlink across the kept dirs first, then copies
+/// under phase "Copying runtime file i / n" with `tick(i, n)`;
+/// `prog.stop()` is polled before each item → `Cancelled`.
 pub fn installLinuxLibs(
     alloc: std.mem.Allocator,
     io: Io,
     install_dir: []const u8,
     sdk_dir: []const u8,
+    prog: dom.Progress,
 ) errs.Error!void {
     var sdk_lib_buf: [512]u8 = undefined;
     const sdk_lib = std.fmt.bufPrint(&sdk_lib_buf, "{s}/lib", .{sdk_dir}) catch return errs.Error.OutOfMemory;
@@ -60,41 +65,89 @@ pub fn installLinuxLibs(
     const install_lib = std.fmt.bufPrint(&install_lib_buf, "{s}/lib", .{install_dir}) catch return errs.Error.OutOfMemory;
     std.Io.Dir.cwd().createDirPath(io, install_lib) catch return errs.Error.LauncherWriteFailed;
 
-    var sdk_lib_dir = std.Io.Dir.cwd().openDir(io, sdk_lib, .{ .iterate = true }) catch return errs.Error.SdkLayoutInvalid;
-    defer sdk_lib_dir.close(io);
-
-    var it = sdk_lib_dir.iterate();
-    var copied: u32 = 0;
-    while (it.next(io) catch null) |entry| {
-        if (entry.kind != .directory) continue;
-        const keep = std.mem.startsWith(u8, entry.name, "py3-linux-x86_64") or
-            std.mem.startsWith(u8, entry.name, "py2-linux-x86_64") or
-            std.mem.startsWith(u8, entry.name, "linux-x86_64") or
-            std.mem.startsWith(u8, entry.name, "python");
-        if (!keep) continue;
-
-        var src_buf: [640]u8 = undefined;
-        const src = std.fmt.bufPrint(&src_buf, "{s}/{s}", .{ sdk_lib, entry.name }) catch return errs.Error.OutOfMemory;
-        var dest_buf: [640]u8 = undefined;
-        const dest = std.fmt.bufPrint(&dest_buf, "{s}/{s}", .{ install_lib, entry.name }) catch return errs.Error.OutOfMemory;
-        try copyTree(alloc, io, src, dest);
-        copied += 1;
+    // ---- pick the runtime dirs ----
+    var keep_names: std.ArrayList([]u8) = .empty;
+    defer {
+        for (keep_names.items) |n| alloc.free(n);
+        keep_names.deinit(alloc);
+    }
+    {
+        var sdk_lib_dir = std.Io.Dir.cwd().openDir(io, sdk_lib, .{ .iterate = true }) catch return errs.Error.SdkLayoutInvalid;
+        defer sdk_lib_dir.close(io);
+        var it = sdk_lib_dir.iterate();
+        while (it.next(io) catch null) |entry| {
+            if (entry.kind != .directory) continue;
+            const keep = std.mem.startsWith(u8, entry.name, "py3-linux-x86_64") or
+                std.mem.startsWith(u8, entry.name, "py2-linux-x86_64") or
+                std.mem.startsWith(u8, entry.name, "linux-x86_64") or
+                std.mem.startsWith(u8, entry.name, "python");
+            if (!keep) continue;
+            const dup = alloc.dupe(u8, entry.name) catch return errs.Error.OutOfMemory;
+            keep_names.append(alloc, dup) catch {
+                alloc.free(dup);
+                return errs.Error.OutOfMemory;
+            };
+        }
     }
 
-    if (copied == 0) {
+    if (keep_names.items.len == 0) {
         log.warn("SDK `lib/` had no matching Linux runtime dirs", .{});
         return errs.Error.SdkLayoutInvalid;
     }
-    log.info("installLinuxLibs: copied {d} dir(s) from {s} → {s}", .{ copied, sdk_lib, install_lib });
+
+    // ---- pass 1: count ----
+    var counter: CopyCounter = .{};
+    for (keep_names.items) |name| {
+        var src_buf: [640]u8 = undefined;
+        const src = std.fmt.bufPrint(&src_buf, "{s}/{s}", .{ sdk_lib, name }) catch return errs.Error.OutOfMemory;
+        counter.total += try countTree(alloc, io, src);
+    }
+
+    // ---- pass 2: copy ----
+    prog.tick(0, counter.total);
+    for (keep_names.items) |name| {
+        var src_buf: [640]u8 = undefined;
+        const src = std.fmt.bufPrint(&src_buf, "{s}/{s}", .{ sdk_lib, name }) catch return errs.Error.OutOfMemory;
+        var dest_buf: [640]u8 = undefined;
+        const dest = std.fmt.bufPrint(&dest_buf, "{s}/{s}", .{ install_lib, name }) catch return errs.Error.OutOfMemory;
+        try copyTree(alloc, io, src, dest, prog, &counter);
+    }
+
+    log.info("installLinuxLibs: copied {d} dir(s), {d} item(s) from {s} → {s}", .{ keep_names.items.len, counter.done, sdk_lib, install_lib });
+}
+
+/// Running (done, total) across several `copyTree` calls, so one
+/// install reports a single 1..n sequence.
+pub const CopyCounter = struct {
+    done: u64 = 0,
+    total: u64 = 0,
+};
+
+/// Files + symlinks under `src` (what `copyTree` will tick for).
+fn countTree(alloc: std.mem.Allocator, io: Io, src: []const u8) errs.Error!u64 {
+    var src_dir = std.Io.Dir.cwd().openDir(io, src, .{ .access_sub_paths = true, .iterate = true }) catch return errs.Error.SdkLayoutInvalid;
+    defer src_dir.close(io);
+    var walker = src_dir.walk(alloc) catch return errs.Error.OutOfMemory;
+    defer walker.deinit();
+    var n: u64 = 0;
+    while (walker.next(io) catch null) |entry| switch (entry.kind) {
+        .file, .sym_link => n += 1,
+        else => {},
+    };
+    return n;
 }
 
 /// Recursive copy preserving symlinks + file modes. Streams file
-/// content (no `readFileAlloc`-style memory spikes).
+/// content (no `readFileAlloc`-style memory spikes). Each file or
+/// symlink bumps `counter.done` and ticks `prog` under phase
+/// "Copying runtime file i / n"; `prog.stop()` before each → `Cancelled`.
 fn copyTree(
     alloc: std.mem.Allocator,
     io: Io,
     src: []const u8,
     dest: []const u8,
+    prog: dom.Progress,
+    counter: *CopyCounter,
 ) errs.Error!void {
     std.Io.Dir.cwd().createDirPath(io, dest) catch return errs.Error.LauncherWriteFailed;
 
@@ -112,11 +165,25 @@ fn copyTree(
 
         switch (entry.kind) {
             .directory => std.Io.Dir.cwd().createDirPath(io, dest_path) catch return errs.Error.LauncherWriteFailed,
-            .file => copyFile(io, src_path, dest_path) catch return errs.Error.LauncherWriteFailed,
-            .sym_link => copySymlink(alloc, io, src_path, dest_path) catch return errs.Error.LauncherWriteFailed,
+            .file, .sym_link => {
+                if (prog.stop()) return errs.Error.Cancelled;
+                setCopyPhase(prog, counter.done + 1, counter.total);
+                if (entry.kind == .file) {
+                    copyFile(io, src_path, dest_path) catch return errs.Error.LauncherWriteFailed;
+                } else {
+                    copySymlink(alloc, io, src_path, dest_path) catch return errs.Error.LauncherWriteFailed;
+                }
+                counter.done += 1;
+                prog.tick(counter.done, counter.total);
+            },
             else => {}, // sockets, fifos, devices — skip
         }
     }
+}
+
+fn setCopyPhase(prog: dom.Progress, i: u64, n: u64) void {
+    var buf: [64]u8 = undefined;
+    prog.setPhase(std.fmt.bufPrint(&buf, "Copying runtime file {d} / {d}", .{ i, n }) catch "Copying runtime file");
 }
 
 /// Copy `src` → `dest` streaming; preserves source mode bits (notably

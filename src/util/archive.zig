@@ -38,6 +38,82 @@ pub const ExtractOpts = struct {
     progress_total: u64 = 0,
 };
 
+/// A (ctx, callback) pair for byte-count progress. Same shape as
+/// `downloads.progress.Sink`; lives here so leaf modules (convert)
+/// can share `CountingReader` without importing `downloads`.
+pub const ProgressSink = struct {
+    ctx: ?*anyopaque = null,
+    cb: ?ProgressFn = null,
+
+    pub const none: ProgressSink = .{};
+
+    pub fn report(self: ProgressSink, done: u64, total: u64) void {
+        if (self.cb) |f| f(self.ctx, done, total);
+    }
+};
+
+/// A reader that counts the bytes it passes through and reports them
+/// to a `ProgressSink` (the std tar.gz path has no hook of its own).
+/// Wrap the compressed file reader with it, then hand `&counted.reader`
+/// to the decompressor.
+pub const CountingReader = struct {
+    in: *std.Io.Reader,
+    seen: u64 = 0,
+    total: u64,
+    sink: ProgressSink,
+    reader: std.Io.Reader,
+
+    pub fn init(in: *std.Io.Reader, buffer: []u8, total: u64, sink: ProgressSink) CountingReader {
+        return .{
+            .in = in,
+            .total = total,
+            .sink = sink,
+            .reader = .{
+                .vtable = &.{ .stream = stream, .readVec = readVec, .discard = discard },
+                .buffer = buffer,
+                .end = 0,
+                .seek = 0,
+            },
+        };
+    }
+
+    fn count(this: *CountingReader, n: usize) void {
+        this.seen += n;
+        this.sink.report(this.seen, this.total);
+    }
+
+    fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+        const this: *CountingReader = @alignCast(@fieldParentPtr("reader", r));
+        const data = limit.slice(try w.writableSliceGreedy(1));
+        var vec: [1][]u8 = .{data};
+        const n = try this.in.readVec(&vec);
+        w.advance(n);
+        this.count(n);
+        return n;
+    }
+
+    fn readVec(r: *std.Io.Reader, data: [][]u8) std.Io.Reader.Error!usize {
+        const this: *CountingReader = @alignCast(@fieldParentPtr("reader", r));
+        var vecs: [8][]u8 = undefined;
+        const dest_n, const data_size = try r.writableVector(&vecs, data);
+        const n = try this.in.readVec(vecs[0..dest_n]);
+        this.count(n);
+        if (n > data_size) {
+            r.end += n - data_size;
+            return data_size;
+        }
+        return n;
+    }
+
+    fn discard(r: *std.Io.Reader, limit: std.Io.Limit) std.Io.Reader.Error!usize {
+        const this: *CountingReader = @alignCast(@fieldParentPtr("reader", r));
+        const peeked = limit.slice(try this.in.peekGreedy(1));
+        this.in.toss(peeked.len);
+        this.count(peeked.len);
+        return peeked.len;
+    }
+};
+
 /// Bytes libarchive has pulled from the file so far (filter -1 = the
 /// raw input).
 fn consumedBytes(a: ?*c.archive) u64 {

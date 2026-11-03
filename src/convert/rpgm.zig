@@ -264,21 +264,43 @@ pub fn nwjsVersionFor(
 /// Walks the SDK tree, copies everything except the noise list. We
 /// reuse the same symlink-preserving / streaming / mode-preserving
 /// copyTree shape as Ren'Py.
+///
+/// One walk counts the files + symlinks to copy, the second copies
+/// them under phase "Copying runtime file i / n" with `tick(i, n)`.
+/// `prog.stop()` is polled before each item → `Cancelled`.
 pub fn installNwjs(
     alloc: std.mem.Allocator,
     io: Io,
     install_dir: []const u8,
     nwjs_sdk_dir: []const u8,
+    prog: dom.Progress,
 ) errs.Error!void {
     var sdk_dir = std.Io.Dir.cwd().openDir(io, nwjs_sdk_dir, .{ .access_sub_paths = true, .iterate = true }) catch return errs.Error.SdkLayoutInvalid;
     defer sdk_dir.close(io);
 
     std.Io.Dir.cwd().createDirPath(io, install_dir) catch return errs.Error.InstallNotFound;
 
+    // ---- pass 1: count ----
+    var total: u64 = 0;
+    {
+        var walker = sdk_dir.walk(alloc) catch return errs.Error.OutOfMemory;
+        defer walker.deinit();
+        while (walker.next(io) catch null) |entry| {
+            if (isSdkNoise(entry.path)) continue;
+            switch (entry.kind) {
+                .file, .sym_link => total += 1,
+                else => {},
+            }
+        }
+    }
+
+    // ---- pass 2: copy ----
     var walker = sdk_dir.walk(alloc) catch return errs.Error.OutOfMemory;
     defer walker.deinit();
 
     var copied: u32 = 0;
+    var done: u64 = 0;
+    prog.tick(0, total);
     while (walker.next(io) catch null) |entry| {
         if (isSdkNoise(entry.path)) continue;
 
@@ -289,11 +311,18 @@ pub fn installNwjs(
 
         switch (entry.kind) {
             .directory => std.Io.Dir.cwd().createDirPath(io, dest_path) catch return errs.Error.LauncherWriteFailed,
-            .file => {
-                copyFile(io, src_path, dest_path) catch return errs.Error.LauncherWriteFailed;
-                copied += 1;
+            .file, .sym_link => {
+                if (prog.stop()) return errs.Error.Cancelled;
+                setCopyPhase(prog, done + 1, total);
+                if (entry.kind == .file) {
+                    copyFile(io, src_path, dest_path) catch return errs.Error.LauncherWriteFailed;
+                    copied += 1;
+                } else {
+                    copySymlink(alloc, io, src_path, dest_path) catch return errs.Error.LauncherWriteFailed;
+                }
+                done += 1;
+                prog.tick(done, total);
             },
-            .sym_link => copySymlink(alloc, io, src_path, dest_path) catch return errs.Error.LauncherWriteFailed,
             else => {},
         }
     }
@@ -303,6 +332,22 @@ pub fn installNwjs(
         return errs.Error.SdkLayoutInvalid;
     }
     log.info("installNwjs: copied {d} file(s) from {s} → {s}", .{ copied, nwjs_sdk_dir, install_dir });
+}
+
+/// Phase label for the i-th of n runtime copies.
+fn setCopyPhase(prog: dom.Progress, i: u64, n: u64) void {
+    var buf: [64]u8 = undefined;
+    prog.setPhase(std.fmt.bufPrint(&buf, "Copying runtime file {d} / {d}", .{ i, n }) catch "Copying runtime file");
+}
+
+/// Remove `<install_dir>/<name>.sh` if present. Called right before a
+/// (re-)convert starts overwriting the runtime: a launcher must never
+/// point at a runtime that a cancelled or failed copy left half-done.
+/// The new launcher is written as the last step.
+pub fn dropLauncher(io: Io, install_dir: []const u8, name: []const u8) void {
+    var buf: [512]u8 = undefined;
+    const sh_path = std.fmt.bufPrint(&buf, "{s}/{s}.sh", .{ install_dir, name }) catch return;
+    std.Io.Dir.cwd().deleteFile(io, sh_path) catch {};
 }
 
 /// Delete files left in `install_dir` from the original Windows nwjs
@@ -355,7 +400,7 @@ fn pruneStaleNwjsFiles(io: Io, install_dir: []const u8, sdk_path: []const u8) !v
 /// surgery is 4 bytes at a known offset, so do it in-process. Safe to
 /// run unconditionally — `patchSoExecStack` no-ops on `.so` files that
 /// already have the bit clear, or that have no PT_GNU_STACK segment.
-fn clearExecstackOnSos(alloc: std.mem.Allocator, io: Io, install_dir: []const u8) !void {
+fn clearExecstackOnSos(alloc: std.mem.Allocator, io: Io, install_dir: []const u8, prog: dom.Progress) !void {
     var dir = std.Io.Dir.cwd().openDir(io, install_dir, .{ .iterate = true, .access_sub_paths = true }) catch return;
     defer dir.close(io);
 
@@ -369,6 +414,7 @@ fn clearExecstackOnSos(alloc: std.mem.Allocator, io: Io, install_dir: []const u8
         if (entry.kind != .file and entry.kind != .unknown) continue;
         if (!std.mem.endsWith(u8, entry.basename, ".so") and
             std.mem.indexOf(u8, entry.basename, ".so.") == null) continue;
+        if (prog.stop()) return errs.Error.Cancelled;
 
         var path_buf: [640]u8 = undefined;
         const full = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ install_dir, entry.path }) catch continue;
@@ -690,8 +736,8 @@ pub fn convert(
     ffmpeg_codecs: bool,
     bundle_syslibs: bool,
     force: bool,
+    prog: dom.Progress,
 ) errs.Error!void {
-
     std.Io.Dir.cwd().access(io, install_dir, .{}) catch return errs.Error.InstallNotFound;
 
     const version = try nwjsVersionFor(alloc, io, install_dir, recipe_pin_nwjs) orelse {
@@ -714,13 +760,18 @@ pub fn convert(
     const sdk_path = cache.locate("nwjs", version) catch |e| switch (e) {
         errs.Error.SdkNotCached => blk: {
             log.info("nwjs {s} SDK not cached; fetching", .{version});
-            break :blk try cache.fetch("nwjs", version);
+            break :blk try cache.fetch("nwjs", version, prog);
         },
         else => return e,
     };
     defer alloc.free(sdk_path);
 
-    try installNwjs(alloc, io, install_dir, sdk_path);
+    if (prog.stop()) return errs.Error.Cancelled;
+    // From here the runtime is being replaced — drop any launcher from a
+    // previous convert so a cancel/failure can't leave one pointing at a
+    // half-copied runtime. `writeLauncher` below is the last step.
+    dropLauncher(io, install_dir, launcher);
+    try installNwjs(alloc, io, install_dir, sdk_path, prog);
 
     // Prune stale nwjs files left from the original Windows install
     // that our (older-era) Linux SDK didn't overwrite. Specifically:
@@ -737,7 +788,9 @@ pub fn convert(
     // PT_GNU_STACK=RWX. Older nwjs (Chrome 65 era) ships libnode.so
     // with that bit set; strip it from every .so we just dropped.
     // No-op when patchelf isn't available — best-effort.
-    clearExecstackOnSos(alloc, io, install_dir) catch |e| {
+    prog.setPhase("Patching libraries");
+    clearExecstackOnSos(alloc, io, install_dir, prog) catch |e| {
+        if (e == errs.Error.Cancelled) return errs.Error.Cancelled;
         log.warn("clear-execstack pass failed ({s}); old nwjs libs may fail to load on modern kernels", .{@errorName(e)});
     };
 
@@ -746,17 +799,22 @@ pub fn convert(
     // — without this they crash on first audio cue. Recipe opts out
     // via `ffmpeg_codecs: false`.
     if (ffmpeg_codecs) {
-        installFfmpegCodecs(alloc, io, cache, install_dir, version) catch |e| {
+        installFfmpegCodecs(alloc, io, cache, install_dir, version, prog) catch |e| {
+            if (e == errs.Error.Cancelled) return errs.Error.Cancelled;
             log.warn("ffmpeg codec swap failed: {s} (game may crash on .mp4 / .m4a audio)", .{@errorName(e)});
         };
     }
 
     if (bundle_syslibs) {
+        if (prog.stop()) return errs.Error.Cancelled;
+        prog.setPhase("Patching libraries");
         syslibs.bundle(alloc, io, install_dir, "nw", distro) catch |e| {
             log.warn("syslib bundle failed: {s} (game may crash on missing libs)", .{@errorName(e)});
         };
     }
 
+    if (prog.stop()) return errs.Error.Cancelled;
+    prog.setPhase("Writing launcher");
     const legacy = nwjsIsLegacyChromium(version);
     try writeLauncher(alloc, io, install_dir, launcher, distro == .nixos, legacy);
     log.info("convert: wrote {s}.sh (steam-run wrap: {}, legacy fontconfig: {})", .{ launcher, distro == .nixos, legacy });
@@ -883,6 +941,7 @@ pub fn convertVxAce(
     extra_libs_dir: ?[]const u8,
     zoom: f32,
     force: bool,
+    prog: dom.Progress,
 ) errs.Error!void {
     _ = force; // re-running is always safe (single file write)
 
@@ -901,18 +960,8 @@ pub fn convertVxAce(
     const variant = detectRgssVariant(io, install_dir);
     log.info("convertVxAce: detected RGSS variant {s} ({s})", .{ @tagName(variant), install_dir });
 
-    const content = try renderMkxpZLauncher(alloc, mkxp_z_dir, extra_libs_dir);
-    defer alloc.free(content);
-
-    var path_buf: [640]u8 = undefined;
-    const sh_path = std.fmt.bufPrint(&path_buf, "{s}/run-mkxp-z.sh", .{install_dir}) catch return errs.Error.OutOfMemory;
-    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = sh_path, .data = content }) catch return errs.Error.LauncherWriteFailed;
-
-    var f = std.Io.Dir.cwd().openFile(io, sh_path, .{ .mode = .read_write }) catch return errs.Error.LauncherWriteFailed;
-    defer f.close(io);
-    f.setPermissions(io, .executable_file) catch return errs.Error.LauncherWriteFailed;
-
-    log.info("convertVxAce: wrote {s}", .{sh_path});
+    if (prog.stop()) return errs.Error.Cancelled;
+    prog.setPhase("Patching libraries");
 
     // mkxp.json overrides mkxp-z's Game.ini auto-detect. Some F95
     // RPGM VX Ace archives ship a Game.ini that mkxp-z's INI parser
@@ -955,6 +1004,24 @@ pub fn convertVxAce(
     // exec-time path is what /proc/self/exe surfaces. Both NTFS-3g
     // and ext4 support cross-name hardlinks within the same mount.
     try ensureLocalMkxpZBinary(io, install_dir, mkxp_z_dir);
+
+    // Launcher last, so a stop or failure above never leaves a fresh
+    // launcher next to an incomplete setup.
+    if (prog.stop()) return errs.Error.Cancelled;
+    prog.setPhase("Writing launcher");
+
+    const content = try renderMkxpZLauncher(alloc, mkxp_z_dir, extra_libs_dir);
+    defer alloc.free(content);
+
+    var path_buf: [640]u8 = undefined;
+    const sh_path = std.fmt.bufPrint(&path_buf, "{s}/run-mkxp-z.sh", .{install_dir}) catch return errs.Error.OutOfMemory;
+    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = sh_path, .data = content }) catch return errs.Error.LauncherWriteFailed;
+
+    var f = std.Io.Dir.cwd().openFile(io, sh_path, .{ .mode = .read_write }) catch return errs.Error.LauncherWriteFailed;
+    defer f.close(io);
+    f.setPermissions(io, .executable_file) catch return errs.Error.LauncherWriteFailed;
+
+    log.info("convertVxAce: wrote {s}", .{sh_path});
 }
 
 /// Idempotent linker. Creates (or replaces) `<install>/mkxp-z.x86_64`
@@ -1151,9 +1218,12 @@ pub fn installFfmpegCodecs(
     cache: *sdk_cache_mod.Cache,
     install_dir: []const u8,
     nwjs_version: []const u8,
+    prog: dom.Progress,
 ) errs.Error!void {
-    const sdk_path = try cache.fetch("nwjs-ffmpeg", nwjs_version);
+    const sdk_path = try cache.fetch("nwjs-ffmpeg", nwjs_version, prog);
     defer alloc.free(sdk_path);
+    if (prog.stop()) return errs.Error.Cancelled;
+    prog.setPhase("Patching libraries");
 
     var src_buf: [640]u8 = undefined;
     const src = std.fmt.bufPrint(&src_buf, "{s}/libffmpeg.so", .{sdk_path}) catch return errs.Error.OutOfMemory;
@@ -1522,7 +1592,7 @@ test "convertVxAce: writes executable run-mkxp-z.sh + verifies bundle" {
     const mkxp_dir = try env.path("mkxp-z-bundle");
     defer testing.allocator.free(mkxp_dir);
 
-    try convertVxAce(testing.allocator, env.io, game_dir, mkxp_dir, null, MKXP_ZOOM_DEFAULT, false);
+    try convertVxAce(testing.allocator, env.io, game_dir, mkxp_dir, null, MKXP_ZOOM_DEFAULT, false, .none);
 
     const sh_rel = "game/run-mkxp-z.sh";
     const sh_abs = try env.path(sh_rel);
@@ -1546,6 +1616,147 @@ test "convertVxAce: returns MkxpZNotBundled when bundle missing" {
 
     try testing.expectError(
         errs.Error.MkxpZNotBundled,
-        convertVxAce(testing.allocator, env.io, game_dir, "/nonexistent/bundle", null, MKXP_ZOOM_DEFAULT, false),
+        convertVxAce(testing.allocator, env.io, game_dir, "/nonexistent/bundle", null, MKXP_ZOOM_DEFAULT, false, .none),
     );
+}
+
+// ---- progress / cancel through the full MV/MZ convert ----
+
+/// Records what a `dom.Progress` saw. `cancel_after` > 0 makes
+/// `cancelled` return true once that many non-zero ticks arrived.
+const ProgressRecorder = struct {
+    alloc: std.mem.Allocator,
+    phases: std.ArrayList([]u8) = .empty,
+    last_done: u64 = 0,
+    last_total: u64 = 0,
+    nonzero_ticks: usize = 0,
+    cancel_after: usize = 0,
+
+    fn deinit(self: *ProgressRecorder) void {
+        for (self.phases.items) |p| self.alloc.free(p);
+        self.phases.deinit(self.alloc);
+    }
+
+    fn progress(self: *ProgressRecorder) dom.Progress {
+        return .{ .ctx = self, .phase = onPhase, .report = onTick, .cancelled = onCancelled };
+    }
+
+    fn onPhase(ctx: ?*anyopaque, text: []const u8) void {
+        const self: *ProgressRecorder = @ptrCast(@alignCast(ctx.?));
+        const dup = self.alloc.dupe(u8, text) catch return;
+        self.phases.append(self.alloc, dup) catch self.alloc.free(dup);
+    }
+
+    fn onTick(ctx: ?*anyopaque, done: u64, total: u64) void {
+        const self: *ProgressRecorder = @ptrCast(@alignCast(ctx.?));
+        self.last_done = done;
+        self.last_total = total;
+        if (done > 0) self.nonzero_ticks += 1;
+    }
+
+    fn onCancelled(ctx: ?*anyopaque) bool {
+        const self: *ProgressRecorder = @ptrCast(@alignCast(ctx.?));
+        return self.cancel_after > 0 and self.nonzero_ticks >= self.cancel_after;
+    }
+
+    fn sawPhasePrefix(self: *const ProgressRecorder, prefix: []const u8) bool {
+        for (self.phases.items) |p| if (std.mem.startsWith(u8, p, prefix)) return true;
+        return false;
+    }
+};
+
+/// Fake nwjs SDK (20 files: `nw`, `lib/*.so`, `locales/*.pak`, misc)
+/// pre-staged in the cache as nwjs-0.83.0, plus a fake MV install with
+/// `Game.exe` + `www/index.html` + `package.json`.
+fn stageFakeNwjsConvert(env: anytype) !void {
+    const sdk = "convert/sdks/nwjs-0.83.0";
+    try env.writeFile(sdk ++ "/nw", "fake-nw-binary");
+    {
+        // +x on the SDK's nw — copyFile carries the mode into the install.
+        const nw = try env.path(sdk ++ "/nw");
+        defer testing.allocator.free(nw);
+        var f = try std.Io.Dir.cwd().openFile(env.io, nw, .{ .mode = .read_write });
+        defer f.close(env.io);
+        try f.setPermissions(env.io, .executable_file);
+    }
+    try env.writeFile(sdk ++ "/credits.html", "noise — must be skipped");
+    try env.writeFile(sdk ++ "/icudtl.dat", "icu");
+    try env.writeFile(sdk ++ "/nw.pak", "pak");
+    try env.writeFile(sdk ++ "/resources.pak", "pak");
+    try env.writeFile(sdk ++ "/snapshot_blob.bin", "snap");
+    try env.writeFile(sdk ++ "/v8_context_snapshot.bin", "snap");
+    try env.writeFile(sdk ++ "/lib/libnode.so", "not-an-elf");
+    try env.writeFile(sdk ++ "/lib/libffmpeg.so", "not-an-elf");
+    try env.writeFile(sdk ++ "/lib/libnw.so", "not-an-elf");
+    inline for (.{ "en-US", "de", "fr", "ja", "zh-CN", "es", "it", "ko", "pt-BR", "ru", "nl" }) |loc| {
+        try env.writeFile(sdk ++ "/locales/" ++ loc ++ ".pak", loc);
+    }
+    try env.writeFile("game/Game.exe", "MZ");
+    try env.writeFile("game/www/index.html", "<html></html>");
+    try env.writeFile("game/package.json", "{\"main\":\"www/index.html\"}");
+}
+
+test "convert: phases + ticks through runtime copy and launcher" {
+    var env = try @import("util_test_env").TestEnv.init(testing.allocator, "rpgm-convert-progress");
+    defer env.deinit();
+    try stageFakeNwjsConvert(&env);
+
+    var cache = try sdk_cache_mod.Cache.init(testing.allocator, env.io, env.root);
+    defer cache.deinit();
+    const game_dir = try env.path("game");
+    defer testing.allocator.free(game_dir);
+
+    var rec: ProgressRecorder = .{ .alloc = testing.allocator };
+    defer rec.deinit();
+
+    try convert(testing.allocator, env.io, game_dir, &cache, .other, "0.83.0", false, false, false, rec.progress());
+
+    try testing.expect(rec.sawPhasePrefix("Copying runtime file"));
+    try testing.expect(rec.sawPhasePrefix("Patching libraries"));
+    try testing.expect(rec.sawPhasePrefix("Writing launcher"));
+    // Launcher is the final phase.
+    try testing.expectEqualStrings("Writing launcher", rec.phases.items[rec.phases.items.len - 1]);
+    try testing.expectEqualStrings("Copying runtime file 20 / 20", blk: {
+        var last_copy: []const u8 = "";
+        for (rec.phases.items) |p| if (std.mem.startsWith(u8, p, "Copying runtime file")) {
+            last_copy = p;
+        };
+        break :blk last_copy;
+    });
+    try testing.expect(rec.last_total > 0);
+    try testing.expectEqual(rec.last_total, rec.last_done);
+    try testing.expectEqual(@as(u64, 20), rec.last_total);
+
+    const sh = try env.path("game/Game.sh");
+    defer testing.allocator.free(sh);
+    try std.Io.Dir.cwd().access(env.io, sh, .{ .execute = true });
+    try testing.expect(alreadyConverted(env.io, game_dir, "Game"));
+}
+
+test "convert: cancel after the first tick → Cancelled, no launcher left behind" {
+    var env = try @import("util_test_env").TestEnv.init(testing.allocator, "rpgm-convert-cancel");
+    defer env.deinit();
+    try stageFakeNwjsConvert(&env);
+    // A launcher from an earlier convert: a cancelled re-convert must not
+    // leave it pointing at the half-copied runtime.
+    try env.writeFile("game/Game.sh", "#!/bin/sh\nexec ./nw .\n");
+
+    var cache = try sdk_cache_mod.Cache.init(testing.allocator, env.io, env.root);
+    defer cache.deinit();
+    const game_dir = try env.path("game");
+    defer testing.allocator.free(game_dir);
+
+    var rec: ProgressRecorder = .{ .alloc = testing.allocator, .cancel_after = 1 };
+    defer rec.deinit();
+
+    try testing.expectError(
+        errs.Error.Cancelled,
+        convert(testing.allocator, env.io, game_dir, &cache, .other, "0.83.0", false, false, true, rec.progress()),
+    );
+    try testing.expectEqual(@as(usize, 1), rec.nonzero_ticks);
+    try testing.expect(!rec.sawPhasePrefix("Writing launcher"));
+
+    const sh = try env.path("game/Game.sh");
+    defer testing.allocator.free(sh);
+    try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(env.io, sh, .{}));
 }

@@ -100,65 +100,14 @@ pub fn extract(
     log.info("extracted {s} → {s}", .{ archive_path, dest_dir });
 }
 
-/// A reader that counts the bytes it passes through and reports them
-/// to a `progress.Sink` (the tar.gz path has no hook of its own).
-const CountingReader = struct {
-    in: *std.Io.Reader,
-    seen: u64 = 0,
-    total: u64,
-    sink: progress.Sink,
-    reader: std.Io.Reader,
+/// The shared counting reader lives in `util_archive`; the tar.gz path
+/// feeds it a `util_archive.ProgressSink` built from our `progress.Sink`
+/// (identical (ctx, cb) shape).
+const CountingReader = archive_lib.CountingReader;
 
-    fn init(in: *std.Io.Reader, buffer: []u8, total: u64, sink: progress.Sink) CountingReader {
-        return .{
-            .in = in,
-            .total = total,
-            .sink = sink,
-            .reader = .{
-                .vtable = &.{ .stream = stream, .readVec = readVec, .discard = discard },
-                .buffer = buffer,
-                .end = 0,
-                .seek = 0,
-            },
-        };
-    }
-
-    fn count(this: *CountingReader, n: usize) void {
-        this.seen += n;
-        this.sink.report(this.seen, this.total);
-    }
-
-    fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
-        const this: *CountingReader = @alignCast(@fieldParentPtr("reader", r));
-        const data = limit.slice(try w.writableSliceGreedy(1));
-        var vec: [1][]u8 = .{data};
-        const n = try this.in.readVec(&vec);
-        w.advance(n);
-        this.count(n);
-        return n;
-    }
-
-    fn readVec(r: *std.Io.Reader, data: [][]u8) std.Io.Reader.Error!usize {
-        const this: *CountingReader = @alignCast(@fieldParentPtr("reader", r));
-        var vecs: [8][]u8 = undefined;
-        const dest_n, const data_size = try r.writableVector(&vecs, data);
-        const n = try this.in.readVec(vecs[0..dest_n]);
-        this.count(n);
-        if (n > data_size) {
-            r.end += n - data_size;
-            return data_size;
-        }
-        return n;
-    }
-
-    fn discard(r: *std.Io.Reader, limit: std.Io.Limit) std.Io.Reader.Error!usize {
-        const this: *CountingReader = @alignCast(@fieldParentPtr("reader", r));
-        const peeked = limit.slice(try this.in.peekGreedy(1));
-        this.in.toss(peeked.len);
-        this.count(peeked.len);
-        return peeked.len;
-    }
-};
+fn toArchiveSink(sink: progress.Sink) archive_lib.ProgressSink {
+    return .{ .ctx = sink.ctx, .cb = sink.cb };
+}
 
 fn extractZip(
     alloc: std.mem.Allocator,
@@ -264,7 +213,7 @@ fn extractTarGz(
     // The gzip decoder peeks through this reader, so it needs a buffer
     // of its own (an empty one cannot serve a peek).
     var count_buf: [64 * 1024]u8 = undefined;
-    var counted = CountingReader.init(&fr.interface, &count_buf, total, sink);
+    var counted = CountingReader.init(&fr.interface, &count_buf, total, toArchiveSink(sink));
 
     const window = try alloc.alloc(u8, std.compress.flate.max_window_len);
     defer alloc.free(window);

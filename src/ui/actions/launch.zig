@@ -143,7 +143,7 @@ pub fn doLaunchGame(frame: *Frame, game: *const library.Game) void {
             const conv_spec = mods_act.resolveConvertSpec(frame, install_path);
             if (conv_spec != .none) {
                 state.setLaunchMsg("Converting before launch...");
-                frame.convert_svc.convert(install_path, conv_spec, false) catch |e| {
+                frame.convert_svc.convert(install_path, conv_spec, false, .none) catch |e| {
                     var buf: [256]u8 = undefined;
                     const msg = std.fmt.bufPrint(&buf, "Auto-convert failed: {s}", .{@errorName(e)}) catch "Auto-convert failed";
                     state.setLaunchMsg(msg);
@@ -1661,7 +1661,7 @@ pub fn doConvertGame(frame: *Frame, game: *const library.Game) void {
                 // skip — iterating on launcher templates (FONTCONFIG_FILE
                 // injection, env tweaks) is the main reason to click
                 // Convert on an already-converted install.
-                if (frame.convert_svc.convert(install_path, mkxp_spec, true)) |_| {
+                if (frame.convert_svc.convert(install_path, mkxp_spec, true, .none)) |_| {
                     const compat_msg = maybeAutoApplyCompatPostConvert(frame, install_opt, install_path);
                     setConvertOk(state, "Converted via bundled mkxp-z.", compat_msg);
                     return;
@@ -1694,7 +1694,7 @@ pub fn doConvertGame(frame: *Frame, game: *const library.Game) void {
     // force=true on manual Convert clicks; see comment above for the
     // mkxp-z dispatch on the same rationale (re-write launcher + any
     // sidecar configs every time, the user explicitly asked for it).
-    frame.convert_svc.convert(install_path, spec, true) catch |e| {
+    frame.convert_svc.convert(install_path, spec, true, .none) catch |e| {
         var buf: [256]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "Convert failed: {s}", .{@errorName(e)}) catch "Convert failed";
         state.setConvertMsg(msg);

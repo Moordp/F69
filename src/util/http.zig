@@ -13,9 +13,9 @@
 //     a tiny error set instead of re-mapping `error.UnexpectedConnect`.
 //
 // What this does NOT do:
-//   - Streaming downloads — large bodies still go through
-//     `Io.Writer.Allocating` at the caller (sdk_cache.fetch streams via
-//     a tmp-file Writer for the same reason).
+//   - Streaming downloads through `fetch` — use `fetchToFile`, which
+//     streams the body to disk in 64 KiB chunks and reports progress
+//     (sdk_cache.fetch uses it for the 50–100 MiB SDK archives).
 //   - Cookies — `f95/client.zig` keeps its rate-limit + cookie
 //     middleware on top of this helper.
 //   - Retries — the download manager's fallback chain handles per-source
@@ -109,6 +109,10 @@ pub const Error = error{
     ServerError,
     UnexpectedStatus,
     OutOfMemory,
+    /// `fetchToFile` could not create or write the destination file.
+    WriteFailed,
+    /// `fetchToFile`'s `Options.cancelled` hook returned true.
+    Cancelled,
 };
 
 pub const Header = std.http.Header;
@@ -126,6 +130,10 @@ pub const Options = struct {
     max_response_bytes: usize = 16 * 1024 * 1024,
     /// Override the user-agent. Defaults to `USER_AGENT` (f69/<version>).
     user_agent: []const u8 = USER_AGENT,
+    /// `fetchToFile` only: polled with its `ctx` before each body chunk.
+    /// Returning true stops the download with `Error.Cancelled` (the
+    /// partial file is deleted). Ignored by `fetch`.
+    cancelled: ?*const fn (?*anyopaque) bool = null,
 };
 
 pub const Response = struct {
@@ -190,4 +198,161 @@ pub fn get(
     if (resp.status >= 400 and resp.status < 500) return Error.ClientError;
     if (resp.status >= 500) return Error.ServerError;
     return Error.UnexpectedStatus;
+}
+
+/// Called after every body chunk `fetchToFile` writes, with (bytes
+/// received so far, Content-Length when the server sent one).
+pub const ChunkFn = *const fn (ctx: ?*anyopaque, received: u64, total: ?u64) void;
+
+/// Streaming GET: writes the response body to `dest_path` (created or
+/// truncated) in 64 KiB chunks and calls `on_chunk(ctx, received,
+/// content_length)` after each one. Returns the final HTTP status
+/// (redirects are followed); the caller checks for 200. On a non-2xx
+/// status no file is created. On any error the partial file is deleted.
+/// `opts.payload` / `opts.method` are ignored — this is GET only.
+/// `opts.max_response_bytes` caps the body (`Error.UnexpectedStatus`
+/// past it, same as `fetch`).
+pub fn fetchToFile(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    url: []const u8,
+    dest_path: []const u8,
+    opts: Options,
+    on_chunk: ?ChunkFn,
+    ctx: ?*anyopaque,
+) Error!u16 {
+    throttle(io, url);
+
+    var http: std.http.Client = .{ .allocator = alloc, .io = io };
+    defer http.deinit();
+
+    const uri = std.Uri.parse(url) catch return Error.NetworkError;
+    var req = http.request(.GET, uri, .{
+        .headers = .{
+            .user_agent = .{ .override = opts.user_agent },
+            // Raw bytes on disk: never let the server gzip the body in
+            // transit (we would write the transfer-encoded stream).
+            .accept_encoding = .{ .override = "identity" },
+        },
+        .extra_headers = opts.extra_headers,
+        .keep_alive = false,
+    }) catch return Error.NetworkError;
+    defer req.deinit();
+
+    req.sendBodiless() catch return Error.NetworkError;
+
+    var redirect_buf: [8 * 1024]u8 = undefined;
+    var response = req.receiveHead(&redirect_buf) catch return Error.NetworkError;
+    const status: u16 = @backingInt(response.head.status);
+    if (status < 200 or status >= 300) return status;
+    const content_length: ?u64 = response.head.content_length;
+
+    var file = std.Io.Dir.cwd().createFile(io, dest_path, .{ .truncate = true }) catch return Error.WriteFailed;
+    var complete = false;
+    defer {
+        file.close(io);
+        if (!complete) std.Io.Dir.cwd().deleteFile(io, dest_path) catch {};
+    }
+
+    var wr_buf: [64 * 1024]u8 = undefined;
+    var fw = file.writer(io, &wr_buf);
+
+    var transfer_buf: [16 * 1024]u8 = undefined;
+    const body = response.reader(&transfer_buf);
+
+    // Heap chunk: three 64 KiB stack buffers in one frame is a lot for
+    // a worker thread with a small stack.
+    const chunk = alloc.alloc(u8, 64 * 1024) catch return Error.OutOfMemory;
+    defer alloc.free(chunk);
+
+    var received: u64 = 0;
+    while (true) {
+        if (opts.cancelled) |f| if (f(ctx)) return Error.Cancelled;
+        const n = body.readSliceShort(chunk) catch return Error.NetworkError;
+        if (n == 0) break;
+        received += n;
+        if (received > opts.max_response_bytes) return Error.UnexpectedStatus;
+        fw.interface.writeAll(chunk[0..n]) catch return Error.WriteFailed;
+        if (on_chunk) |cb| cb(ctx, received, content_length);
+    }
+    fw.interface.flush() catch return Error.WriteFailed;
+    if (content_length) |len| if (received != len) return Error.NetworkError;
+    complete = true;
+    return status;
+}
+
+// ----- fetchToFile test: one-shot loopback server -----
+
+const OneShotServer = struct {
+    io: Io,
+    server: std.Io.net.Server,
+    port: u16,
+    body: []const u8,
+
+    fn serve(self: *OneShotServer) void {
+        var stream = self.server.accept(self.io) catch return;
+        defer stream.close(self.io);
+        var rbuf: [8192]u8 = undefined;
+        var wbuf: [8192]u8 = undefined;
+        var sr = stream.reader(self.io, &rbuf);
+        var sw = stream.writer(self.io, &wbuf);
+        var hs = std.http.Server.init(&sr.interface, &sw.interface);
+        var r = hs.receiveHead() catch return;
+        r.respond(self.body, .{ .keep_alive = false }) catch {};
+    }
+};
+
+test "fetchToFile: streams a 300 KiB body to disk with monotonic ticks ending at (len, len)" {
+    const testing = std.testing;
+    var threaded = Io.Threaded.init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const body = try testing.allocator.alloc(u8, 300 * 1024);
+    defer testing.allocator.free(body);
+    for (body, 0..) |*b, i| b.* = @truncate(i *% 31 +% 7);
+
+    const addr = try Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var srv: OneShotServer = .{
+        .io = io,
+        .server = try addr.listen(io, .{ .reuse_address = true }),
+        .port = 0,
+        .body = body,
+    };
+    defer srv.server.deinit(io);
+    srv.port = srv.server.socket.address.getPort();
+    const thr = try std.Thread.spawn(.{}, OneShotServer.serve, .{&srv});
+    defer thr.join();
+
+    const Ticks = struct {
+        last: u64 = 0,
+        total: ?u64 = null,
+        count: usize = 0,
+        monotonic: bool = true,
+        fn cb(c: ?*anyopaque, received: u64, total: ?u64) void {
+            const self: *@This() = @ptrCast(@alignCast(c.?));
+            if (received < self.last) self.monotonic = false;
+            self.last = received;
+            self.total = total;
+            self.count += 1;
+        }
+    };
+    var ticks: Ticks = .{};
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "http://127.0.0.1:{d}/sdk.tar.gz", .{srv.port});
+    var path_buf: [96]u8 = undefined;
+    const dest = try std.fmt.bufPrint(&path_buf, "/tmp/f69-test-fetchToFile-{d}.part", .{srv.port});
+    defer std.Io.Dir.cwd().deleteFile(io, dest) catch {};
+
+    const status = try fetchToFile(testing.allocator, io, url, dest, .{}, Ticks.cb, &ticks);
+    try testing.expectEqual(@as(u16, 200), status);
+    try testing.expect(ticks.monotonic);
+    try testing.expect(ticks.count >= 2);
+    try testing.expectEqual(@as(u64, body.len), ticks.last);
+    try testing.expectEqual(@as(?u64, body.len), ticks.total);
+
+    const got = try std.Io.Dir.cwd().readFileAlloc(io, dest, testing.allocator, .limited(1024 * 1024));
+    defer testing.allocator.free(got);
+    try testing.expectEqualSlices(u8, body, got);
 }

@@ -2009,7 +2009,7 @@ fn maybeAutoConvert(frame: *Frame, game_id: u64, install_dir: []const u8) void {
         return;
     }
     log.info("auto-convert: tid={d} engine={s} → {s}", .{ game_id, @tagName(conv_spec), install_dir });
-    frame.convert_svc.convert(install_dir, conv_spec, false) catch |e| {
+    frame.convert_svc.convert(install_dir, conv_spec, false, .none) catch |e| {
         var buf: [192]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "Auto-convert failed: {s}", .{@errorName(e)}) catch "Auto-convert failed";
         state.setConvertMsg(msg);

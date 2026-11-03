@@ -39,11 +39,19 @@ pub const Service = struct {
     /// Run the convert step on `install_dir` per `spec`. Idempotent —
     /// the Ren'Py path bails fast when the launcher + a `lib/*linux*`
     /// dir already exist. Set `force = true` to re-run anyway.
+    ///
+    /// `prog` gets the phases (SDK download, unpack, runtime copy,
+    /// library patching, launcher) and per-phase ticks; `prog.stop()`
+    /// is polled between files/chunks and returns `Cancelled`. The
+    /// launcher is always the last thing written, so a cancelled run
+    /// never leaves one pointing at a half-copied runtime. Pass
+    /// `.none` for a silent, uncancellable run.
     pub fn convert(
         self: *Service,
         install_dir: []const u8,
         spec: dom.ConvertSpec,
         force: bool,
+        prog: dom.Progress,
     ) errs.Error!void {
         // Bail fast when the recipe explicitly says "no convert needed".
         switch (spec) {
@@ -51,7 +59,7 @@ pub const Service = struct {
                 log.debug("convert: .none, skipping ({s})", .{install_dir});
                 return;
             },
-            .renpy => |r| return self.convertRenpy(install_dir, r.sdk_version, force),
+            .renpy => |r| return self.convertRenpy(install_dir, r.sdk_version, force, prog),
             .rpgm => |r| return rpgm.convert(
                 self.alloc,
                 self.io,
@@ -62,6 +70,7 @@ pub const Service = struct {
                 r.ffmpeg_codecs,
                 r.bundle_syslibs,
                 force,
+                prog,
             ),
             .mkxp_z => |m| return rpgm.convertVxAce(
                 self.alloc,
@@ -71,6 +80,7 @@ pub const Service = struct {
                 m.extra_libs_dir,
                 m.zoom,
                 force,
+                prog,
             ),
         }
     }
@@ -80,6 +90,7 @@ pub const Service = struct {
         install_dir: []const u8,
         recipe_sdk_version: ?[]const u8,
         force: bool,
+        prog: dom.Progress,
     ) errs.Error!void {
         // ---- existence ----
         std.Io.Dir.cwd().access(self.io, install_dir, .{}) catch return errs.Error.InstallNotFound;
@@ -118,16 +129,26 @@ pub const Service = struct {
         const sdk_path = self.cache.locate("renpy", version) catch |e| switch (e) {
             errs.Error.SdkNotCached => blk: {
                 log.info("Ren'Py {s} SDK not cached; fetching", .{version});
-                break :blk try self.cache.fetch("renpy", version);
+                break :blk try self.cache.fetch("renpy", version, prog);
             },
             else => return e,
         };
         defer self.alloc.free(sdk_path);
 
         // ---- copy libs ----
-        try renpy.installLinuxLibs(self.alloc, self.io, install_dir, sdk_path);
+        // Drop any launcher from a previous convert first: a cancel or
+        // failure mid-copy must not leave one pointing at a half-copied
+        // runtime. The launcher is written last.
+        if (prog.stop()) return errs.Error.Cancelled;
+        var sh_buf: [512]u8 = undefined;
+        if (std.fmt.bufPrint(&sh_buf, "{s}/{s}.sh", .{ install_dir, launcher })) |sh_path| {
+            std.Io.Dir.cwd().deleteFile(self.io, sh_path) catch {};
+        } else |_| {}
+        try renpy.installLinuxLibs(self.alloc, self.io, install_dir, sdk_path, prog);
 
         // ---- launcher ----
+        if (prog.stop()) return errs.Error.Cancelled;
+        prog.setPhase("Writing launcher");
         try renpy.writeLauncher(self.alloc, self.io, install_dir, launcher, self.distro == .nixos);
         log.info("convert: wrote {s}.sh (steam-run wrap: {})", .{ launcher, self.distro == .nixos });
     }

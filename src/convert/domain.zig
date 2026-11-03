@@ -52,3 +52,41 @@ pub const ConvertSpec = union(enum) {
         zoom: f32 = 2.0,
     },
 };
+
+/// What a long convert step tells its caller: a phase label, a
+/// (done, total) tick inside that phase, and a cancel poll. All three
+/// hooks are optional; `.none` reports nowhere and never cancels. The
+/// hooks run on the thread that runs the convert (the compute thread),
+/// so the owner must make them thread-safe.
+pub const Progress = struct {
+    ctx: ?*anyopaque = null,
+    phase: ?*const fn (?*anyopaque, []const u8) void = null,
+    report: ?*const fn (?*anyopaque, u64, u64) void = null,
+    cancelled: ?*const fn (?*anyopaque) bool = null,
+
+    pub const none: Progress = .{};
+
+    /// Start a new phase. `text` is only valid for the duration of the
+    /// call — the receiver copies it if it keeps it.
+    pub fn setPhase(self: Progress, text: []const u8) void {
+        if (self.phase) |f| f(self.ctx, text);
+    }
+
+    pub fn tick(self: Progress, done: u64, total: u64) void {
+        if (self.report) |f| f(self.ctx, done, total);
+    }
+
+    /// True when the caller asked to stop. Checked between files and
+    /// chunks; the convert step then returns `error.Cancelled`.
+    pub fn stop(self: Progress) bool {
+        if (self.cancelled) |f| return f(self.ctx);
+        return false;
+    }
+};
+
+test "Progress.none: reports nowhere and never stops" {
+    const p = Progress.none;
+    p.setPhase("x");
+    p.tick(1, 2);
+    try std.testing.expect(!p.stop());
+}

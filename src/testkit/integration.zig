@@ -579,7 +579,7 @@ test "headless: convert detects Ren'Py + .none is a no-op (F8)" {
     try std.testing.expectEqual(convert.Engine.renpy, convert.detectEngine(env.io, install_dir));
 
     // .none must return cleanly (no SDK, no subprocess, no mutation).
-    try h.convert_svc.convert(install_dir, .none, false);
+    try h.convert_svc.convert(install_dir, .none, false, .none);
     tlog("F8-convert: done", .{});
 }
 

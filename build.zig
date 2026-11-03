@@ -256,6 +256,7 @@ pub fn build(b: *std.Build) void {
     convert_mod.addImport("util_thread_owner", util_thread_owner_mod);
     convert_mod.addImport("util_domain", util_domain_mod);
     convert_mod.addImport("util_http", util_http_mod);
+    convert_mod.addImport("util_archive", util_archive_mod);
     convert_mod.addImport("util_proc", util_proc_mod);
     convert_mod.addImport("util_test_env", util_test_env_mod);
     convert_mod.addImport("build_options", build_opts_mod);

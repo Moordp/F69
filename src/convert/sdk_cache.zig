@@ -1,7 +1,8 @@
 // SDK cache abstraction. Engines look up their pre-fetched archives
 // under `<cache>/f69/convert/sdks/<engine>-<version>/`. On miss the
-// cache fetches from the engine's public mirror (renpy.org / dl.nwjs.io
-// / nwjs-ffmpeg-prebuilt) and extracts in place.
+// cache streams the archive from the engine's public mirror (renpy.org /
+// dl.nwjs.io / nwjs-ffmpeg-prebuilt) to `<dir>.part`, extracts into
+// `<dir>.unpack/`, then renames that into place.
 //
 // Layout:
 //   <cache>/f69/convert/sdks/renpy-7.5.3/   ← extracted renpy-7.5.3-sdk.tar.gz
@@ -16,6 +17,7 @@ const log = std.log.scoped(.sdk_cache);
 const errs = @import("errors.zig");
 const dom = @import("domain.zig");
 const util_http = @import("util_http");
+const util_archive = @import("util_archive");
 
 /// Cap on a single SDK download. Ren'Py SDKs run ~95 MiB compressed
 /// (~250 MiB uncompressed); nwjs ~50 MiB compressed. 1 GiB is the
@@ -63,15 +65,22 @@ pub const Cache = struct {
     }
 
     /// Download + extract the `<engine_tag>-<version>` SDK from its
-    /// public mirror. URL resolved via `sdkUrl()`. Decompresses gzip
-    /// in-process (no shell-out), extracts the tar stream into
-    /// `<sdks_dir>/<engine_tag>-<version>/`.
+    /// public mirror. URL resolved via `sdkUrl()`. The archive streams
+    /// to `<dest>.part` (phase "Downloading <engine_tag> SDK", ticks =
+    /// bytes received / Content-Length), then unpacks (phase "Unpacking
+    /// SDK", ticks = compressed bytes consumed / archive size) into
+    /// `<dest>.unpack/`, which is renamed to `<dest>/` only once the
+    /// extract finished — so an interrupted or cancelled run never
+    /// leaves a half-extracted dir that `locate` would accept.
+    ///
+    /// `prog.stop()` is polled per download chunk and around the
+    /// unpack; a stop returns `Cancelled` and removes the partial files.
     ///
     /// Caller frees the returned absolute path on success.
     ///
     /// Idempotent: if the SDK is already cached, returns its path
     /// without re-fetching.
-    pub fn fetch(self: *Cache, engine_tag: []const u8, version: []const u8) errs.Error![]u8 {
+    pub fn fetch(self: *Cache, engine_tag: []const u8, version: []const u8, prog: dom.Progress) errs.Error![]u8 {
         if (self.locate(engine_tag, version)) |existing| {
             return existing;
         } else |e| switch (e) {
@@ -85,56 +94,92 @@ pub const Cache = struct {
         const dest_dir = try self.expectedPath(engine_tag, version);
         errdefer self.alloc.free(dest_dir);
 
+        if (prog.stop()) return errs.Error.Cancelled;
+
+        // ---- 1. download to <dest>.part ----
+        var phase_buf: [96]u8 = undefined;
+        prog.setPhase(std.fmt.bufPrint(&phase_buf, "Downloading {s} SDK", .{engine_tag}) catch "Downloading SDK");
+        prog.tick(0, 0);
         log.info("fetching {s}-{s} from {s}", .{ engine_tag, version, url });
 
-        // 1. Download the .tar.gz body into memory. Large but bounded
-        // by MAX_SDK_BYTES; nwjs/renpy SDKs fit comfortably.
+        const part_path = std.fmt.allocPrint(self.alloc, "{s}.part", .{dest_dir}) catch return errs.Error.OutOfMemory;
+        defer self.alloc.free(part_path);
+        // The .part is scratch on every path — success or failure.
+        defer std.Io.Dir.cwd().deleteFile(self.io, part_path) catch {};
+
         const extra_headers = [_]util_http.Header{
             .{ .name = "accept", .value = "application/gzip, application/octet-stream, */*" },
         };
-
-        // The `errdefer self.alloc.free(dest_dir)` above handles every
-        // error-return path below — DON'T also free explicitly, or the
-        // DebugAllocator's double-free guard fires.
-        const resp = util_http.fetch(self.alloc, self.io, url, .{
+        const Dl = struct {
+            fn chunk(ctx: ?*anyopaque, received: u64, total: ?u64) void {
+                const p: *const dom.Progress = @ptrCast(@alignCast(ctx.?));
+                p.tick(received, total orelse 0);
+            }
+            fn cancelled(ctx: ?*anyopaque) bool {
+                const p: *const dom.Progress = @ptrCast(@alignCast(ctx.?));
+                return p.stop();
+            }
+        };
+        const status = util_http.fetchToFile(self.alloc, self.io, url, part_path, .{
             .extra_headers = &extra_headers,
             .max_response_bytes = MAX_SDK_BYTES,
-        }) catch |e| {
-            log.warn("SDK fetch network error: {s}", .{@errorName(e)});
-            return errs.Error.NetworkError;
+            .cancelled = Dl.cancelled,
+        }, Dl.chunk, @constCast(&prog)) catch |e| switch (e) {
+            util_http.Error.Cancelled => return errs.Error.Cancelled,
+            util_http.Error.OutOfMemory => return errs.Error.OutOfMemory,
+            else => {
+                log.warn("SDK fetch error: {s}", .{@errorName(e)});
+                return errs.Error.NetworkError;
+            },
         };
-        defer self.alloc.free(resp.body);
-
-        if (resp.status != 200) {
-            log.warn("SDK fetch status {d} for {s}", .{ resp.status, url });
-            return switch (resp.status) {
+        if (status != 200) {
+            log.warn("SDK fetch status {d} for {s}", .{ status, url });
+            return switch (status) {
                 404 => errs.Error.NotFound,
                 else => errs.Error.NetworkError,
             };
         }
+        const archive_size: u64 = if (std.Io.Dir.cwd().statFile(self.io, part_path, .{})) |st| st.size else |_| 0;
+        log.info("SDK download done: {d} bytes compressed", .{archive_size});
 
-        const compressed = resp.body;
-        log.info("SDK download done: {d} bytes compressed", .{compressed.len});
+        if (prog.stop()) return errs.Error.Cancelled;
 
-        // 2. Decompress (gzip) + extract tar into dest_dir.
-        std.Io.Dir.cwd().createDirPath(self.io, dest_dir) catch {
-            return errs.Error.SdkLayoutInvalid;
-        };
-        var dest = std.Io.Dir.cwd().openDir(self.io, dest_dir, .{}) catch {
-            return errs.Error.SdkLayoutInvalid;
-        };
-        defer dest.close(self.io);
+        // ---- 2. unpack into <dest>.unpack, then rename into place ----
+        prog.setPhase("Unpacking SDK");
+        prog.tick(0, archive_size);
 
-        const arch_fmt = sdkArchiveFormat(engine_tag);
-        const extract_result = switch (arch_fmt) {
-            .tar_gz => extractTarGz(self.alloc, self.io, compressed, dest, sdkStripComponents(engine_tag)),
-            .zip => extractZipBuffered(self.alloc, self.io, compressed, dest_dir),
+        const unpack_dir = std.fmt.allocPrint(self.alloc, "{s}.unpack", .{dest_dir}) catch return errs.Error.OutOfMemory;
+        defer self.alloc.free(unpack_dir);
+        std.Io.Dir.cwd().deleteTree(self.io, unpack_dir) catch {};
+        std.Io.Dir.cwd().createDirPath(self.io, unpack_dir) catch return errs.Error.SdkLayoutInvalid;
+        var unpacked = false;
+        defer if (!unpacked) std.Io.Dir.cwd().deleteTree(self.io, unpack_dir) catch {};
+
+        const strip = sdkStripComponents(engine_tag);
+        const extract_result = switch (sdkArchiveFormat(engine_tag)) {
+            .tar_gz => extractTarGzFile(self.alloc, self.io, part_path, unpack_dir, strip, archive_size, .{ .ctx = prog.ctx, .cb = prog.report }),
+            .zip => util_archive.extractFile(part_path, unpack_dir, .{
+                .strip = @intCast(strip),
+                .progress_cb = prog.report,
+                .progress_ctx = prog.ctx,
+                .progress_total = archive_size,
+            }),
         };
         extract_result catch |e| {
             log.warn("SDK extract failed: {s}", .{@errorName(e)});
-            std.Io.Dir.cwd().deleteTree(self.io, dest_dir) catch {};
             return errs.Error.SdkLayoutInvalid;
         };
+        prog.tick(archive_size, archive_size);
+
+        // Neither extractor can stop mid-stream; honour a stop that came
+        // in while it ran before the SDK becomes visible to `locate`.
+        if (prog.stop()) return errs.Error.Cancelled;
+
+        std.Io.Dir.cwd().rename(unpack_dir, std.Io.Dir.cwd(), dest_dir, self.io) catch |e| {
+            log.warn("SDK move into place failed: {s}", .{@errorName(e)});
+            return errs.Error.SdkLayoutInvalid;
+        };
+        unpacked = true;
 
         log.info("SDK installed at {s}", .{dest_dir});
         return dest_dir;
@@ -184,58 +229,36 @@ pub fn sdkArchiveFormat(engine_tag: []const u8) ArchiveFormat {
 
 pub const ArchiveFormat = enum { tar_gz, zip };
 
-/// std.zip needs a `*File.Reader` because the central directory lives
-/// at the end of the archive — we can't stream-decode like tar. Buffer
-/// the body to a tmp file in `dest_dir`, extract, then delete the tmp.
-fn extractZipBuffered(
+/// Stream `path` (a .tar.gz on disk) through gzip + tar into
+/// `dest_dir`, reporting compressed bytes consumed via `sink`.
+fn extractTarGzFile(
     alloc: std.mem.Allocator,
     io: Io,
-    body: []const u8,
+    path: []const u8,
     dest_dir: []const u8,
+    strip_components: u32,
+    total: u64,
+    sink: util_archive.ProgressSink,
 ) !void {
-    _ = alloc;
-    var tmp_buf: [1024]u8 = undefined;
-    const tmp_path = try std.fmt.bufPrint(&tmp_buf, "{s}/.fetch.tmp.zip", .{dest_dir});
-
-    // Write body to tmp file.
-    {
-        var f = try std.Io.Dir.cwd().createFile(io, tmp_path, .{ .truncate = true });
-        defer f.close(io);
-        var wr_buf: [64 * 1024]u8 = undefined;
-        var fw = f.writer(io, &wr_buf);
-        try fw.interface.writeAll(body);
-        try fw.interface.flush();
-    }
-    defer std.Io.Dir.cwd().deleteFile(io, tmp_path) catch {};
-
-    // Open tmp + extract.
-    var in = try std.Io.Dir.cwd().openFile(io, tmp_path, .{ .mode = .read_only });
-    defer in.close(io);
-    var rd_buf: [64 * 1024]u8 = undefined;
-    var fr = in.reader(io, &rd_buf);
-
     var dest = try std.Io.Dir.cwd().openDir(io, dest_dir, .{});
     defer dest.close(io);
-    try std.zip.extract(dest, &fr, .{ .allow_backslashes = true });
-}
 
-fn extractTarGz(
-    alloc: std.mem.Allocator,
-    io: Io,
-    gzipped: []const u8,
-    dest: std.Io.Dir,
-    strip_components: u32,
-) !void {
-    // Decompress wraps a fixed-slice Reader over the in-memory body.
-    var src_reader = Io.Reader.fixed(gzipped);
+    var f = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only });
+    defer f.close(io);
 
-    // flate.Decompress needs `max_window_len` of buffer (or 0 for
-    // direct-mode); we allocate to keep stack flat.
+    // Heap buffers: ~160 KiB of reader/window state is too much stack
+    // for a worker thread.
+    const bufs = try alloc.alloc(u8, 2 * 64 * 1024);
+    defer alloc.free(bufs);
+    var fr = f.reader(io, bufs[0 .. 64 * 1024]);
+    // The gzip decoder peeks through the counting reader, so it needs a
+    // buffer of its own (an empty one cannot serve a peek).
+    var counted = util_archive.CountingReader.init(&fr.interface, bufs[64 * 1024 ..], total, sink);
+
     const window = try alloc.alloc(u8, std.compress.flate.max_window_len);
     defer alloc.free(window);
 
-    var dec = std.compress.flate.Decompress.init(&src_reader, .gzip, window);
-    // `dec.reader` is the *Io.Reader the tar walker reads from.
+    var dec = std.compress.flate.Decompress.init(&counted.reader, .gzip, window);
     try std.tar.extract(io, dest, &dec.reader, .{ .strip_components = strip_components });
 }
 
@@ -328,7 +351,7 @@ test "Cache.fetch: idempotent — second call returns cached path without networ
     // network entirely.
     try env.mkdirP("convert/sdks/renpy-7.5.3");
 
-    const got = try cache.fetch("renpy", "7.5.3");
+    const got = try cache.fetch("renpy", "7.5.3", .none);
     defer testing.allocator.free(got);
     try testing.expect(std.mem.endsWith(u8, got, "/convert/sdks/renpy-7.5.3"));
 }
