@@ -47,6 +47,8 @@ test {
     _ = @import("threads/work_thread.zig");
     _ = @import("threads/threads.zig");
     _ = @import("threads/jobs/convert.zig");
+    _ = @import("threads/jobs/decrypt.zig");
+    _ = @import("threads/jobs/rpa.zig");
     _ = @import("dl_controls.zig");
     _ = @import("screens/downloads.zig");
 }

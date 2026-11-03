@@ -6,10 +6,11 @@
 
 const std = @import("std");
 const Io = std.Io;
-const rpa = @import("util_rpa");
 const types = @import("../types.zig");
+const threads_act = @import("threads.zig");
 
 const Frame = types.Frame;
+const threads = types.threads;
 const log = std.log.scoped(.renpy);
 
 /// `init 999` runs after the game's own init blocks, so this overrides a
@@ -52,95 +53,31 @@ pub fn enableRenpyConsole(frame: *Frame, thread_id: u64) void {
     frame.state.notifyOk("Ren'Py console enabled — press Shift+O in-game.");
 }
 
-/// Extract every `.rpa` archive found in the game's install into its own
-/// directory (loose files next to the archive — Ren'Py prefers loose files,
-/// so this makes assets/scripts moddable). Non-destructive: the `.rpa` is
-/// kept. Reports total files extracted across archives.
+/// Extract every `.rpa` archive found in the game's install into loose
+/// files next to the archive, on the compute thread. The UI thread only
+/// reads the install row; the walk and the extract run in
+/// `threads/jobs/rpa.zig`. The result arrives as `.work_done` and is
+/// toasted by `handleWorkDone`.
 pub fn extractRpaArchives(frame: *Frame, thread_id: u64) void {
-    const alloc = frame.lib.alloc;
-    const io = frame.io;
-
     const inst = (frame.lib.latestInstallForGame(thread_id) catch null) orelse {
         frame.state.notifyErr("Extract: no install found for this game.");
         return;
     };
     defer frame.lib.freeInstall(inst);
 
-    var dir = Io.Dir.cwd().openDir(io, inst.install_path, .{ .access_sub_paths = true, .iterate = true }) catch {
-        frame.state.notifyErr("Extract: couldn't open the install directory.");
+    const name = threads_act.gameNameFor(frame, thread_id);
+    var title_buf: [128]u8 = undefined;
+    const title = std.fmt.bufPrint(&title_buf, "Extract RPA \u{00B7} {s}", .{name}) catch "Extract RPA";
+    const a = threads_act.startTool(frame, .rpa_extract, thread_id, title) orelse return;
+
+    const job = threads.work_thread.RpaJob.create(frame.lib.alloc, thread_id, inst.install_path, name) catch {
+        threads_act.failTool(frame, a, "Out of memory.");
         return;
     };
-    defer dir.close(io);
-    var walker = dir.walk(alloc) catch {
-        frame.state.notifyErr("Extract: out of memory.");
+    frame.work.submit(.{ .rpa_extract = job }, a) catch {
+        threads_act.failTool(frame, a, "Out of memory.");
         return;
     };
-    defer walker.deinit();
-
-    var archives: usize = 0;
-    var files: usize = 0;
-    while (walker.next(io) catch null) |entry| {
-        if (entry.kind != .file) continue;
-        if (!std.ascii.endsWithIgnoreCase(entry.path, ".rpa")) continue;
-        var path_buf: [1024]u8 = undefined;
-        const rpa_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ inst.install_path, entry.path }) catch continue;
-        var out_buf: [1024]u8 = undefined;
-        const out_dir = std.fmt.bufPrint(&out_buf, "{s}/{s}", .{ inst.install_path, std.fs.path.dirname(entry.path) orelse "" }) catch continue;
-
-        const n = extractOneRpa(alloc, io, rpa_path, out_dir) catch |e| {
-            log.warn("extract {s} failed: {s}", .{ entry.path, @errorName(e) });
-            continue;
-        };
-        archives += 1;
-        files += n;
-    }
-
-    if (archives == 0) {
-        frame.state.notifyWarn("No .rpa archives found in this install.");
-        return;
-    }
-    var msg_buf: [128]u8 = undefined;
-    const msg = std.fmt.bufPrint(&msg_buf, "Extracted {d} file(s) from {d} .rpa archive(s).", .{ files, archives }) catch "Extract complete.";
-    frame.state.notifyOk(msg);
-}
-
-fn extractOneRpa(alloc: std.mem.Allocator, io: Io, rpa_path: []const u8, out_dir: []const u8) !usize {
-    const bytes = try Io.Dir.cwd().readFileAlloc(io, rpa_path, alloc, .limited(2 * 1024 * 1024 * 1024));
-    defer alloc.free(bytes);
-
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    defer arena.deinit();
-    const entries = try rpa.loadIndex(arena.allocator(), bytes);
-
-    var n: usize = 0;
-    for (entries) |e| {
-        if (!safeRelPath(e.name)) continue;
-        const data_len = if (e.length >= e.prefix.len) e.length - e.prefix.len else 0;
-        const start = e.offset;
-        const end = start + data_len;
-        if (end > bytes.len) continue; // corrupt / out-of-range entry
-
-        var dst_buf: [1024]u8 = undefined;
-        const dst = std.fmt.bufPrint(&dst_buf, "{s}/{s}", .{ out_dir, e.name }) catch continue;
-        if (std.fs.path.dirname(dst)) |d| Io.Dir.cwd().createDirPath(io, d) catch continue;
-
-        var f = Io.Dir.cwd().createFile(io, dst, .{ .truncate = true }) catch continue;
-        defer f.close(io);
-        var wbuf: [64 * 1024]u8 = undefined;
-        var fw = f.writer(io, &wbuf);
-        fw.interface.writeAll(e.prefix) catch continue;
-        fw.interface.writeAll(bytes[start..end]) catch continue;
-        fw.interface.flush() catch continue;
-        n += 1;
-    }
-    return n;
-}
-
-/// Reject absolute paths and any ".." segment — RPA names are untrusted.
-fn safeRelPath(name: []const u8) bool {
-    if (name.len == 0) return false;
-    if (name[0] == '/' or name[0] == '\\') return false;
-    return std.mem.indexOf(u8, name, "..") == null;
 }
 
 fn findGameDir(alloc: std.mem.Allocator, io: Io, root: []const u8) ?[]u8 {

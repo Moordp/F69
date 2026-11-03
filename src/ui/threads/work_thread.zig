@@ -13,6 +13,8 @@ const Mailbox = @import("mailbox.zig").Mailbox;
 const activity_mod = @import("activity.zig");
 const events_mod = @import("events.zig");
 const convert_job = @import("jobs/convert.zig");
+const decrypt_job = @import("jobs/decrypt.zig");
+const rpa_job = @import("jobs/rpa.zig");
 
 const Activity = activity_mod.Activity;
 const Book = activity_mod.Book;
@@ -29,6 +31,10 @@ pub const WorkOutcome = union(enum) {
     mod_queue: void,
     /// Owns compat records; `handleWorkDone` frees them.
     convert: ConvertOutcome,
+    /// Decrypted file count. Owns nothing.
+    decrypt: struct { count: u32 },
+    /// Extracted file and archive counts. Owns nothing.
+    rpa: struct { files: u32, archives: u32 },
     /// Tests only.
     fake: struct { steps: u32 },
 };
@@ -46,17 +52,23 @@ pub const FakeJob = struct {
 pub const WorkJob = union(enum) {
     mod_queue: void,
     convert: ConvertJob,
+    decrypt: DecryptJob,
+    rpa_extract: RpaJob,
     fake: FakeJob,
 };
 
 pub const ConvertJob = convert_job.ConvertJob;
 pub const ConvertOutcome = convert_job.ConvertOutcome;
+pub const DecryptJob = decrypt_job.DecryptJob;
+pub const RpaJob = rpa_job.RpaJob;
 
 /// Frees what a job owns. Called once per job: after it ran, or when it
 /// is dropped without running.
 fn freeJob(job: WorkJob) void {
     switch (job) {
         .convert => |c| c.deinit(),
+        .decrypt => |d| d.deinit(),
+        .rpa_extract => |r| r.deinit(),
         .mod_queue, .fake => {},
     }
 }
@@ -113,6 +125,14 @@ fn run(deps: Deps, job: WorkJob, a: *Activity, buf: []u8) anyerror!Done {
         .convert => |c| blk: {
             const r = try convert_job.run(deps, c, a, buf);
             break :blk .{ .outcome = .{ .convert = r.outcome }, .kind = r.kind, .msg = r.msg };
+        },
+        .decrypt => |d| blk: {
+            const r = try decrypt_job.run(deps, d, a, buf);
+            break :blk .{ .outcome = .{ .decrypt = .{ .count = r.outcome.count } }, .kind = r.kind, .msg = r.msg };
+        },
+        .rpa_extract => |j| blk: {
+            const r = try rpa_job.run(deps, j, a, buf);
+            break :blk .{ .outcome = .{ .rpa = .{ .files = r.outcome.files, .archives = r.outcome.archives } }, .kind = r.kind, .msg = r.msg };
         },
         .fake => |f| runFake(deps.io, f, a, buf),
     };

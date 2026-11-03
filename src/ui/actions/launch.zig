@@ -1652,12 +1652,7 @@ pub fn doConvertGame(frame: *Frame, game: *const library.Game) void {
     };
 }
 
-/// Ends an activity that never reached the worker, with an error toast.
-fn failTool(frame: *Frame, a: *threads.Activity, msg: []const u8) void {
-    const now = std.Io.Clock.Timestamp.now(frame.io, .real).raw.toSeconds();
-    frame.book.finish(a, .err, msg, now);
-    frame.state.notifyErr(msg);
-}
+const failTool = threads_act.failTool;
 
 // `RunningGamesMap` aliased from `owned.zig` at the top of the file.
 

@@ -51,6 +51,21 @@ pub fn startTool(frame: *Frame, kind: Kind, tid: u64, title: []const u8) ?*threa
     };
 }
 
+/// Ends an activity that never reached the worker, with an error toast.
+pub fn failTool(frame: *Frame, a: *threads.Activity, msg: []const u8) void {
+    const now = std.Io.Clock.Timestamp.now(frame.io, .real).raw.toSeconds();
+    frame.book.finish(a, .err, msg, now);
+    frame.state.notifyErr(msg);
+}
+
+/// The game's name from the frame's in-memory game list (no DB read), or
+/// "game" when it is not there.
+pub fn gameNameFor(frame: *Frame, tid: u64) []const u8 {
+    if (frame.games_by_thread) |map| if (map.get(tid)) |g| return g.name;
+    for (frame.games) |*g| if (g.f95_thread_id == tid) return g.name;
+    return "game";
+}
+
 /// Kind of the live activity for `tid`, if any.
 fn liveKindForGame(frame: *Frame, tid: u64) ?Kind {
     var arena = std.heap.ArenaAllocator.init(frame.lib.alloc);
@@ -114,7 +129,8 @@ fn resultToast(k: threads.activity.ResultKind) state_mod.ToastKind {
 /// the outcome owns, and toasts the result of a per-game tool.
 fn handleWorkDone(frame: *Frame, activity_id: u64, outcome: threads.work_thread.WorkOutcome) void {
     switch (outcome) {
-        .none, .mod_queue, .fake => {},
+        // Decrypt and RPA extract own nothing: the toast below is all.
+        .none, .mod_queue, .fake, .decrypt, .rpa => {},
         .convert => |c| applyConvertOutcome(frame, c),
     }
 
@@ -123,11 +139,14 @@ fn handleWorkDone(frame: *Frame, activity_id: u64, outcome: threads.work_thread.
     const views = frame.book.snapshot(arena.allocator()) catch return;
     for (views) |v| {
         if (v.id != activity_id) continue;
-        if (v.kind != .convert) return;
+        switch (v.kind) {
+            .convert, .decrypt, .rpa_extract => {},
+            else => return,
+        }
         frame.state.pushToast(resultToast(v.result_kind), v.result);
         // A finished convert (not a cancel, not a failure) answers the
         // "Found a Windows build" Play error: drop the hero button.
-        if (v.status == .done and v.result_kind != .err) {
+        if (v.kind == .convert and v.status == .done and v.result_kind != .err) {
             if (frame.state.last_play_needs_convert == v.game_thread_id) frame.state.last_play_needs_convert = null;
         }
         return;

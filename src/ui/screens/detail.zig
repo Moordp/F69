@@ -2486,7 +2486,10 @@ fn renderEngineTools(frame: *Frame, game: *library.Game) void {
         .padding = .{ .x = 0, .y = 0, .w = 0, .h = 4 },
     });
     defer row.deinit();
-    var convert_opts: dvui.Options = if (frame.book.liveForGame(game.f95_thread_id)) toolBusyOpts() else .{};
+    // A running tool greys every long tool for this game; a click on a
+    // grey one toasts "<Tool> is already running" (`actions.startTool`).
+    const busy = frame.book.liveForGame(game.f95_thread_id);
+    var convert_opts: dvui.Options = if (busy) toolBusyOpts() else .{};
     convert_opts.tag = "tools-convert";
     if (components.iconButton(@src(), "Convert (Win\u{2192}Linux)", entypo.cycle, convert_opts)) {
         actions.doConvertGame(frame, game);
@@ -2501,7 +2504,9 @@ fn renderEngineTools(frame: *Frame, game: *library.Game) void {
         doCompatFixForActiveInstall(frame, game);
     }
     if (game.engine == .rpgm_mv or game.engine == .rpgm_mz) {
-        if (components.iconButton(@src(), "Decrypt RPGM assets", entypo.tools, .{})) {
+        var decrypt_opts: dvui.Options = if (busy) toolBusyOpts() else .{};
+        decrypt_opts.tag = "tools-decrypt";
+        if (components.iconButton(@src(), "Decrypt RPGM assets", entypo.tools, decrypt_opts)) {
             actions.decryptRpgmAssets(frame, game.f95_thread_id);
         }
     }
@@ -2509,7 +2514,9 @@ fn renderEngineTools(frame: *Frame, game: *library.Game) void {
         if (components.iconButton(@src(), "Enable Ren'Py console", entypo.tools, .{})) {
             actions.enableRenpyConsole(frame, game.f95_thread_id);
         }
-        if (components.iconButton(@src(), "Extract .rpa", entypo.archive, .{})) {
+        var rpa_opts: dvui.Options = if (busy) toolBusyOpts() else .{};
+        rpa_opts.tag = "tools-rpa";
+        if (components.iconButton(@src(), "Extract .rpa", entypo.archive, rpa_opts)) {
             actions.extractRpaArchives(frame, game.f95_thread_id);
         }
     }

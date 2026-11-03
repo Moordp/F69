@@ -2405,6 +2405,201 @@ test "threads: Cancel stops a running Convert; a second Convert then completes" 
     tlog("threads-convert-cancel: OK", .{});
 }
 
+/// Inverse of `rpgm_crypt.decrypt` for the tests: a 16-byte header that
+/// starts with "RPGMV", then `plain` with its first 16 bytes XOR'd with
+/// `key`. Caller frees.
+fn encryptForTest(alloc: std.mem.Allocator, plain: []const u8, key: [16]u8) ![]u8 {
+    const out = try alloc.alloc(u8, plain.len + 16);
+    @memset(out[0..16], 0);
+    @memcpy(out[0..5], "RPGMV");
+    @memcpy(out[16..], plain);
+    for (0..@min(16, plain.len)) |i| out[16 + i] ^= key[i];
+    return out;
+}
+
+const test_rpgm_key_hex = "0123456789abcdef0123456789abcdef";
+
+/// RPG Maker MV install for game `tid` with a System.json key and two
+/// encrypted assets (`img/a.rpgmvp`, `audio/b.ogg_`). Returns the install
+/// path (caller frees).
+fn seedRpgmGame(h: *ui.Harness, env: *TestEnv, tid: u64) ![]u8 {
+    const gpa = std.testing.allocator;
+    var rel_buf: [128]u8 = undefined;
+    const base = try std.fmt.bufPrint(&rel_buf, "library/{d}/final", .{tid});
+    var p_buf: [256]u8 = undefined;
+    try env.writeFile(try std.fmt.bufPrint(&p_buf, "{s}/Game.exe", .{base}), "MZ fake pe");
+    try env.writeFile(try std.fmt.bufPrint(&p_buf, "{s}/www/data/System.json", .{base}), "{\"encryptionKey\":\"" ++ test_rpgm_key_hex ++ "\"}");
+    var key: [16]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&key, test_rpgm_key_hex);
+    for ([_]struct { []const u8, []const u8 }{
+        .{ "www/img/a.rpgmvp", "\x89PNG\r\n\x1a\nfake png body that is longer than 16 bytes" },
+        .{ "www/audio/b.ogg_", "OggS fake ogg body that is longer than 16 bytes" },
+    }) |f| {
+        const enc = try encryptForTest(gpa, f[1], key);
+        defer gpa.free(enc);
+        try env.writeFile(try std.fmt.bufPrint(&p_buf, "{s}/{s}", .{ base, f[0] }), enc);
+    }
+    const install_path = try env.path(base);
+    errdefer gpa.free(install_path);
+    _ = try h.lib.insertIfMissing(&.{ .f95_thread_id = tid, .name = "Rpgm Game", .developer = "Dev", .engine = .rpgm_mv });
+    try h.lib.upsertInstall(&.{
+        .id = "44444444-5555-6666-7777-888888888888".*,
+        .game_thread_id = tid,
+        .version = "1.0",
+        .install_path = install_path,
+        .recipe_id = "",
+        .installed_at = 0,
+        .source = .manual,
+    });
+    try h.reloadGames();
+    return install_path;
+}
+
+/// Number of `kind` activities for `tid` in the book.
+fn toolCount(fr: *ui.Frame, kind: ui.threads.activity.Kind, tid: u64) usize {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const views = fr.book.snapshot(arena_state.allocator()) catch return 0;
+    var n: usize = 0;
+    for (views) |v| {
+        if (v.kind == kind and v.game_thread_id == tid) n += 1;
+    }
+    return n;
+}
+
+/// Steps frames until every `kind` activity for `tid` has ended (bounded,
+/// ~10 s), plus two frames to drain `.work_done` and show the toast.
+/// Returns the final status of the newest one.
+fn stepUntilToolEnds(fr: *ui.Frame, io: std.Io, kind: ui.threads.activity.Kind, tid: u64) !ui.threads.activity.Status {
+    var i: usize = 0;
+    while (i < 2000) : (i += 1) {
+        _ = try dvui.testing.step(threadsRender);
+        var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena_state.deinit();
+        const views = try fr.book.snapshot(arena_state.allocator());
+        var newest: ?ui.threads.activity.View = null;
+        var live = false;
+        for (views) |v| {
+            if (v.kind != kind or v.game_thread_id != tid) continue;
+            if (!isTerminal(v.status)) live = true;
+            if (newest == null or v.id > newest.?.id) newest = v;
+        }
+        if (newest != null and !live) {
+            _ = try dvui.testing.step(threadsRender);
+            _ = try dvui.testing.step(threadsRender);
+            return newest.?.status;
+        }
+        std.Io.sleep(io, .fromMilliseconds(5), .awake) catch {};
+    }
+    return error.ToolDidNotEnd;
+}
+
+fn fileExists(io: std.Io, dir: []const u8, rel: []const u8) bool {
+    var buf: [512]u8 = undefined;
+    const p = std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir, rel }) catch return false;
+    std.Io.Dir.cwd().access(io, p, .{}) catch return false;
+    return true;
+}
+
+test "threads: Tools-tab Decrypt runs on the compute thread, writes decrypted copies and toasts the count" {
+    tlog("START: threads-decrypt", .{});
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(8) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var env = try TestEnv.init(gpa, "threads-decrypt");
+    defer env.deinit();
+    var t = try dvui.testing.init(.{ .allocator = gpa, .io = io, .window_size = .{ .w = 1280, .h = 1600 } });
+    defer t.deinit();
+    var h = try ui.Harness.init(gpa, io, t.window, env.root);
+    defer h.deinit();
+
+    const tid: u64 = 60;
+    const install_path = try seedRpgmGame(h, &env, tid);
+    defer gpa.free(install_path);
+
+    var fr = h.frame();
+    threads_frame = &fr;
+    defer threads_frame = null;
+    h.state.screen = .detail;
+    h.state.selected_thread = tid;
+
+    _ = try dvui.testing.step(threadsRender);
+    _ = try dvui.testing.step(threadsRender);
+    try openToolsTab(h);
+    try dvui.testing.moveTo("tools-decrypt");
+    try dvui.testing.click(.left);
+    const st = try stepUntilToolEnds(&fr, io, .decrypt, tid);
+    try std.testing.expectEqual(ui.threads.activity.Status.done, st);
+    try std.testing.expect(fileExists(io, install_path, "www/img/a.png"));
+    try std.testing.expect(fileExists(io, install_path, "www/audio/b.ogg"));
+    // Originals are kept.
+    try std.testing.expect(fileExists(io, install_path, "www/img/a.rpgmvp"));
+    {
+        var buf: [512]u8 = undefined;
+        const p = try std.fmt.bufPrint(&buf, "{s}/www/img/a.png", .{install_path});
+        const got = try std.Io.Dir.cwd().readFileAlloc(io, p, gpa, .limited(4096));
+        defer gpa.free(got);
+        try std.testing.expectEqualStrings("\x89PNG\r\n\x1a\nfake png body that is longer than 16 bytes", got);
+    }
+    try std.testing.expect(toastContains(&h.state, "Decrypted 2 RPGM asset(s)"));
+    tlog("threads-decrypt: OK", .{});
+}
+
+test "threads: two quick Decrypt clicks start one activity only" {
+    tlog("START: threads-decrypt-dup", .{});
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(8) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var env = try TestEnv.init(gpa, "threads-decrypt-dup");
+    defer env.deinit();
+    var t = try dvui.testing.init(.{ .allocator = gpa, .io = io, .window_size = .{ .w = 1280, .h = 1600 } });
+    defer t.deinit();
+    var h = try ui.Harness.init(gpa, io, t.window, env.root);
+    defer h.deinit();
+
+    const tid: u64 = 61;
+    const install_path = try seedRpgmGame(h, &env, tid);
+    defer gpa.free(install_path);
+
+    var fr = h.frame();
+    threads_frame = &fr;
+    defer threads_frame = null;
+    h.state.screen = .detail;
+    h.state.selected_thread = tid;
+
+    _ = try dvui.testing.step(threadsRender);
+    _ = try dvui.testing.step(threadsRender);
+    try openToolsTab(h);
+
+    // Keep the compute thread busy with another game's job, so the
+    // decrypt stays queued (live) across both clicks however fast it is.
+    const blocker = try fr.book.start(.hash, 9999, "blocker");
+    try fr.work.submit(.{ .fake = .{ .steps = 1000, .sleep_ms = 5 } }, blocker);
+
+    try dvui.testing.moveTo("tools-decrypt");
+    try dvui.testing.click(.left);
+    _ = try dvui.testing.step(threadsRender);
+    _ = try dvui.testing.step(threadsRender);
+    // Move off the button first: in the testing backend a second click
+    // on the same spot with no move in between does not register.
+    try dvui.testing.moveTo("tools-convert");
+    _ = try dvui.testing.step(threadsRender);
+    try dvui.testing.moveTo("tools-decrypt");
+    try dvui.testing.click(.left);
+    _ = try dvui.testing.step(threadsRender);
+    _ = try dvui.testing.step(threadsRender);
+    try std.testing.expectEqual(@as(usize, 1), toolCount(&fr, .decrypt, tid));
+    try std.testing.expect(toastContains(&h.state, "Decrypt is already running for this game"));
+
+    fr.book.requestCancel(blocker.id);
+    const st = try stepUntilToolEnds(&fr, io, .decrypt, tid);
+    try std.testing.expectEqual(ui.threads.activity.Status.done, st);
+    try std.testing.expectEqual(@as(usize, 1), toolCount(&fr, .decrypt, tid));
+    tlog("threads-decrypt-dup: OK", .{});
+}
+
 /// Resolver for the browser-flow tests: Workupload pages resolve to
 /// `needs_browser` without any request; every request fails.
 const NoHttp = struct {
