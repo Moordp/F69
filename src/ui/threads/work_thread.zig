@@ -31,7 +31,13 @@ pub const WorkOutcome = union(enum) {
 };
 
 /// Tests only: reports phase "step i / n" and progress; honours cancel.
-pub const FakeJob = struct { steps: u32, sleep_ms: u32 };
+pub const FakeJob = struct {
+    steps: u32,
+    sleep_ms: u32,
+    /// Tests only: keep running after cancel (models a job that is slow
+    /// to notice it).
+    ignore_cancel: bool = false,
+};
 
 /// One unit of compute work. Later tasks add the real variants.
 pub const WorkJob = union(enum) {
@@ -64,13 +70,23 @@ fn nowSeconds(io: std.Io) i64 {
     return std.Io.Clock.Timestamp.now(io, .real).raw.toSeconds();
 }
 
-/// Plain-language text for a job error. `error.Cancelled` is handled by
+/// Plain-language text for a job error. `error.Cancelled` and the std.Io
+/// spelling `error.Canceled` are handled by
 /// the caller.
 fn errorText(e: anyerror) []const u8 {
     return switch (e) {
         error.InstallNotFound => "The install folder is gone",
         error.NetworkError => "No network",
         else => @errorName(e),
+    };
+}
+
+/// Result for a job that ended with `e`. A cancel (either spelling) is a
+/// warning; the cancel flag is set, so `finish` records `cancelled`.
+fn errorResult(e: anyerror) struct { kind: ResultKind, msg: []const u8 } {
+    return switch (e) {
+        error.Cancelled, error.Canceled => .{ .kind = .warn, .msg = "Stopped." },
+        else => .{ .kind = .err, .msg = errorText(e) },
     };
 }
 
@@ -85,7 +101,7 @@ fn run(deps: Deps, job: WorkJob, a: *Activity, buf: []u8) anyerror!Done {
 fn runFake(io: std.Io, job: FakeJob, a: *Activity, buf: []u8) !Done {
     var i: u32 = 1;
     while (i <= job.steps) : (i += 1) {
-        if (a.cancelled()) return error.Cancelled;
+        if (a.cancelled() and !job.ignore_cancel) return error.Cancelled;
         var pbuf: [32]u8 = undefined;
         const phase = std.fmt.bufPrint(&pbuf, "step {d} / {d}", .{ i, job.steps }) catch unreachable;
         a.setPhase(io, phase);
@@ -98,6 +114,13 @@ fn runFake(io: std.Io, job: FakeJob, a: *Activity, buf: []u8) !Done {
 
 /// The compute thread. `Worker` must not move after `start`: the thread
 /// holds a pointer to it.
+///
+/// Lifetime: if `stop` has to detach the thread (its job ignored cancel for
+/// longer than `join_budget_ms`), that thread keeps using this `Worker`, the
+/// `Book` and the `Events` until its job ends. `deinit` then leaves
+/// `self.*` untouched, and the owner must keep the Worker, Book and Events
+/// alive (not freed, not moved) for as long as the detached thread may run.
+/// `done` turns true when it has finished.
 pub const Worker = struct {
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -115,6 +138,8 @@ pub const Worker = struct {
     /// The thread did not exit in time and was detached; it may still
     /// touch `mb`, so `deinit` must not free it.
     detached: bool = false,
+    /// How long `stop` waits for the thread before detaching it.
+    join_budget_ms: u32 = 3000,
 
     pub fn init(alloc: std.mem.Allocator, io: std.Io, book: *Book, events: *Events, deps: Deps) Worker {
         return .{
@@ -127,10 +152,13 @@ pub const Worker = struct {
         };
     }
 
-    /// Stops the thread (if any) and frees the queue.
+    /// Stops the thread (if any) and frees the queue. If the thread was
+    /// detached it still uses `self`, so nothing is freed or overwritten;
+    /// see the lifetime note on `Worker`.
     pub fn deinit(self: *Worker) void {
         self.stop();
-        if (!self.detached) self.mb.deinit();
+        if (self.detached) return;
+        self.mb.deinit();
         self.* = undefined;
     }
 
@@ -161,13 +189,14 @@ pub const Worker = struct {
         const t = self.thread orelse return;
         self.thread = null;
         var waited_ms: u32 = 0;
-        while (!self.done.load(.acquire) and waited_ms < 3000) : (waited_ms += 50) {
-            std.Io.sleep(self.io, std.Io.Duration.fromMilliseconds(50), .awake) catch {};
+        const step_ms: u32 = @min(50, self.join_budget_ms);
+        while (!self.done.load(.acquire) and waited_ms < self.join_budget_ms) : (waited_ms += step_ms) {
+            std.Io.sleep(self.io, std.Io.Duration.fromMilliseconds(step_ms), .awake) catch {};
         }
         if (self.done.load(.acquire)) {
             t.join();
         } else {
-            log.warn("compute thread did not stop within 3 s; detaching it", .{});
+            log.warn("compute thread did not stop within {d} ms; detaching it", .{self.join_budget_ms});
             self.detached = true;
             t.detach();
         }
@@ -229,10 +258,9 @@ pub const Worker = struct {
         if (run(self.deps, e.job, a, &buf)) |d| {
             outcome = d.outcome;
             self.book.finish(a, d.kind, d.msg, nowSeconds(self.io));
-        } else |err| switch (err) {
-            // The cancel flag is set, so `finish` records `cancelled`.
-            error.Cancelled => self.book.finish(a, .warn, "Stopped.", nowSeconds(self.io)),
-            else => self.book.finish(a, .err, errorText(err), nowSeconds(self.io)),
+        } else |err| {
+            const res = errorResult(err);
+            self.book.finish(a, res.kind, res.msg, nowSeconds(self.io));
         }
         self.events.push(.{ .work_done = .{ .activity_id = a.id, .outcome = outcome } });
     }
@@ -351,4 +379,50 @@ test "Worker: stop cancels the running job and the queued one never starts; retu
     defer left.deinit(alloc);
     ev.drain(alloc, &left);
     for (left.items) |e| events_mod.freeEvent(alloc, e);
+}
+
+test "Worker: stop detaches a job that ignores cancel; deinit leaves the state intact for it" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var book = Book.init(alloc, io);
+    defer book.deinit();
+    var ev = Events.init(alloc, io, null);
+    defer ev.deinit();
+    var w = Worker.init(alloc, io, &book, &ev, .{ .alloc = alloc, .io = io });
+    w.join_budget_ms = 100;
+    try w.start();
+    const a = try book.start(.hash, 1, "stubborn");
+    // About 300 ms in total: longer than the 100 ms join budget.
+    try w.submit(.{ .fake = .{ .steps = 6, .sleep_ms = 50, .ignore_cancel = true } }, a);
+    try waitPhase(a);
+    w.stop();
+    try std.testing.expect(w.detached);
+    w.deinit();
+    // The detached thread must still find the Worker fields intact.
+    var i: usize = 0;
+    while (!w.done.load(.acquire) and i < 2000) : (i += 1) {
+        std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    try std.testing.expect(w.done.load(.acquire));
+    // `done` is the thread's last store; give it a moment to return.
+    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(10), .awake) catch {};
+    try std.testing.expectEqual(activity_mod.Status.cancelled, a.statusGet());
+    try std.testing.expectEqualStrings("Finished 6 steps.", a.result[0..a.result_len]);
+    // The thread is gone now, so the queue the detached path kept can be freed.
+    w.mb.deinit();
+    var left: std.ArrayList(events_mod.UiEvent) = .empty;
+    defer left.deinit(alloc);
+    ev.drain(alloc, &left);
+    for (left.items) |e| events_mod.freeEvent(alloc, e);
+}
+
+test "errorResult: both cancel spellings are a warning \"Stopped.\"; others are errors" {
+    for ([_]anyerror{ error.Cancelled, error.Canceled }) |e| {
+        const res = errorResult(e);
+        try std.testing.expectEqual(ResultKind.warn, res.kind);
+        try std.testing.expectEqualStrings("Stopped.", res.msg);
+    }
+    const res = errorResult(error.NetworkError);
+    try std.testing.expectEqual(ResultKind.err, res.kind);
+    try std.testing.expectEqualStrings("No network", res.msg);
 }
