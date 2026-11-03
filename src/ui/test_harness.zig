@@ -69,6 +69,8 @@ pub const Harness = struct {
     ui_events: threads.Events,
     book: threads.Book,
     worker: threads.Worker,
+    /// Submits every mod-queue enqueue to `worker` (as `runMainLoop`).
+    mod_queue_hook: threads.ModQueueHook,
 
     state: State,
     info: RuntimeInfo,
@@ -214,6 +216,9 @@ pub const Harness = struct {
             .data_root = self.info.data_root,
         });
         errdefer self.worker.deinit();
+        self.mod_queue_hook = .{ .book = &self.book, .work = &self.worker };
+        self.mod_jobs.on_enqueue = threads.ModQueueHook.onEnqueue;
+        self.mod_jobs.on_enqueue_ctx = &self.mod_queue_hook;
         try self.worker.start();
 
         return self;
@@ -263,7 +268,9 @@ pub const Harness = struct {
         const gpa = self.gpa;
         // Stop the compute thread first (cancel + up to 3 s wait). The
         // events and book it shared stay alive until the drain loop below
-        // has run, which still drains `ui_events`.
+        // has run, which still drains `ui_events`. No enqueue may reach
+        // the worker once it is stopped.
+        self.mod_jobs.on_enqueue = null;
         self.worker.stop();
         // Signal cancel to any worker the test left running, then pump the
         // drains until they clear — otherwise tearing down the services

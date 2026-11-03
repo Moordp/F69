@@ -28,6 +28,7 @@ const dvui = @import("dvui");
 const types = @import("../types.zig");
 const state_mod = @import("../state.zig");
 const mod_job_queue = @import("../mod_job_queue.zig");
+const Activity = @import("../threads/activity.zig").Activity;
 const owned_types = @import("../owned.zig");
 const job_mod = @import("../job.zig");
 const common = @import("common.zig");
@@ -106,11 +107,14 @@ pub fn doUninstallMod(frame: *Frame, parent_game: *const library.Game, mod_recip
     };
 }
 
-/// Runner the queue invokes from its worker thread. Owns all the work
-/// `doInstallMod` / `doUninstallMod` used to do synchronously. Lives in
-/// the UI layer because it needs Library + Repo handles. `ctx` is the
-/// runner-context pointer set at queue init — we stash a `RunnerCtx`
-/// there so the worker can reach lib/io.
+/// Runner the compute thread invokes (threads/jobs/mod_queue.zig) for
+/// the queue head. Owns all the work `doInstallMod` / `doUninstallMod`
+/// used to do synchronously. Lives in the UI layer because it needs
+/// Library + Repo handles. `ctx` is the runner-context pointer set at
+/// queue init — a `RunnerCtx`, so the runner can reach lib/io. `act`
+/// is the job's activity (null when a test calls the runner directly):
+/// phases and file progress are mirrored into it, and its cancel flag
+/// is copied into the job's.
 pub const RunnerCtx = struct {
     alloc: std.mem.Allocator,
     io: std.Io,
@@ -121,9 +125,9 @@ pub const RunnerCtx = struct {
     temp_root: []const u8 = "/tmp",
 };
 
-pub fn modJobRunner(ctx: ?*anyopaque, job: *mod_job_queue.Job) void {
+pub fn modJobRunner(ctx: ?*anyopaque, job: *mod_job_queue.Job, act: ?*Activity) void {
     const c: *RunnerCtx = @ptrCast(@alignCast(ctx orelse return));
-    runOneModJob(c, job) catch |e| {
+    runOneModJob(c, job, act) catch |e| {
         // runOneModJob already set err_buf/len on the job before
         // returning; fall through to phase=err.
         log.warn("mod job {d} failed: {s}", .{ job.id, @errorName(e) });
@@ -133,12 +137,29 @@ pub fn modJobRunner(ctx: ?*anyopaque, job: *mod_job_queue.Job) void {
     // worker already flipped it.
     const p = job.currentPhase();
     if (p != .done and p != .canceled and p != .err) {
-        job.phase.store(@intFromEnum(mod_job_queue.Phase.err), .release);
+        setPhase(c.io, job, act, .err);
     }
 }
 
-fn runOneModJob(ctx: *RunnerCtx, job: *mod_job_queue.Job) !void {
-    job.phase.store(@intFromEnum(mod_job_queue.Phase.preparing), .release);
+/// Stores `phase` on the job and mirrors its label into the activity.
+pub fn setPhase(io: std.Io, job: *mod_job_queue.Job, act: ?*Activity, phase: mod_job_queue.Phase) void {
+    if (act) |a| a.setPhase(io, mod_job_queue.phaseLabel(phase));
+    job.phase.store(@intFromEnum(phase), .release);
+}
+
+/// `progress_ctx` for the apply step: the job plus its activity.
+const ProgressCtx = struct {
+    job: *mod_job_queue.Job,
+    act: ?*Activity,
+};
+
+fn runOneModJob(ctx: *RunnerCtx, job: *mod_job_queue.Job, act: ?*Activity) !void {
+    // Cancelled while it waited: nothing was touched yet.
+    if (job.cancel_flag.load(.acquire) or (act != null and act.?.cancelled())) {
+        setPhase(ctx.io, job, act, .canceled);
+        return;
+    }
+    setPhase(ctx.io, job, act, .preparing);
     job.progress_done.store(0, .release);
     job.progress_total.store(0, .release);
 
@@ -171,8 +192,8 @@ fn runOneModJob(ctx: *RunnerCtx, job: *mod_job_queue.Job) !void {
     const mod_id_str = job.mod_recipe_id;
 
     switch (job.kind) {
-        .install => try runInstall(ctx, job, layout, mod_id_str),
-        .uninstall => try runUninstall(ctx, job, layout, mod_id_str),
+        .install => try runInstall(ctx, job, act, layout, mod_id_str),
+        .uninstall => try runUninstall(ctx, job, act, layout, mod_id_str),
     }
 
     // Don't promote to `.done` if the sub-runner already flipped the
@@ -180,13 +201,14 @@ fn runOneModJob(ctx: *RunnerCtx, job: *mod_job_queue.Job) !void {
     // that made every uninstall look like a success.
     const cur: mod_job_queue.Phase = @enumFromInt(job.phase.load(.monotonic));
     if (cur != .err and cur != .canceled) {
-        job.phase.store(@intFromEnum(mod_job_queue.Phase.done), .release);
+        setPhase(ctx.io, job, act, .done);
     }
 }
 
 fn runInstall(
     ctx: *RunnerCtx,
     job: *mod_job_queue.Job,
+    act: ?*Activity,
     layout: mods_act.ModTrackerLayout,
     mod_id_str: []const u8,
 ) !void {
@@ -198,7 +220,7 @@ fn runInstall(
     var parsed_mod_opt = ctx.repo.findMod(job.mod_recipe_id) catch null;
     defer if (parsed_mod_opt) |*p| p.deinit();
 
-    job.phase.store(@intFromEnum(mod_job_queue.Phase.staging), .release);
+    setPhase(ctx.io, job, act, .staging);
 
     var tracker = installer_mod.Tracker.init(ctx.alloc, ctx.io, layout.tracker_path);
     defer tracker.deinit();
@@ -206,12 +228,13 @@ fn runInstall(
     defer existing.deinit(ctx.alloc);
     for (existing.entries) |e| tracker.record(e) catch {};
 
-    job.phase.store(@intFromEnum(mod_job_queue.Phase.applying), .release);
+    setPhase(ctx.io, job, act, .applying);
 
+    var progress_ctx: ProgressCtx = .{ .job = job, .act = act };
     const apply_opts: installer_mod.ApplyOpts = .{
         .backup_mode = job.backup_mode,
         .progress_cb = jobProgressCb,
-        .progress_ctx = job,
+        .progress_ctx = &progress_ctx,
         .cancel = &job.cancel_flag,
         .staging_root = ctx.temp_root,
     };
@@ -262,7 +285,7 @@ fn runInstall(
             // always written); flush the FULL in-memory log to disk,
             // reverse this mod's entries, then persist the log without
             // them — mirroring the uninstall path.
-            job.phase.store(@intFromEnum(mod_job_queue.Phase.flushing), .release);
+            setPhase(ctx.io, job, act, .flushing);
             tracker.flush() catch {};
             var log_obj = installer_mod.Tracker.load(ctx.alloc, ctx.io, layout.tracker_path) catch installer_mod.InstallLog{ .entries = &.{} };
             defer log_obj.deinit(ctx.alloc);
@@ -273,7 +296,7 @@ fn runInstall(
             for (log_obj.entries) |le| clean.record(le) catch {};
             clean.removeMod(mod_id_str);
             clean.flush() catch {};
-            job.phase.store(@intFromEnum(mod_job_queue.Phase.canceled), .release);
+            setPhase(ctx.io, job, act, .canceled);
             return;
         },
         else => {
@@ -283,17 +306,18 @@ fn runInstall(
         },
     };
 
-    job.phase.store(@intFromEnum(mod_job_queue.Phase.flushing), .release);
+    setPhase(ctx.io, job, act, .flushing);
     tracker.flush() catch return setJobErr(job, "Tracker flush failed.");
 }
 
 fn runUninstall(
     ctx: *RunnerCtx,
     job: *mod_job_queue.Job,
+    act: ?*Activity,
     layout: mods_act.ModTrackerLayout,
     mod_id_str: []const u8,
 ) !void {
-    job.phase.store(@intFromEnum(mod_job_queue.Phase.applying), .release);
+    setPhase(ctx.io, job, act, .applying);
 
     var log_obj = installer_mod.Tracker.load(ctx.alloc, ctx.io, layout.tracker_path) catch return setJobErr(job, "Tracker load failed.");
     defer log_obj.deinit(ctx.alloc);
@@ -304,7 +328,7 @@ fn runUninstall(
         return setJobErr(job, msg);
     };
 
-    job.phase.store(@intFromEnum(mod_job_queue.Phase.flushing), .release);
+    setPhase(ctx.io, job, act, .flushing);
 
     var tracker = installer_mod.Tracker.init(ctx.alloc, ctx.io, layout.tracker_path);
     defer tracker.deinit();
@@ -314,9 +338,16 @@ fn runUninstall(
 }
 
 fn jobProgressCb(ctx: ?*anyopaque, done: u32, total: u32) void {
-    const job: *mod_job_queue.Job = @ptrCast(@alignCast(ctx orelse return));
+    const pc: *ProgressCtx = @ptrCast(@alignCast(ctx orelse return));
+    const job = pc.job;
     job.progress_done.store(done, .monotonic);
     if (total != 0) job.progress_total.store(total, .monotonic);
+    if (pc.act) |a| {
+        // Cancel on the activity (Tools row, Mods strip) reaches the
+        // installer through the job's flag, which it checks per file.
+        if (a.cancelled()) job.cancel_flag.store(true, .release);
+        a.report(done, job.progress_total.load(.monotonic));
+    }
 }
 
 fn setJobErr(job: *mod_job_queue.Job, msg: []const u8) error{}!void {
@@ -466,9 +497,11 @@ pub fn drainModJobs(frame: *Frame) void {
     var toast_n: usize = 0;
     {
         const jobs = frame.mod_jobs.jobsLocked();
+        // Only the finished jobs at the head: exactly the ones
+        // `drainFinished` frees below, so each is toasted once.
         for (jobs) |j| {
+            if (!j.isFinished()) break;
             const p = j.currentPhase();
-            if (p != .done and p != .err and p != .canceled) continue;
             if (toast_n >= to_toast.len) break;
             const dlen = @min(j.display.len, to_toast[toast_n].display.len);
             @memcpy(to_toast[toast_n].display[0..dlen], j.display[0..dlen]);
@@ -1640,7 +1673,7 @@ pub fn anyManualInstallActive(state: *const State) bool {
 }
 
 /// True iff a Mods-page install/uninstall is queued or running (the
-/// Downloads page "Modding" section animates while one does).
+/// frame keeps animating while one does).
 pub fn anyModJobActive(frame: *Frame) bool {
     frame.mod_jobs.lock();
     defer frame.mod_jobs.unlock();

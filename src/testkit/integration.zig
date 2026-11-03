@@ -3260,3 +3260,182 @@ test "hostile: findLauncher dispatch picks the OS-correct launcher from a mixed 
     }
     tlog("hostile-dispatch: OK picked={s}", .{picked});
 }
+
+// --- Mod queue on the compute thread -----------------------------------
+//
+// The mod install queue has no worker of its own: each enqueue submits a
+// `WorkJob.mod_queue`, and the compute thread runs the head. Same embedded
+// archive as F6; skipped on Windows for the same std.Io apply park.
+
+/// A game `tid` with one install at `library/<tid>/final` (empty dir).
+/// Returns the install path (caller frees).
+fn seedModGame(h: *ui.Harness, env: *TestEnv, tid: u64, install_id: [36]u8) ![]u8 {
+    var rel_buf: [128]u8 = undefined;
+    const base = try std.fmt.bufPrint(&rel_buf, "library/{d}/final", .{tid});
+    try env.mkdirP(base);
+    const install_path = try env.path(base);
+    errdefer std.testing.allocator.free(install_path);
+    _ = try h.lib.insertIfMissing(&.{ .f95_thread_id = tid, .name = "Mod Game", .developer = "Dev", .engine = .renpy });
+    try h.lib.upsertInstall(&.{
+        .id = install_id,
+        .game_thread_id = tid,
+        .version = "1.0",
+        .install_path = install_path,
+        .recipe_id = "",
+        .installed_at = 0,
+        .source = .manual,
+    });
+    return install_path;
+}
+
+fn enqueueModInstall(h: *ui.Harness, tid: u64, mod_thread: u64, recipe_id: []const u8, display: []const u8, archive: []const u8, install_id: []const u8) !u64 {
+    const gpa = std.testing.allocator;
+    const rid = try gpa.dupe(u8, recipe_id);
+    errdefer gpa.free(rid);
+    const disp = try gpa.dupe(u8, display);
+    errdefer gpa.free(disp);
+    const ap = try gpa.dupe(u8, archive);
+    errdefer gpa.free(ap);
+    return h.mod_jobs.enqueue(.install, tid, mod_thread, rid, disp, ap, .none, install_id);
+}
+
+/// Steps frames until the book has no live activity (bounded, ~10 s),
+/// then two more so `drainModJobs` toasts and frees the finished heads.
+fn stepUntilBookIdle(fr: *ui.Frame, io: std.Io) !void {
+    var i: usize = 0;
+    while (i < 2000) : (i += 1) {
+        _ = try dvui.testing.step(threadsRender);
+        if (!fr.book.anyLive()) {
+            _ = try dvui.testing.step(threadsRender);
+            _ = try dvui.testing.step(threadsRender);
+            return;
+        }
+        std.Io.sleep(io, .fromMilliseconds(5), .awake) catch {};
+    }
+    return error.BookDidNotIdle;
+}
+
+/// Every `kind` activity in the book, oldest id first (into `arena`).
+fn activitiesOfKind(fr: *ui.Frame, arena: std.mem.Allocator, kind: ui.threads.activity.Kind) ![]ui.threads.activity.View {
+    const views = try fr.book.snapshot(arena);
+    var out: std.ArrayList(ui.threads.activity.View) = .empty;
+    for (views) |v| if (v.kind == kind) try out.append(arena, v);
+    const Cmp = struct {
+        fn lt(_: void, a: ui.threads.activity.View, b: ui.threads.activity.View) bool {
+            return a.id < b.id;
+        }
+    };
+    std.mem.sort(ui.threads.activity.View, out.items, {}, Cmp.lt);
+    return out.items;
+}
+
+test "threads: two mod installs run one after the other on the compute thread" {
+    tlog("START: threads-mod-queue-order", .{});
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(8) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var env = try TestEnv.init(gpa, "threads-mod-queue-order");
+    defer env.deinit();
+    var t = try dvui.testing.init(.{ .allocator = gpa, .io = io, .window_size = .{ .w = 1280, .h = 800 } });
+    defer t.deinit();
+    var h = try ui.Harness.init(gpa, io, t.window, env.root);
+    defer h.deinit();
+
+    try env.writeFile("mod.tar.gz", @embedFile("fixtures/mod-fixture.tar.gz"));
+    const archive = try env.path("mod.tar.gz");
+    defer gpa.free(archive);
+    const id_a = "aaaaaaaa-1111-2222-3333-444444444444".*;
+    const id_b = "bbbbbbbb-1111-2222-3333-444444444444".*;
+    const path_a = try seedModGame(h, &env, 71, id_a);
+    defer gpa.free(path_a);
+    const path_b = try seedModGame(h, &env, 72, id_b);
+    defer gpa.free(path_b);
+    try h.reloadGames();
+
+    var fr = h.frame();
+    threads_frame = &fr;
+    defer threads_frame = null;
+
+    const q1 = try enqueueModInstall(h, 71, 1, "mod-a", "Mod A v1", archive, &id_a);
+    const q2 = try enqueueModInstall(h, 72, 2, "mod-b", "Mod B v1", archive, &id_b);
+    try std.testing.expect(q1 < q2);
+    try stepUntilBookIdle(&fr, io);
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const acts = try activitiesOfKind(&fr, arena_state.allocator(), .mod_install);
+    try std.testing.expectEqual(@as(usize, 2), acts.len);
+    try std.testing.expectEqual(q1, acts[0].aux_id);
+    try std.testing.expectEqual(q2, acts[1].aux_id);
+    try std.testing.expectEqual(@as(u64, 71), acts[0].game_thread_id);
+    for (acts) |v| try std.testing.expectEqual(ui.threads.activity.Status.done, v.status);
+    // In order: the second started no earlier than the first finished.
+    try std.testing.expect(acts[1].started_at >= acts[0].finished_at);
+    try std.testing.expectEqualStrings("Installed Mod A v1.", acts[0].result);
+    try std.testing.expect(fileExists(io, path_a, "game/mod.rpy"));
+    try std.testing.expect(fileExists(io, path_b, "game/mod.rpy"));
+    try std.testing.expect(toastContains(&h.state, "Installed `Mod B v1`"));
+    // The UI drain freed both finished heads.
+    h.mod_jobs.lock();
+    const left = h.mod_jobs.jobsLocked().len;
+    h.mod_jobs.unlock();
+    try std.testing.expectEqual(@as(usize, 0), left);
+    tlog("threads-mod-queue-order: OK", .{});
+}
+
+test "threads: recover() re-enqueues an interrupted mod install and it runs on the compute thread" {
+    tlog("START: threads-mod-queue-recover", .{});
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(8) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var env = try TestEnv.init(gpa, "threads-mod-queue-recover");
+    defer env.deinit();
+    var t = try dvui.testing.init(.{ .allocator = gpa, .io = io, .window_size = .{ .w = 1280, .h = 800 } });
+    defer t.deinit();
+    var h = try ui.Harness.init(gpa, io, t.window, env.root);
+    defer h.deinit();
+
+    try env.writeFile("mod.tar.gz", @embedFile("fixtures/mod-fixture.tar.gz"));
+    const archive = try env.path("mod.tar.gz");
+    defer gpa.free(archive);
+    const inst_id = "cccccccc-1111-2222-3333-444444444444".*;
+    const install_path = try seedModGame(h, &env, 73, inst_id);
+    defer gpa.free(install_path);
+    try h.reloadGames();
+
+    // The crash file: one install that was mid-apply when the app died.
+    var json_buf: [1024]u8 = undefined;
+    const json = try std.fmt.bufPrint(&json_buf,
+        \\{{"version":1,"next_id":7,"jobs":[{{"id":6,"kind":"install","game_thread_id":73,"mod_thread_id":3,"mod_recipe_id":"mod-r","display":"Mod R v1","archive_path":"{s}","backup_mode":"none","install_id":"{s}","phase":"applying"}}]}}
+    , .{ archive, &inst_id });
+    try env.writeFile("mod-queue.json", json);
+    const queue_path = try env.path("mod-queue.json");
+    defer gpa.free(queue_path);
+    try h.mod_jobs.setPersistPath(queue_path);
+
+    var fr = h.frame();
+    threads_frame = &fr;
+    defer threads_frame = null;
+
+    try ui.recoverModJobsFromDisk(&h.mod_jobs, &h.lib, gpa, io);
+    try stepUntilBookIdle(&fr, io);
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const acts = try activitiesOfKind(&fr, arena_state.allocator(), .mod_install);
+    try std.testing.expectEqual(@as(usize, 1), acts.len);
+    try std.testing.expectEqual(ui.threads.activity.Status.done, acts[0].status);
+    // The re-enqueued job got an id past the recovered next_id.
+    try std.testing.expect(acts[0].aux_id >= 7);
+    try std.testing.expectEqualStrings("Mod R v1", acts[0].title);
+    try std.testing.expect(fileExists(io, install_path, "game/mod.rpy"));
+    // The queue file no longer lists the finished job.
+    const after = try std.Io.Dir.cwd().readFileAlloc(io, queue_path, gpa, .limited(64 * 1024));
+    defer gpa.free(after);
+    try std.testing.expect(std.mem.indexOf(u8, after, "mod-r") == null);
+    tlog("threads-mod-queue-recover: OK", .{});
+}

@@ -20,6 +20,10 @@ pub const Activity = struct {
     id: u64,
     kind: Kind,
     game_thread_id: u64,
+    /// Id of the job this activity mirrors in another queue (the mod
+    /// queue job id for `mod_install` / `mod_uninstall`); 0 when none.
+    /// Set before the activity is submitted; read-only afterwards.
+    aux_id: u64 = 0,
     title: [128]u8 = undefined,
     title_len: u8 = 0,
     status: std.atomic.Value(u8) = .init(@intFromEnum(Status.queued)),
@@ -80,6 +84,7 @@ pub const View = struct {
     id: u64,
     kind: Kind,
     game_thread_id: u64,
+    aux_id: u64,
     title: []const u8,
     phase: []const u8,
     done: u64,
@@ -169,6 +174,7 @@ pub const Book = struct {
             .id = a.id,
             .kind = a.kind,
             .game_thread_id = a.game_thread_id,
+            .aux_id = a.aux_id,
             .title = title,
             .phase = phase,
             .done = p.done,

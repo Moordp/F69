@@ -12,6 +12,7 @@ pub const Events = events.Events;
 pub const UiEvent = events.UiEvent;
 pub const Worker = work_thread.Worker;
 pub const WorkJob = work_thread.WorkJob;
+pub const ModQueueHook = @import("jobs/mod_queue.zig").Hook;
 
 test {
     _ = mailbox;
@@ -23,4 +24,5 @@ test {
     _ = @import("jobs/rpa.zig");
     _ = @import("jobs/compat.zig");
     _ = @import("jobs/reanalyse.zig");
+    _ = @import("jobs/mod_queue.zig");
 }

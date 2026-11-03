@@ -51,6 +51,8 @@ test {
     _ = @import("threads/jobs/rpa.zig");
     _ = @import("threads/jobs/compat.zig");
     _ = @import("threads/jobs/reanalyse.zig");
+    _ = @import("threads/jobs/mod_queue.zig");
+    _ = @import("mod_job_queue.zig");
     _ = @import("dl_controls.zig");
     _ = @import("screens/downloads.zig");
 }
@@ -73,6 +75,7 @@ pub const Filters = state_mod.Filters;
 pub const Screen = state_mod.Screen;
 /// Thread pieces (activity views/status) for the integration tests.
 pub const threads = types.threads;
+pub const recoverModJobsFromDisk = actions.recoverModJobsFromDisk;
 pub const startSyncAll = actions.startSyncAll;
 pub const syncGame = actions.syncGame;
 pub const doLogin = actions.doLogin;
@@ -179,9 +182,9 @@ pub fn runMainLoop(
     // load on demand off the UI thread (`spawnCoverLoadIfRoom`).
     actions.spawnCoverPrewarm(gpa, io, info.covers_dir, games, state_mod.COVER_PREWARM);
 
-    // Mod install/uninstall queue + worker. Long-lived: spans the
-    // app's lifetime so jobs survive screen navigation and the worker
-    // stays warm between clicks.
+    // Mod install/uninstall queue. Long-lived: spans the app's lifetime
+    // so jobs survive screen navigation. The compute thread (below) runs
+    // its jobs; recovery runs once that thread exists.
     var mod_jobs_ctx = actions.RunnerCtx{ .alloc = gpa, .io = io, .lib = lib, .repo = recipe_repo, .temp_root = info.staging_dir };
     var mod_jobs = mod_job_queue.Queue.init(gpa, io, &win, actions.modJobRunner, &mod_jobs_ctx);
     defer mod_jobs.deinit();
@@ -189,17 +192,6 @@ pub fn runMainLoop(
     const mod_queue_path = try std.fmt.allocPrint(gpa, "{s}/mod-queue.json", .{info.data_root});
     defer gpa.free(mod_queue_path);
     try mod_jobs.setPersistPath(mod_queue_path);
-
-    // Recovery: if the app died mid-install, the queue file holds the
-    // job descriptions. For each "was running" entry, roll back what
-    // the partial tracker recorded, then re-enqueue the install. The
-    // periodic flush in ApplyOpts means the tracker has at most
-    // `flush_every` orphans the rollback can't see.
-    actions.recoverModJobsFromDisk(&mod_jobs, lib, gpa, io) catch |e| {
-        std.log.warn("mod queue recovery failed: {s}", .{@errorName(e)});
-    };
-
-    try mod_jobs.start();
 
     var state: State = .{};
     state.login_status = if (f95_svc.client.hasCookie()) .logged_in else .logged_out;
@@ -375,6 +367,8 @@ pub fn runMainLoop(
     // mid-write; the remaining defers (state, mod queue, window, main's
     // SQLite close) are skipped, as on the downloader's hard exit.
     defer {
+        // No enqueue may reach the worker once it is gone.
+        mod_jobs.on_enqueue = null;
         worker.stop();
         if (worker.detached) {
             std.log.warn("quit: compute job still running after 3 s; exiting without the remaining cleanup", .{});
@@ -383,6 +377,22 @@ pub fn runMainLoop(
         }
         worker.deinit();
     }
+    // Every mod-queue enqueue starts an activity and submits a
+    // `WorkJob.mod_queue`, so mod jobs run on the compute thread.
+    var mod_queue_hook: threads.ModQueueHook = .{ .book = &book, .work = &worker };
+    mod_jobs.on_enqueue = threads.ModQueueHook.onEnqueue;
+    mod_jobs.on_enqueue_ctx = &mod_queue_hook;
+
+    // Recovery: if the app died mid-install, the queue file holds the
+    // job descriptions. For each "was running" entry, roll back what
+    // the partial tracker recorded, then re-enqueue the install (which
+    // submits it through the hook above). The periodic flush in
+    // ApplyOpts means the tracker has at most `flush_every` orphans the
+    // rollback can't see.
+    actions.recoverModJobsFromDisk(&mod_jobs, lib, gpa, io) catch |e| {
+        std.log.warn("mod queue recovery failed: {s}", .{@errorName(e)});
+    };
+
     worker.start() catch |e| std.log.err("compute thread failed to start: {s}", .{@errorName(e)});
 
     var interrupted = false;

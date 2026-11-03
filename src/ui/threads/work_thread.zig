@@ -17,6 +17,7 @@ const decrypt_job = @import("jobs/decrypt.zig");
 const rpa_job = @import("jobs/rpa.zig");
 const compat_job = @import("jobs/compat.zig");
 const reanalyse_job = @import("jobs/reanalyse.zig");
+const mod_queue_job = @import("jobs/mod_queue.zig");
 
 const Activity = activity_mod.Activity;
 const Book = activity_mod.Book;
@@ -135,7 +136,10 @@ fn errorResult(e: anyerror) struct { kind: ResultKind, msg: []const u8 } {
 /// `anyerror`: each job kind has its own error set; `runOne` maps them.
 fn run(deps: Deps, job: WorkJob, a: *Activity, buf: []u8) anyerror!Done {
     return switch (job) {
-        .mod_queue => .{ .outcome = .mod_queue, .msg = "Done." },
+        .mod_queue => blk: {
+            const r = try mod_queue_job.run(deps, a, buf);
+            break :blk .{ .outcome = .mod_queue, .kind = r.kind, .msg = r.msg };
+        },
         .convert => |c| blk: {
             const r = try convert_job.run(deps, c, a, buf);
             break :blk .{ .outcome = .{ .convert = r.outcome }, .kind = r.kind, .msg = r.msg };

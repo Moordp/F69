@@ -25,6 +25,7 @@ const state_mod = @import("../state.zig");
 const actions = @import("../actions.zig");
 const style = @import("../style.zig");
 const mod_job_queue = @import("../mod_job_queue.zig");
+const threads = types.threads;
 const components = @import("../components.zig");
 const tokens = @import("ui_tokens");
 const installer_mod = @import("installer");
@@ -64,7 +65,7 @@ pub fn modsScreen(frame: *Frame) !bool {
         defer page.deinit();
         renderModsInstallPicker(frame, game);
         renderModsBackupModePicker(frame, game);
-        renderModJobBanner(frame);
+        renderModJobBanner(frame, game);
 
         // Resolver explanation — why the installed mod set won't resolve.
         if (actions.modsPageCache(frame, game)) |cache| {
@@ -907,43 +908,23 @@ fn renderModsBackupModePicker(frame: *Frame, game: *const library.Game) void {
     }
 }
 
-fn renderModJobBanner(frame: *Frame) void {
-    var head_info: ?struct {
-        id: u64,
-        kind: mod_job_queue.Kind,
-        phase: mod_job_queue.Phase,
-        display: [128]u8,
-        display_len: u8,
-        done: u32,
-        total: u32,
-        depth: usize,
-    } = null;
-
-    frame.mod_jobs.lock();
-    {
-        const jobs = frame.mod_jobs.jobsLocked();
-        if (jobs.len > 0) {
-            for (jobs) |j| {
-                const p = j.currentPhase();
-                if (p == .done or p == .err or p == .canceled) continue;
-                var info: @TypeOf(head_info.?) = undefined;
-                info.id = j.id;
-                info.kind = j.kind;
-                info.phase = p;
-                const dlen = @min(j.display.len, info.display.len);
-                @memcpy(info.display[0..dlen], j.display[0..dlen]);
-                info.display_len = @intCast(dlen);
-                info.done = j.progress_done.load(.monotonic);
-                info.total = j.progress_total.load(.monotonic);
-                info.depth = jobs.len;
-                head_info = info;
-                break;
-            }
-        }
+/// Strip for this game's mod install / uninstall activities (they run on
+/// the compute thread): the first live one, with phase and file count,
+/// plus how many more are waiting.
+fn renderModJobBanner(frame: *Frame, game: *const library.Game) void {
+    const arena = dvui.currentWindow().arena();
+    const views = frame.book.snapshot(arena) catch return;
+    var head: ?threads.activity.View = null;
+    var depth: usize = 0;
+    for (views) |v| {
+        if (v.kind != .mod_install and v.kind != .mod_uninstall) continue;
+        if (v.game_thread_id != game.f95_thread_id) continue;
+        if (v.status != .queued and v.status != .running) continue;
+        depth += 1;
+        // Running first; otherwise the oldest queued (snapshot is id order).
+        if (head == null or (v.status == .running and head.?.status != .running)) head = v;
     }
-    frame.mod_jobs.unlock();
-
-    const h = head_info orelse return;
+    const h = head orelse return;
 
     var bar = dvui.box(@src(), .{ .dir = .horizontal }, .{
         .expand = .horizontal,
@@ -954,10 +935,10 @@ fn renderModJobBanner(frame: *Frame) void {
     });
     defer bar.deinit();
 
-    const verb: []const u8 = if (h.kind == .install) "Installing" else "Uninstalling";
-    const phase_text = mod_job_queue.phaseLabel(h.phase);
+    const verb: []const u8 = if (h.kind == .mod_install) "Installing" else "Uninstalling";
+    const phase_text: []const u8 = if (h.status == .queued or h.phase.len == 0) mod_job_queue.phaseLabel(.queued) else h.phase;
     var buf: [256]u8 = undefined;
-    const disp = h.display[0..h.display_len];
+    const disp = h.title;
     const status_txt = blk: {
         if (h.total > 0) {
             break :blk std.fmt.bufPrint(&buf, "{s}: {s} - {s} ({d}/{d})", .{ verb, disp, phase_text, h.done, h.total }) catch "Mod job in flight";
@@ -969,16 +950,17 @@ fn renderModJobBanner(frame: *Frame) void {
     };
     dvui.labelNoFmt(@src(), status_txt, .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = tokens.toDvui(tokens.active.acc, dvui.Color) } });
 
-    if (h.depth > 1) {
+    if (depth > 1) {
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
         var dbuf: [64]u8 = undefined;
-        const dtxt = std.fmt.bufPrint(&dbuf, "(+{d} queued)", .{h.depth - 1}) catch "";
+        const dtxt = std.fmt.bufPrint(&dbuf, "(+{d} queued)", .{depth - 1}) catch "";
         dvui.labelNoFmt(@src(), dtxt, .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = helpTextColor() } });
     }
 
     _ = dvui.spacer(@src(), .{ .expand = .horizontal });
     if (style.button(@src(), "Cancel", .{}, .{ .style = .err, .gravity_y = 0.5 })) {
-        frame.mod_jobs.cancel(h.id);
+        frame.book.requestCancel(h.id);
+        frame.mod_jobs.cancel(h.aux_id);
     }
 }
 

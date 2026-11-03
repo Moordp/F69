@@ -14,7 +14,6 @@ const components = @import("../components.zig");
 const comp = @import("ui_comp");
 const dl_rows = @import("../dl_rows.zig");
 const dl_controls = @import("../dl_controls.zig");
-const mod_job_queue = @import("../mod_job_queue.zig");
 
 const Frame = types.Frame;
 const JobView = downloads.JobView;
@@ -243,8 +242,9 @@ pub fn renderDownloadsBody(frame: *Frame, mode: RowMode) void {
         }
     }
 
-    // Modding: Mods-page installs / uninstalls (their own queue).
-    renderModdingSection(frame);
+    // Tools: compute-thread activities (mod installs / uninstalls,
+    // Convert, ...) that are queued or running.
+    renderToolsSection(frame);
 
     // History: done / failed / cancelled, newest first.
     {
@@ -390,9 +390,9 @@ const LiveTotals = struct {
 /// is everything terminal (done / failed / cancelled). Keep the int repr
 /// stable — downloadsSectionHeader uses it as the dvui id_extra key.
 const JobGroup = enum(u8) { active = 1, seeding = 2, history = 3, needs_you = 4 };
-/// Header key of the Modding section (not a job group: its rows come from
-/// the mod queue).
-const MODDING_HEADER_KEY: u8 = 5;
+/// Header key of the Tools section (not a job group: its rows come from
+/// the activity book).
+const TOOLS_HEADER_KEY: u8 = 5;
 
 fn classifyJob(j: *const Job) JobGroup {
     return switch (j.step) {
@@ -455,56 +455,39 @@ test "historyOrder: terminal jobs only, newest finished first, created_at fallba
     try std.testing.expectEqualSlices(usize, &.{ 2, 3, 0 }, order);
 }
 
-/// One Mods-page job as copied out of the queue (the lock is not held
-/// while widgets are built).
-const ModRow = struct {
-    id: u64,
-    kind: mod_job_queue.Kind,
-    phase: mod_job_queue.Phase,
-    display_buf: [96]u8 = undefined,
-    display_len: u8 = 0,
-    done: u32,
-    total: u32,
-
-    fn display(self: *const ModRow) []const u8 {
-        return self.display_buf[0..self.display_len];
-    }
-};
-
-const MAX_MOD_ROWS = 16;
-
-/// Copy the queue's unfinished jobs (head first) into `out`.
-fn collectModRows(frame: *Frame, out: *[MAX_MOD_ROWS]ModRow) usize {
-    var n: usize = 0;
-    frame.mod_jobs.lock();
-    defer frame.mod_jobs.unlock();
-    for (frame.mod_jobs.jobsLocked()) |j| {
-        if (n == out.len) break;
-        const p = j.currentPhase();
-        if (p == .done or p == .err or p == .canceled) continue;
-        var r: ModRow = .{ .id = j.id, .kind = j.kind, .phase = p, .done = j.progress_done.load(.monotonic), .total = j.progress_total.load(.monotonic) };
-        const len = @min(j.display.len, r.display_buf.len);
-        @memcpy(r.display_buf[0..len], j.display[0..len]);
-        r.display_len = @intCast(len);
-        out[n] = r;
-        n += 1;
-    }
-    return n;
+/// "Mod install · Mod v1 · Installing · 3 / 10". Empty parts are left out.
+fn toolsLineText(buf: []u8, kind_label: []const u8, title: []const u8, phase: []const u8, queued: bool, done: u64, total: u64) []const u8 {
+    const shown_phase: []const u8 = if (queued) "Queued" else phase;
+    var w: std.Io.Writer = .fixed(buf);
+    w.print("{s} \u{00B7} {s}", .{ kind_label, title }) catch return w.buffered();
+    if (shown_phase.len > 0) w.print(" \u{00B7} {s}", .{shown_phase}) catch return w.buffered();
+    if (total > 0) w.print(" \u{00B7} {d} / {d}", .{ done, total }) catch return w.buffered();
+    return w.buffered();
 }
 
-/// The "Modding" section: every Mods-page install / uninstall that is
-/// queued or running, with its phase, a per-file bar while applying,
-/// a sweep while preparing / extracting, and Cancel.
-fn renderModdingSection(frame: *Frame) void {
-    var rows: [MAX_MOD_ROWS]ModRow = undefined;
-    const n = collectModRows(frame, &rows);
+test "toolsLineText" {
+    var buf: [128]u8 = undefined;
+    try std.testing.expectEqualStrings("Mod install \u{00B7} Mod v1 \u{00B7} Queued", toolsLineText(&buf, "Mod install", "Mod v1", "", true, 0, 0));
+    try std.testing.expectEqualStrings("Mod install \u{00B7} Mod v1 \u{00B7} Installing \u{00B7} 3 / 10", toolsLineText(&buf, "Mod install", "Mod v1", "Installing", false, 3, 10));
+}
+
+/// The "Tools" section: every queued or running compute activity, one
+/// line each with Cancel (tag `tools-cancel` on the first). Minimal until
+/// the proper Tools rows land.
+fn renderToolsSection(frame: *Frame) void {
+    const arena = dvui.currentWindow().arena();
+    const views = frame.book.snapshot(arena) catch return;
+    var n: u32 = 0;
+    for (views) |v| {
+        if (v.status == .queued or v.status == .running) n += 1;
+    }
     if (n == 0) return;
-    downloadsSectionHeader("Modding", @intCast(n), MODDING_HEADER_KEY);
-    const t = tokens.active;
-    const accent = tokens.toDvui(t.acc, dvui.Color);
-    for (rows[0..n], 0..) |*r, i| {
-        var row = dvui.box(@src(), .{ .dir = .vertical }, .{
-            .id_extra = @intCast(r.id),
+    downloadsSectionHeader("Tools", n, TOOLS_HEADER_KEY);
+    var first = true;
+    for (views) |v| {
+        if (v.status != .queued and v.status != .running) continue;
+        var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
+            .id_extra = @intCast(v.id),
             .expand = .horizontal,
             .background = true,
             .border = style.border_thin,
@@ -513,41 +496,18 @@ fn renderModdingSection(frame: *Frame) void {
             .margin = .{ .x = 0, .y = 0, .w = 0, .h = 6 },
             .color_fill = .{ .color = style.cardFill() },
             .color_border = .{ .color = style.borderColor() },
-            .tag = if (i == 0) "dl-mod-row" else null,
+            .tag = if (first) "dl-tool-row" else null,
         });
         defer row.deinit();
-        {
-            var hdr = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
-            defer hdr.deinit();
-            const running = r.phase != .queued;
-            comp.chip(@src(), .{
-                .label = mod_job_queue.phaseLabel(r.phase),
-                .fill = if (running) t.acc else t.bg1,
-                .text = if (running) .{ .r = 0xff, .g = 0xff, .b = 0xff, .a = 0xff } else t.ink2,
-                .border = if (running) t.ink else t.line,
-                .scale = 0.8,
-            }, .{ .id_extra = @intCast(r.id), .gravity_y = 0.5, .padding = .{ .x = 7, .y = 2, .w = 7, .h = 2 }, .corners = .all(3) });
-            _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
-            const verb: []const u8 = if (r.kind == .install) "Install mod" else "Remove mod";
-            dvui.label(@src(), "{s} \u{00B7} {s}", .{ verb, r.display() }, .{ .gravity_y = 0.5, .color_text = .{ .color = accent } });
-            _ = dvui.spacer(@src(), .{ .expand = .horizontal });
-            if (components.iconButton(@src(), "Cancel", entypo.cross, .{ .id_extra = @intCast(r.id), .style = .err, .tag = if (i == 0) "dl-mod-cancel" else null })) {
-                frame.mod_jobs.cancel(r.id);
-            }
+        var buf: [320]u8 = undefined;
+        const line = toolsLineText(&buf, actions.toolKindLabel(v.kind), v.title, v.phase, v.status == .queued, v.done, v.total);
+        dvui.labelNoFmt(@src(), line, .{}, .{ .gravity_y = 0.5, .expand = .horizontal, .color_text = .{ .color = tokens.toDvui(tokens.active.acc, dvui.Color) } });
+        if (components.iconButton(@src(), "Cancel", entypo.cross, .{ .id_extra = @intCast(v.id), .style = .err, .gravity_y = 0.5, .tag = if (first) "tools-cancel" else null })) {
+            frame.book.requestCancel(v.id);
+            // A mod job that has not started yet must also leave the queue.
+            if (v.kind == .mod_install or v.kind == .mod_uninstall) frame.mod_jobs.cancel(v.aux_id);
         }
-        // Applying with a known file count: a measured bar. Anything else
-        // in flight: a sweep. Queued: nothing moves.
-        if (r.total > 0) {
-            const frac: f32 = @as(f32, @floatFromInt(@min(r.done, r.total))) / @as(f32, @floatFromInt(r.total));
-            dl_rows.renderBar("Apply", frac, accent, r.id);
-            var line_buf: [96]u8 = undefined;
-            const line = std.fmt.bufPrint(&line_buf, "{s} \u{00B7} file {d} / {d} ({d}%)", .{ mod_job_queue.phaseLabel(r.phase), r.done, r.total, downloads.progress.percent(r.done, r.total) }) catch "";
-            dvui.labelNoFmt(@src(), line, .{}, .{ .color_text = .{ .color = style.labelDim() } });
-        } else if (r.phase != .queued) {
-            dl_rows.renderSweepBar(frame.io, mod_job_queue.phaseLabel(r.phase), accent, r.id);
-        } else {
-            dvui.labelNoFmt(@src(), "Waiting for the job before it", .{}, .{ .color_text = .{ .color = style.labelDim() } });
-        }
+        first = false;
     }
 }
 
