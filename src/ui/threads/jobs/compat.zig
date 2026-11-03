@@ -83,6 +83,10 @@ pub const CompatOutcome = struct {
     /// "<recipe id>: <error>" of the last failed apply.
     last_err: [128]u8 = undefined,
     last_err_len: u8 = 0,
+    /// The compat service that owns `records`. Set by the worker
+    /// (`work_thread.run`) so a dropped outcome can be freed without a
+    /// Frame (`work_thread.freeOutcome`).
+    svc: ?*compat_mod.Service = null,
 
     pub fn lastErr(self: *const CompatOutcome) []const u8 {
         return self.last_err[0..self.last_err_len];

@@ -141,7 +141,11 @@ pub fn drainThreads(frame: *Frame) void {
     for (list.items) |ev| {
         switch (ev) {
             .toast => |t| frame.state.pushToast(kindMap(t.kind), t.msg),
-            .work_done => |w| handleWorkDone(frame, w.activity_id, w.outcome),
+            .work_done => |w| {
+                // `handleWorkDone` owns (and frees) the outcome.
+                handleWorkDone(frame, w.activity_id, w.outcome);
+                continue;
+            },
             .io => |r| {
                 // The file cache takes the replies of its own reads and
                 // listings (and owns their bytes from then on). Nothing

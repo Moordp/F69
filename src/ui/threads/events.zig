@@ -25,12 +25,16 @@ pub const UiEvent = union(enum) {
     wake: void,
 };
 
-/// Frees strings and buffers owned by the event.
+/// Frees strings, buffers and job outcomes owned by the event. `alloc`
+/// must also be the compute worker's `Deps.alloc` (both are the app's
+/// gpa). A consumer that took ownership of a part (the drain hands a
+/// `.work_done` outcome to `handleWorkDone`) must not call this for it.
 pub fn freeEvent(alloc: std.mem.Allocator, ev: UiEvent) void {
     switch (ev) {
         .toast => |t| alloc.free(t.msg),
         .io => |r| io_thread.freeReply(alloc, r),
-        else => {},
+        .work_done => |w| work_thread.freeOutcome(alloc, w.outcome),
+        .wake => {},
     }
 }
 
@@ -105,4 +109,15 @@ test "push after close drops and frees" {
     defer out.deinit(alloc);
     ev.drain(alloc, &out);
     try std.testing.expectEqual(@as(usize, 0), out.items.len);
+}
+
+test "Events.deinit frees a queued .work_done outcome (plan_sim) that nobody drained" {
+    const alloc = std.testing.allocator;
+    var ev = Events.init(alloc, std.testing.io, null);
+    const dirs = try alloc.alloc([]u8, 1);
+    dirs[0] = try alloc.dupe(u8, "game");
+    ev.push(.{ .work_done = .{ .activity_id = 1, .outcome = .{ .plan_sim = .{ .archive_dirs = dirs, .archive_ok = true } } } });
+    // No drain: deinit must free the outcome, or the testing allocator
+    // reports the leak.
+    ev.deinit();
 }

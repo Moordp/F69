@@ -53,6 +53,24 @@ pub const WorkOutcome = union(enum) {
     fake: struct { steps: u32 },
 };
 
+/// Frees what `outcome` owns, for an outcome nobody applied (an event
+/// dropped or still queued when `Events` is freed). `alloc` must be the
+/// worker's `Deps.alloc`; convert and compat records are freed through
+/// the compat service the outcome names. `handleWorkDone` owns (and
+/// frees) every outcome it is given, so it must not be called for those.
+pub fn freeOutcome(alloc: std.mem.Allocator, outcome: WorkOutcome) void {
+    switch (outcome) {
+        .convert => |c| if (c.svc) |s| convert_job.freeOutcome(s, c),
+        .compat => |c| if (c.svc) |s| compat_job.freeOutcome(s, c),
+        .reanalyse => |r| reanalyse_job.freeOutcome(alloc, r),
+        .plan_sim => |p| {
+            var o = p;
+            plan_sim_job.freeOutcome(alloc, &o);
+        },
+        .none, .mod_queue, .decrypt, .rpa, .folder_scan, .fake => {},
+    }
+}
+
 /// Tests only: reports phase "step i / n" and progress; honours cancel.
 pub const FakeJob = struct {
     steps: u32,
@@ -156,7 +174,9 @@ fn run(deps: Deps, job: WorkJob, a: *Activity, buf: []u8) anyerror!Done {
         },
         .convert => |c| blk: {
             const r = try convert_job.run(deps, c, a, buf);
-            break :blk .{ .outcome = .{ .convert = r.outcome }, .kind = r.kind, .msg = r.msg };
+            var o = r.outcome;
+            o.svc = deps.compat_svc;
+            break :blk .{ .outcome = .{ .convert = o }, .kind = r.kind, .msg = r.msg };
         },
         .decrypt => |d| blk: {
             const r = try decrypt_job.run(deps, d, a, buf);
@@ -168,7 +188,9 @@ fn run(deps: Deps, job: WorkJob, a: *Activity, buf: []u8) anyerror!Done {
         },
         .compat_fix => |c| blk: {
             const r = try compat_job.run(deps, c, a, buf);
-            break :blk .{ .outcome = .{ .compat = r.outcome }, .kind = r.kind, .msg = r.msg };
+            var o = r.outcome;
+            o.svc = deps.compat_svc;
+            break :blk .{ .outcome = .{ .compat = o }, .kind = r.kind, .msg = r.msg };
         },
         .reanalyse => |j| blk: {
             const r = try reanalyse_job.run(deps, j, a, buf);

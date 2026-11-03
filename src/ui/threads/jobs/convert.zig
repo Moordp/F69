@@ -106,6 +106,10 @@ pub const ConvertOutcome = struct {
     /// Recipe ids whose old fix was undone on disk (sha drift); their DB
     /// rows are deleted before the new records are written.
     compat_undone: [][]u8 = &.{},
+    /// The compat service that owns the two lists. Set by the worker
+    /// (`work_thread.run`) so a dropped outcome can be freed without a
+    /// Frame (`work_thread.freeOutcome`).
+    svc: ?*compat_mod.Service = null,
 };
 
 /// Frees what `run` allocated for `o`. `svc` must be the compat service
