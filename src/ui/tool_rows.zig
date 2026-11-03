@@ -74,6 +74,11 @@ fn shownPhase(v: View) []const u8 {
     return v.phase;
 }
 
+/// "Files" when the tool counts files, "Steps" otherwise.
+pub fn barLabel(v: View) []const u8 {
+    return if (v.files) "Files" else "Steps";
+}
+
 /// "<phase> · <done>/<total> (<pct>%) · <elapsed>", or
 /// "<phase> · <elapsed>" with no total.
 pub fn statsLine(buf: []u8, v: View, now: i64) []const u8 {
@@ -107,6 +112,9 @@ test "statsLine and durationText" {
     try std.testing.expectEqualStrings("step 3 / 10 \u{00B7} 3/10 (30%) \u{00B7} 12 s", statsLine(&buf, v, 112));
     v.total = 0;
     try std.testing.expectEqualStrings("step 3 / 10 \u{00B7} 12 s", statsLine(&buf, v, 112));
+    try std.testing.expectEqualStrings("Steps", barLabel(v));
+    v.files = true;
+    try std.testing.expectEqualStrings("Files", barLabel(v));
     v.status = .queued;
     v.started_at = 0;
     try std.testing.expectEqualStrings("Queued \u{00B7} 0 s", statsLine(&buf, v, 112));
@@ -194,9 +202,8 @@ pub fn renderToolRow(frame: *Frame, v: View, now: i64, tagged: bool) ToolAction 
         return action;
     }
 
-    // Live: the phase line, the bar, the stats line.
-    dvui.labelNoFmt(@src(), shownPhase(v), .{}, .{ .color_text = .{ .color = style.labelDim() } });
-    const bar_label: []const u8 = if (v.files) "Files" else "Bytes";
+    // Live: the bar, then the stats line (which leads with the phase).
+    const bar_label = barLabel(v);
     if (v.total > 0) {
         const d: f64 = @floatFromInt(v.done);
         const t: f64 = @floatFromInt(v.total);

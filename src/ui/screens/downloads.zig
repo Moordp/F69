@@ -44,6 +44,8 @@ pub fn seedRatioTarget(frame: *Frame) f32 {
 
 pub fn downloadsScreen(frame: *Frame) !bool {
     const state = frame.state;
+    // One book snapshot per frame, for the top-bar count and the lists.
+    const tools = toolViews(frame);
 
     // Top bar.
     {
@@ -75,7 +77,7 @@ pub fn downloadsScreen(frame: *Frame) !bool {
         const dl_s = components.humanRate(&dl_buf, live.dl_speed);
         const up_s = components.humanRate(&up_buf, live.up_speed);
         var tools_buf: [32]u8 = undefined;
-        const tools_s = toolsTotalText(&tools_buf, liveToolCount(toolViews(frame)));
+        const tools_s = toolsTotalText(&tools_buf, liveToolCount(tools));
         const totals_s = std.fmt.bufPrint(
             &totals_buf,
             "↓ {s}  ↑ {s}  · {d} active · {d} seeding · {d} in history{s}{s}",
@@ -162,7 +164,7 @@ pub fn downloadsScreen(frame: *Frame) !bool {
     }
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
 
-    renderDownloadsBody(frame, .full);
+    renderDownloadsBodyWith(frame, .full, tools);
     return true;
 }
 
@@ -170,8 +172,12 @@ pub fn downloadsScreen(frame: *Frame) !bool {
 /// per-row actions, or an empty state. Shared by the
 /// Downloads screen and the bottom Activity drawer (`renderActivityDrawer`).
 pub fn renderDownloadsBody(frame: *Frame, mode: RowMode) void {
+    renderDownloadsBodyWith(frame, mode, toolViews(frame));
+}
+
+/// `renderDownloadsBody` with the frame's tool snapshot already taken.
+fn renderDownloadsBodyWith(frame: *Frame, mode: RowMode, tools: []const ToolView) void {
     const snap = snapCopy(frame);
-    const tools = toolViews(frame);
     if (snap.jobs.len == 0 and tools.len == 0) {
         components.emptyState(entypo.download, "No downloads yet", "Start one from a game's Download button, or paste a URL via + Add.");
         return;
@@ -363,7 +369,10 @@ pub fn renderActivityDrawer(frame: *Frame) void {
             if (style.button(@src(), "Resume all", .{}, .{ .gravity_y = 0.5, .style = .highlight })) frame.dl.send(.unpause_all);
             _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 6, .h = 1 } });
         }
-        if (style.button(@src(), "Clear finished", .{}, .{ .gravity_y = 0.5 })) frame.dl.send(.clear_history);
+        if (style.button(@src(), "Clear finished", .{}, .{ .gravity_y = 0.5 })) {
+            frame.dl.send(.clear_history);
+            actions.clearFinishedTools(frame);
+        }
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 6, .h = 1 } });
         if (components.iconOnly(@src(), "drawer-close", entypo.chevron_down, .{ .gravity_y = 0.5, .tag = "drawer-close" })) state.dock_expanded = false;
     }

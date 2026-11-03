@@ -2497,11 +2497,15 @@ test "threads: the game page strip shows a running tool; another game's Convert 
     const a = try fr.book.start(.hash, 42, "Hash \u{00B7} test");
     try fr.work.submit(.{ .fake = .{ .steps = 50, .sleep_ms = 20 } }, a);
 
-    // Game 42: the Tools tab shows the strip with its Cancel.
+    // Game 42: the strip with its Cancel shows on the Overview tab (the
+    // default) and on the Tools tab.
     h.state.screen = .detail;
     h.state.selected_thread = 42;
     _ = try dvui.testing.step(threadsRender);
     _ = try dvui.testing.step(threadsRender);
+    try std.testing.expect(h.state.detail_tab == .overview);
+    try stepUntilTagVisible(io, "detail-tool-strip");
+    try stepUntilTagVisible(io, "tools-cancel");
     try openToolsTab(h);
     try stepUntilTagVisible(io, "detail-tool-strip");
     try stepUntilTagVisible(io, "tools-cancel");

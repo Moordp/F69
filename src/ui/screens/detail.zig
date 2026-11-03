@@ -200,6 +200,7 @@ pub fn detailScreen(frame: *Frame) !bool {
 
         renderRibbon(frame, game); // V3 filmstrip under the hero
         renderCompactMeta(frame, game); // V3 compact meta bar (incl. Download · Install · Mods)
+        renderToolStrip(frame, game); // the running tool, on every tab
     }
 
     if (game.tags.len > 0) {
@@ -2844,25 +2845,27 @@ fn renderDetailInstallButton(frame: *Frame, game: *const library.Game) void {
     }
 }
 
+/// A per-game tool (Convert, …) on the compute thread: title, phase,
+/// progress (a sweep with no total) and Cancel. Rendered once, in the
+/// header every tab shares, so its tags (`detail-tool-strip`,
+/// `tools-cancel`) appear once per frame.
+fn renderToolStrip(frame: *Frame, game: *const library.Game) void {
+    const v = actions.liveViewForGame(frame, dvui.currentWindow().arena(), game.f95_thread_id) orelse return;
+    var msg_buf: [240]u8 = undefined;
+    const msg = toolStripText(&msg_buf, v.title, v.phase, v.status == .queued);
+    renderStatusStrip(frame, .{
+        .id = @truncate(game.f95_thread_id ^ 0xC0),
+        .text = msg,
+        .accent = tokens.toDvui(tokens.active.acc, dvui.Color),
+        .progress = if (v.total > 0) @as(u32, downloads.progress.percent(v.done, v.total)) else null,
+        .view_link = false,
+        .cancel_id = v.id,
+        .tag = "detail-tool-strip",
+    });
+}
+
 fn renderDetailStatusLine(frame: *Frame, game: *const library.Game) void {
     const state = frame.state;
-
-    // A per-game tool (Convert, …) on the compute thread: title, phase,
-    // progress (a sweep with no total) and Cancel.
-    if (actions.liveViewForGame(frame, dvui.currentWindow().arena(), game.f95_thread_id)) |v| {
-        var msg_buf: [240]u8 = undefined;
-        const msg = toolStripText(&msg_buf, v.title, v.phase, v.status == .queued);
-        renderStatusStrip(frame, .{
-            .id = @truncate(game.f95_thread_id ^ 0xC0),
-            .text = msg,
-            .accent = tokens.toDvui(tokens.active.acc, dvui.Color),
-            .progress = if (v.total > 0) @as(u32, downloads.progress.percent(v.done, v.total)) else null,
-            .view_link = false,
-            .cancel_id = v.id,
-            .tag = "detail-tool-strip",
-        });
-        return;
-    }
 
     if (state.pending_rpdl_download != null) {
         renderStatusStrip(frame, .{

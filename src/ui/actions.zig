@@ -78,6 +78,7 @@ pub const startTool = threads_act.startTool;
 pub const liveViewForGame = threads_act.liveViewForGame;
 pub const toolKindLabel = threads_act.kindLabel;
 pub const cancelTool = threads_act.cancelTool;
+pub const clearFinishedTools = threads_act.clearFinishedTools;
 
 // ---- Public type aliases (kept identical to pre-R9 names) ----
 pub const ModsTabCounts = mods.ModsTabCounts;
