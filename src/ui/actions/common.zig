@@ -20,6 +20,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const log = std.log.scoped(.ui_actions);
 const library = @import("library");
+const downloads = @import("downloads");
 const version_mod = @import("util_version");
 const types = @import("../types.zig");
 const owned_types = @import("../owned.zig");
@@ -435,8 +436,14 @@ fn uniqueGuidePath(alloc: std.mem.Allocator, io: std.Io, guides_dir: []const u8,
 /// (KB to MB), not big binaries, so a single allocation buffer
 /// keeps the implementation simple.
 pub fn copyFile(io: std.Io, src: []const u8, dst: []const u8) !void {
+    return copyFileProgress(io, src, dst, .none);
+}
+
+/// `copyFile` reporting (bytes copied, source size) to `sink` per chunk.
+pub fn copyFileProgress(io: std.Io, src: []const u8, dst: []const u8, sink: downloads.progress.Sink) !void {
     var in = try std.Io.Dir.cwd().openFile(io, src, .{ .mode = .read_only });
     defer in.close(io);
+    const total: u64 = if (in.stat(io)) |st| st.size else |_| 0;
     var out = try std.Io.Dir.cwd().createFile(io, dst, .{ .truncate = true });
     defer out.close(io);
 
@@ -445,10 +452,13 @@ pub fn copyFile(io: std.Io, src: []const u8, dst: []const u8) !void {
     var fw_buf: [4096]u8 = undefined;
     var fr = in.reader(io, &fr_buf);
     var fw = out.writer(io, &fw_buf);
+    var seen: u64 = 0;
     while (true) {
         const got = fr.interface.readSliceShort(&chunk) catch |e| return e;
         if (got == 0) break;
         try fw.interface.writeAll(chunk[0..got]);
+        seen += got;
+        sink.report(seen, total);
     }
     try fw.interface.flush();
 }
@@ -1096,17 +1106,8 @@ pub const InstallDotState = enum {
 /// snapshot is unavailable (e.g. the cache build OOM'd).
 pub fn installDotState(frame: *Frame, game: *const library.Game) InstallDotState {
     if (!isInstalled(frame, game.f95_thread_id)) return .none;
-    const scraped = game.latest_version orelse return .up_to_date;
-    if (scraped.len == 0) return .up_to_date;
     if (frame.install_versions) |map| {
-        if (map.get(game.f95_thread_id)) |installed_ver| {
-            // Treat the placeholder version "unversioned" as "we don't
-            // really know what's installed" — show green, since we
-            // can't claim it's outdated.
-            if (std.mem.eql(u8, installed_ver, "unversioned")) return .up_to_date;
-            if (version_mod.equivalent(installed_ver, scraped)) return .up_to_date;
-            return .outdated;
-        }
+        if (map.get(game.f95_thread_id)) |installed_ver| return dotForVersions(installed_ver, game.latest_version);
         // installed_set said yes but the map has no entry — race
         // with a mid-frame uninstall. Fall through to the legacy
         // path so the indicator settles on the next frame.
@@ -1114,11 +1115,34 @@ pub fn installDotState(frame: *Frame, game: *const library.Game) InstallDotState
     const latest = frame.lib.latestInstallForGame(game.f95_thread_id) catch return .up_to_date;
     if (latest) |inst| {
         defer frame.lib.freeInstall(inst);
-        if (std.mem.eql(u8, inst.version, "unversioned")) return .up_to_date;
-        if (version_mod.equivalent(inst.version, scraped)) return .up_to_date;
-        return .outdated;
+        return dotForVersions(inst.version, game.latest_version);
     }
     return .up_to_date;
+}
+
+/// Pure: the dot for the highest installed version against the version
+/// F95 shows. Outdated only when F95's is genuinely newer
+/// (`version_mod.hasNewer`): an install newer than the scrape (a beta,
+/// a stale scrape), a cosmetic reformat of the same release, or two
+/// versions that cannot be ordered all stay green. The placeholder
+/// "unversioned" means "we do not know what is installed" — green too.
+pub fn dotForVersions(installed: []const u8, scraped_opt: ?[]const u8) InstallDotState {
+    const scraped = scraped_opt orelse return .up_to_date;
+    if (scraped.len == 0) return .up_to_date;
+    if (std.mem.eql(u8, installed, "unversioned")) return .up_to_date;
+    return if (version_mod.hasNewer(scraped, installed)) .outdated else .up_to_date;
+}
+
+test "dotForVersions: only a genuinely newer F95 version is an update" {
+    try std.testing.expectEqual(InstallDotState.up_to_date, dotForVersions("0.9.0", null));
+    try std.testing.expectEqual(InstallDotState.up_to_date, dotForVersions("0.9.0", ""));
+    try std.testing.expectEqual(InstallDotState.up_to_date, dotForVersions("unversioned", "0.9.0"));
+    try std.testing.expectEqual(InstallDotState.up_to_date, dotForVersions("0.9.0", "v0.9"));
+    try std.testing.expectEqual(InstallDotState.outdated, dotForVersions("0.9.0", "0.10"));
+    // Installed newer than the scrape: not an update.
+    try std.testing.expectEqual(InstallDotState.up_to_date, dotForVersions("0.10", "0.9.0"));
+    // Same release reformatted on completion: not an update.
+    try std.testing.expectEqual(InstallDotState.up_to_date, dotForVersions("1.0", "Final v1.0"));
 }
 
 pub fn freeInstalledSet(state: *State, alloc: std.mem.Allocator) void {

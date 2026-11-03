@@ -4,6 +4,7 @@
 const std = @import("std");
 const Io = std.Io;
 const errs = @import("errors.zig");
+const progress = @import("progress.zig");
 
 pub const Hasher = struct {
     inner: std.crypto.hash.sha2.Sha256,
@@ -26,23 +27,34 @@ pub const Hasher = struct {
 /// Stream the file at `path` through SHA-256 and compare to `expected`.
 /// Returns `HashMismatch` on any difference (or on file read errors —
 /// surface a clean signal rather than two distinct fail modes).
-pub fn verifyFile(io: Io, path: []const u8, expected: [32]u8) errs.Error!void {
-    var f = std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only }) catch return errs.Error.HashMismatch;
+/// `sink` gets (bytes hashed, file size) after every chunk.
+pub fn verifyFile(io: Io, path: []const u8, expected: [32]u8, sink: progress.Sink) errs.Error!void {
+    const got_hash = hashFile(io, path, sink) catch return errs.Error.HashMismatch;
+    if (!std.mem.eql(u8, &got_hash, &expected)) return errs.Error.HashMismatch;
+}
+
+/// SHA-256 of the file at `path`, reporting (bytes hashed, file size) to
+/// `sink` after every chunk.
+pub fn hashFile(io: Io, path: []const u8, sink: progress.Sink) ![32]u8 {
+    var f = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only });
     defer f.close(io);
+    const total: u64 = if (f.stat(io)) |st| st.size else |_| 0;
+    sink.report(0, total);
 
     var rd_buf: [64 * 1024]u8 = undefined;
     var fr = f.reader(io, &rd_buf);
 
     var hasher = Hasher.init();
+    var seen: u64 = 0;
     while (true) {
         var chunk: [64 * 1024]u8 = undefined;
-        const got = fr.interface.readSliceShort(&chunk) catch return errs.Error.HashMismatch;
+        const got = try fr.interface.readSliceShort(&chunk);
         if (got == 0) break;
         hasher.update(chunk[0..got]);
+        seen += got;
+        sink.report(seen, total);
     }
-
-    const got_hash = hasher.finalize();
-    if (!std.mem.eql(u8, &got_hash, &expected)) return errs.Error.HashMismatch;
+    return hasher.finalize();
 }
 
 /// Pure. Decode a 64-char lowercase-hex SHA-256 into 32 bytes.
@@ -110,7 +122,10 @@ test "verifyFile: hash matches" {
     defer testing.allocator.free(path);
 
     const expected = try hexDecode("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
-    try verifyFile(env.io, path, expected);
+    var prog: progress.Atomic = .{};
+    try verifyFile(env.io, path, expected, prog.sink());
+    // The last report is (bytes hashed, file size) == (3, 3).
+    try testing.expectEqual(progress.Atomic.Pair{ .done = 3, .total = 3 }, prog.get());
 }
 
 test "verifyFile: hash mismatch" {
@@ -123,7 +138,7 @@ test "verifyFile: hash mismatch" {
 
     // sha256 of "abc"
     const expected = try hexDecode("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
-    try testing.expectError(errs.Error.HashMismatch, verifyFile(env.io, path, expected));
+    try testing.expectError(errs.Error.HashMismatch, verifyFile(env.io, path, expected, .none));
 }
 
 test "verifyFile: missing file → HashMismatch" {
@@ -132,5 +147,5 @@ test "verifyFile: missing file → HashMismatch" {
     const io = tio.io();
 
     const empty: [32]u8 = @splat(0);
-    try testing.expectError(errs.Error.HashMismatch, verifyFile(io, "/nonexistent-asdf", empty));
+    try testing.expectError(errs.Error.HashMismatch, verifyFile(io, "/nonexistent-asdf", empty, .none));
 }

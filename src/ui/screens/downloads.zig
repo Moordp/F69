@@ -14,6 +14,7 @@ const components = @import("../components.zig");
 const comp = @import("ui_comp");
 const dl_rows = @import("../dl_rows.zig");
 const dl_controls = @import("../dl_controls.zig");
+const mod_job_queue = @import("../mod_job_queue.zig");
 
 const Frame = types.Frame;
 const JobView = downloads.JobView;
@@ -207,7 +208,9 @@ pub fn renderDownloadsBody(frame: *Frame, mode: RowMode) void {
 
     // dvui logs an error for a tag used twice in one frame, so only the
     // first job row of the page carries the test tags.
-    var first_row = true;
+    // Only the page tags its first row: the drawer renders the same jobs
+    // in the same frame when it is open, and dvui flags a tag used twice.
+    var first_row = mode == .full;
 
     // Active and Seeding. Per-section count is computed up front so we
     // can skip the header entirely for empty groups (a lone "Seeding"
@@ -228,10 +231,10 @@ pub fn renderDownloadsBody(frame: *Frame, mode: RowMode) void {
             const job = &v.job;
             if (classifyJob(job) != section.group) continue;
             const title = resolveJobTitle(frame.games, job);
-            // An install worker still moving the file / applying a mod
-            // shows "Extracting" instead of a stale "Installing" pill.
-            const extracting = actions.isExtracting(frame, job.id);
-            const action = dl_rows.renderJobRow(frame, v, title, extracting, seedRatioTarget(frame), mode, first_row);
+            // The Install step runs on a UI-side worker: its live numbers
+            // (bytes moved / files applied) come from there.
+            const live = actions.liveInstall(frame, job.id);
+            const action = dl_rows.renderJobRow(frame, v, title, live, seedRatioTarget(frame), mode, first_row);
             first_row = false;
             switch (action) {
                 .none => {},
@@ -240,6 +243,9 @@ pub fn renderDownloadsBody(frame: *Frame, mode: RowMode) void {
         }
     }
 
+    // Modding: Mods-page installs / uninstalls (their own queue).
+    renderModdingSection(frame);
+
     // History: done / failed / cancelled, newest first.
     {
         const order = historyOrder(dvui.currentWindow().arena(), snap.jobs);
@@ -247,7 +253,7 @@ pub fn renderDownloadsBody(frame: *Frame, mode: RowMode) void {
             downloadsSectionHeader("History", @intCast(order.len), @intFromEnum(JobGroup.history));
             for (order) |i| {
                 const v = &snap.jobs[i];
-                const action = dl_rows.renderJobRow(frame, v, resolveJobTitle(frame.games, &v.job), false, seedRatioTarget(frame), .history, first_row);
+                const action = dl_rows.renderJobRow(frame, v, resolveJobTitle(frame.games, &v.job), .{}, seedRatioTarget(frame), .history, first_row);
                 first_row = false;
                 switch (action) {
                     .none => {},
@@ -384,6 +390,9 @@ const LiveTotals = struct {
 /// is everything terminal (done / failed / cancelled). Keep the int repr
 /// stable — downloadsSectionHeader uses it as the dvui id_extra key.
 const JobGroup = enum(u8) { active = 1, seeding = 2, history = 3, needs_you = 4 };
+/// Header key of the Modding section (not a job group: its rows come from
+/// the mod queue).
+const MODDING_HEADER_KEY: u8 = 5;
 
 fn classifyJob(j: *const Job) JobGroup {
     return switch (j.step) {
@@ -446,6 +455,102 @@ test "historyOrder: terminal jobs only, newest finished first, created_at fallba
     try std.testing.expectEqualSlices(usize, &.{ 2, 3, 0 }, order);
 }
 
+/// One Mods-page job as copied out of the queue (the lock is not held
+/// while widgets are built).
+const ModRow = struct {
+    id: u64,
+    kind: mod_job_queue.Kind,
+    phase: mod_job_queue.Phase,
+    display_buf: [96]u8 = undefined,
+    display_len: u8 = 0,
+    done: u32,
+    total: u32,
+
+    fn display(self: *const ModRow) []const u8 {
+        return self.display_buf[0..self.display_len];
+    }
+};
+
+const MAX_MOD_ROWS = 16;
+
+/// Copy the queue's unfinished jobs (head first) into `out`.
+fn collectModRows(frame: *Frame, out: *[MAX_MOD_ROWS]ModRow) usize {
+    var n: usize = 0;
+    frame.mod_jobs.lock();
+    defer frame.mod_jobs.unlock();
+    for (frame.mod_jobs.jobsLocked()) |j| {
+        if (n == out.len) break;
+        const p = j.currentPhase();
+        if (p == .done or p == .err or p == .canceled) continue;
+        var r: ModRow = .{ .id = j.id, .kind = j.kind, .phase = p, .done = j.progress_done.load(.monotonic), .total = j.progress_total.load(.monotonic) };
+        const len = @min(j.display.len, r.display_buf.len);
+        @memcpy(r.display_buf[0..len], j.display[0..len]);
+        r.display_len = @intCast(len);
+        out[n] = r;
+        n += 1;
+    }
+    return n;
+}
+
+/// The "Modding" section: every Mods-page install / uninstall that is
+/// queued or running, with its phase, a per-file bar while applying,
+/// a sweep while preparing / extracting, and Cancel.
+fn renderModdingSection(frame: *Frame) void {
+    var rows: [MAX_MOD_ROWS]ModRow = undefined;
+    const n = collectModRows(frame, &rows);
+    if (n == 0) return;
+    downloadsSectionHeader("Modding", @intCast(n), MODDING_HEADER_KEY);
+    const t = tokens.active;
+    const accent = tokens.toDvui(t.acc, dvui.Color);
+    for (rows[0..n], 0..) |*r, i| {
+        var row = dvui.box(@src(), .{ .dir = .vertical }, .{
+            .id_extra = @intCast(r.id),
+            .expand = .horizontal,
+            .background = true,
+            .border = style.border_thin,
+            .corners = style.corner_radius,
+            .padding = .{ .x = 10, .y = 6, .w = 10, .h = 6 },
+            .margin = .{ .x = 0, .y = 0, .w = 0, .h = 6 },
+            .color_fill = .{ .color = style.cardFill() },
+            .color_border = .{ .color = style.borderColor() },
+            .tag = if (i == 0) "dl-mod-row" else null,
+        });
+        defer row.deinit();
+        {
+            var hdr = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
+            defer hdr.deinit();
+            const running = r.phase != .queued;
+            comp.chip(@src(), .{
+                .label = mod_job_queue.phaseLabel(r.phase),
+                .fill = if (running) t.acc else t.bg1,
+                .text = if (running) .{ .r = 0xff, .g = 0xff, .b = 0xff, .a = 0xff } else t.ink2,
+                .border = if (running) t.ink else t.line,
+                .scale = 0.8,
+            }, .{ .id_extra = @intCast(r.id), .gravity_y = 0.5, .padding = .{ .x = 7, .y = 2, .w = 7, .h = 2 }, .corners = .all(3) });
+            _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
+            const verb: []const u8 = if (r.kind == .install) "Install mod" else "Remove mod";
+            dvui.label(@src(), "{s} \u{00B7} {s}", .{ verb, r.display() }, .{ .gravity_y = 0.5, .color_text = .{ .color = accent } });
+            _ = dvui.spacer(@src(), .{ .expand = .horizontal });
+            if (components.iconButton(@src(), "Cancel", entypo.cross, .{ .id_extra = @intCast(r.id), .style = .err, .tag = if (i == 0) "dl-mod-cancel" else null })) {
+                frame.mod_jobs.cancel(r.id);
+            }
+        }
+        // Applying with a known file count: a measured bar. Anything else
+        // in flight: a sweep. Queued: nothing moves.
+        if (r.total > 0) {
+            const frac: f32 = @as(f32, @floatFromInt(@min(r.done, r.total))) / @as(f32, @floatFromInt(r.total));
+            dl_rows.renderBar("Apply", frac, accent, r.id);
+            var line_buf: [96]u8 = undefined;
+            const line = std.fmt.bufPrint(&line_buf, "{s} \u{00B7} file {d} / {d} ({d}%)", .{ mod_job_queue.phaseLabel(r.phase), r.done, r.total, downloads.progress.percent(r.done, r.total) }) catch "";
+            dvui.labelNoFmt(@src(), line, .{}, .{ .color_text = .{ .color = style.labelDim() } });
+        } else if (r.phase != .queued) {
+            dl_rows.renderSweepBar(frame.io, mod_job_queue.phaseLabel(r.phase), accent, r.id);
+        } else {
+            dvui.labelNoFmt(@src(), "Waiting for the job before it", .{}, .{ .color_text = .{ .color = style.labelDim() } });
+        }
+    }
+}
+
 fn downloadsSectionHeader(label_text: []const u8, count: u32, key: u8) void {
     var box = dvui.box(@src(), .{ .dir = .horizontal }, .{
         .id_extra = key,
@@ -505,7 +610,7 @@ fn renderNeedsYouRow(frame: *Frame, v: *const JobView, title: []const u8, tagged
     {
         var hdr = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
         defer hdr.deinit();
-        const spec = statusChipSpec(job.step, false);
+        const spec = statusChipSpec(job.step);
         comp.chip(@src(), .{
             .label = spec.label,
             .fill = spec.color,

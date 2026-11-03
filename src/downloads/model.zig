@@ -129,11 +129,19 @@ pub const Job = struct {
     bytes_done: u64 = 0,
     bytes_total: ?u64 = null,
     bytes_uploaded: u64 = 0,
-    // Live only, not stored: dl_speed .. seeders.
+    // Live only, not stored: dl_speed .. step_since.
     dl_speed: u64 = 0,
     ul_speed: u64 = 0,
     peers: u32 = 0,
     seeders: u32 = 0,
+    /// Progress of the current post-transfer step (verify: bytes hashed,
+    /// extract: compressed bytes read) against `step_total`; both 0 when
+    /// the step has no measure.
+    step_done: u64 = 0,
+    step_total: u64 = 0,
+    /// Unix seconds when the job entered its current step (the load time
+    /// for a job read back from the store); 0 = unknown.
+    step_since: i64 = 0,
     created_at: i64 = 0,
     updated_at: i64 = 0,
     finished_at: ?i64 = null,

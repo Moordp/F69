@@ -737,7 +737,8 @@ pub fn guiFrame(frame: *Frame) !bool {
     // worker runs) ask dvui for another frame too. vsync caps the cost at
     // ~60 fps; an idle library incurs zero wakeups.
     if (anyDownloadActive(frame.dl) or anyPostInstallActive(frame.state) or
-        actions.folderImportActive(frame.state))
+        actions.folderImportActive(frame.state) or actions.anyModJobActive(frame) or
+        actions.anyManualInstallActive(frame.state) or actions.anyRetryPending(frame.dl))
     {
         dvui.refresh(frame.win, @src(), null);
     }

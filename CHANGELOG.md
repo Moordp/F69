@@ -2,6 +2,14 @@
 
 All notable, user-facing changes. Dates are YYYY-MM-DD.
 
+## [0.15.21] - 2026-11-03
+
+### Added
+- Visible progress for every download step: real percentages while the file is checked (bytes hashed), extracted (archive bytes read) and installed (bytes moved, or files applied for a mod); a sweeping "busy" bar with elapsed time while a step has nothing to measure (resolving, finding peers, waiting in the browser); queued jobs say why they wait; failed jobs count down to their automatic retry.
+- The drawer chip shows the step's percentage ("Extract 52%"); the game page strip reads the same numbers.
+- Downloads page "Modding" section: installs and removals started from the Mods page, with phase, per-file bar and Cancel.
+- Manual installs (pick an archive) report the hash pass and the extract by real bytes instead of an estimate from the folder size.
+
 ## [0.15.20] - 2026-11-03
 
 ### Added

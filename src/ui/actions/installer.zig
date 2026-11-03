@@ -31,6 +31,7 @@ const mod_job_queue = @import("../mod_job_queue.zig");
 const owned_types = @import("../owned.zig");
 const job_mod = @import("../job.zig");
 const common = @import("common.zig");
+const dl_rows = @import("../dl_rows.zig");
 const mods_act = @import("mods.zig");
 const launch_act = @import("launch.zig");
 const sync_act = @import("sync.zig");
@@ -1441,17 +1442,19 @@ pub fn freePostInstallJobs(state: *State, alloc: std.mem.Allocator) void {
     }
 }
 
-/// True iff `download_job_id` is currently being extracted by a
-/// detached worker. UI uses this to render "[extracting]" instead
-/// of the stale "[done]" pill while the extract is in flight.
-pub fn isExtracting(frame: *Frame, download_job_id: u64) bool {
-    if (frame.state.post_install_jobs == null) return false;
-    const list = postInstallJobsList(frame) orelse return false;
+/// What the post-install worker of download job `download_job_id` is
+/// doing right now (bytes moved, or files applied for a mod); a zero
+/// `LiveInstall` when none runs.
+pub fn liveInstall(frame: *Frame, download_job_id: u64) dl_rows.LiveInstall {
+    if (frame.state.post_install_jobs == null) return .{};
+    const list = postInstallJobsList(frame) orelse return .{};
     for (list.items) |pij| {
         if (pij.payload.download_job_id != download_job_id) continue;
-        return pij.phaseGet() == .pending;
+        if (pij.phaseGet() != .pending) return .{};
+        const p = pij.payload.prog.get();
+        return .{ .running = true, .done = p.done, .total = p.total, .files = pij.payload.prog_files };
     }
-    return false;
+    return .{};
 }
 
 /// One row in the per-game "downloaded versions, ready to install"
@@ -1565,48 +1568,59 @@ pub fn isInstallingForGame(frame: *Frame, thread_id: u64) bool {
     return false;
 }
 
-/// Current extract-progress estimate (0..100) for an in-flight
-/// install of this thread, or null when no install is running. The
-/// poller writes 0..99 while extracting; the worker stamps 100 right
-/// before flipping the phase to `.done`, so the UI can briefly show
-/// "100%" before `drainPostInstall` clears the row.
-pub fn extractProgressForGame(frame: *Frame, thread_id: u64) ?u8 {
+/// What an in-flight install of this thread is doing, with its measured
+/// progress (`total` 0 = nothing to measure yet). Null when no install
+/// worker runs for the game.
+pub const InstallActivity = struct {
+    /// "checking the file" / "extracting the archive" / "moving the file
+    /// into the library" / "applying the mod".
+    verb: []const u8,
+    done: u64,
+    total: u64,
+    /// `done`/`total` count files (a mod apply) rather than bytes.
+    files: bool,
+
+    pub fn pct(self: InstallActivity) ?u8 {
+        if (self.total == 0) return null;
+        return downloads.progress.percent(self.done, self.total);
+    }
+};
+
+pub fn installActivityForGame(frame: *Frame, thread_id: u64) ?InstallActivity {
     if (frame.state.post_install_jobs) |list| {
         for (list.items) |pij| {
             if (pij.payload.game_id != thread_id) continue;
             if (pij.phaseGet() != .pending) continue;
-            if (pij.payload.archive_size == 0) return null;
-            return pij.payload.progress_pct.load(.acquire);
+            const p = pij.payload.prog.get();
+            return .{
+                .verb = if (pij.payload.mode == .apply_mod) "applying the mod" else "moving the file into the library",
+                .done = p.done,
+                .total = p.total,
+                .files = pij.payload.prog_files,
+            };
         }
     }
     if (frame.state.manual_install_jobs) |list| {
         for (list.items) |job| {
             if (job.payload.game_id != thread_id) continue;
             if (job.phaseGet() != .pending) continue;
-            if (job.payload.archive_size == 0) return null;
-            return job.payload.progress_pct.load(.acquire);
+            const p = job.payload.prog.get();
+            return .{
+                .verb = if (job.payload.phase.load(.acquire) == 0) "checking the file" else "extracting the archive",
+                .done = p.done,
+                .total = p.total,
+                .files = false,
+            };
         }
     }
     return null;
 }
 
-/// Recursive directory size — sum of regular file sizes under `path`.
-/// Walks via `std.Io.Dir.walk`. Returns 0 on any error (best-effort
-/// estimator; the UI handles "unknown" gracefully).
-fn dirSizeBytes(io: std.Io, path: []const u8) u64 {
-    var dir = std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true }) catch return 0;
-    defer dir.close(io);
-    var w = dir.walk(std.heap.page_allocator) catch return 0;
-    defer w.deinit();
-    var total: u64 = 0;
-    while (w.next(io) catch null) |entry| {
-        if (entry.kind != .file) continue;
-        var f = entry.dir.openFile(io, entry.basename, .{ .mode = .read_only }) catch continue;
-        defer f.close(io);
-        const st = f.stat(io) catch continue;
-        total += st.size;
-    }
-    return total;
+test "InstallActivity.pct: null without a total" {
+    const a: InstallActivity = .{ .verb = "x", .done = 3, .total = 0, .files = false };
+    try std.testing.expect(a.pct() == null);
+    const b: InstallActivity = .{ .verb = "x", .done = 3, .total = 4, .files = true };
+    try std.testing.expectEqual(@as(?u8, 75), b.pct());
 }
 
 /// True iff any post-install worker is in flight. Cheap state-only
@@ -1616,6 +1630,24 @@ fn dirSizeBytes(io: std.Io, path: []const u8) u64 {
 pub fn anyPostInstallActive(state: *const State) bool {
     const list_ptr = state.post_install_jobs orelse return false;
     return list_ptr.items.len > 0;
+}
+
+/// True iff a manual (pick-an-archive) install worker is in flight.
+pub fn anyManualInstallActive(state: *const State) bool {
+    const list_ptr = state.manual_install_jobs orelse return false;
+    return list_ptr.items.len > 0;
+}
+
+/// True iff a Mods-page install/uninstall is queued or running (the
+/// Downloads page "Modding" section animates while one does).
+pub fn anyModJobActive(frame: *Frame) bool {
+    frame.mod_jobs.lock();
+    defer frame.mod_jobs.unlock();
+    for (frame.mod_jobs.jobsLocked()) |j| {
+        const p = j.currentPhase();
+        if (p != .done and p != .err and p != .canceled) return true;
+    }
+    return false;
 }
 
 /// Resolve the version string recorded on the install row. Priority:
@@ -1821,27 +1853,38 @@ fn finishGameInstall(
 
 /// Move `src` into `dest_dir` (created). Rename first; a cross-volume
 /// move (downloads and library on different drives) falls back to copy
-/// + delete.
-fn moveFileInto(io: std.Io, src: []const u8, dest_dir: []const u8) !void {
+/// + delete. `sink` gets (bytes moved, file size): one report after a
+/// rename, one per chunk while copying.
+fn moveFileInto(io: std.Io, src: []const u8, dest_dir: []const u8, sink: downloads.progress.Sink) !void {
     const cwd = std.Io.Dir.cwd();
     try cwd.createDirPath(io, dest_dir);
+    const size: u64 = if (cwd.statFile(io, src, .{})) |st| st.size else |_| 0;
+    sink.report(0, size);
     var buf: [1024]u8 = undefined;
     const dst = try std.fmt.bufPrint(&buf, "{s}" ++ std.fs.path.sep_str ++ "{s}", .{ dest_dir, std.fs.path.basename(src) });
     cwd.rename(src, cwd, dst, io) catch |e| switch (e) {
         error.FileNotFound => return e,
         else => {
             log.info("rename '{s}' failed ({s}); copying instead", .{ src, @errorName(e) });
-            try common.copyFile(io, src, dst);
+            try common.copyFileProgress(io, src, dst, sink);
             cwd.deleteFile(io, src) catch |de| log.warn("could not delete '{s}' after copy: {s}", .{ src, @errorName(de) });
         },
     };
+    sink.report(size, size);
+}
+
+/// `applyModArchive` progress (files applied / files in the mod) → the
+/// payload's counters.
+fn postInstallModProgress(ctx: ?*anyopaque, done: u32, total: u32) void {
+    const job: *PostInstallJob = @ptrCast(@alignCast(ctx orelse return));
+    job.payload.prog.sink().report(done, total);
 }
 
 fn postInstallWorker(job: *PostInstallJob) void {
     const p = &job.payload;
     switch (p.mode) {
         .move_file => {
-            moveFileInto(p.io, p.file_path, p.dest_dir) catch |e| {
+            moveFileInto(p.io, p.file_path, p.dest_dir, p.prog.sink()) catch |e| {
                 log.warn("post-install download {d}: moving {s} failed: {s}", .{ p.download_job_id, p.file_path, @errorName(e) });
                 p.err_name = @errorName(e);
                 job.markFailed();
@@ -1857,7 +1900,6 @@ fn postInstallWorker(job: *PostInstallJob) void {
             };
         },
     }
-    p.progress_pct.store(100, .release);
     job.markDone();
 }
 
@@ -1878,7 +1920,10 @@ fn applyModWorker(job: *PostInstallJob) !void {
     var mod_id_buf: [32]u8 = undefined;
     const mod_id_str = try std.fmt.bufPrint(&mod_id_buf, "{d}", .{p.mod_id});
     log.info("post-install mod download {d}: applying {s} → {s}", .{ p.download_job_id, p.file_path, layout.game_root });
-    try installer_mod.applyModArchive(alloc, p.io, mod_id_str, p.file_path, layout.game_root, &tracker, .{});
+    try installer_mod.applyModArchive(alloc, p.io, mod_id_str, p.file_path, layout.game_root, &tracker, .{
+        .progress_cb = postInstallModProgress,
+        .progress_ctx = job,
+    });
 }
 
 /// Each guiFrame: collect finished post-install workers. A finished
@@ -2158,15 +2203,6 @@ pub fn startManualInstall(
     }
     errdefer if (name_owned) |s| alloc.free(s);
 
-    // Stat the archive up-front for the extract-progress poller. 0
-    // means "unknown" → poller bails and the UI shows indeterminate.
-    const archive_size: u64 = blk: {
-        var f = std.Io.Dir.cwd().openFile(frame.io, file_path_trim, .{ .mode = .read_only }) catch break :blk 0;
-        defer f.close(frame.io);
-        const st = f.stat(frame.io) catch break :blk 0;
-        break :blk st.size;
-    };
-
     const list = manualInstallJobsList(frame) orelse {
         alloc.free(file_path_owned);
         alloc.free(dest_dir_owned);
@@ -2188,7 +2224,6 @@ pub fn startManualInstall(
             .dest_dir = dest_dir_owned,
             .version = version_owned,
             .name = name_owned,
-            .archive_size = archive_size,
         },
         &slot,
     ) catch |e| {
@@ -2226,72 +2261,25 @@ fn manualInstallWorker(job: *ManualInstallJob) void {
     // Stream the archive through SHA-256 before extract. Cheap on top
     // of the disk read we'd do anyway, and the result lets the
     // diagnostics page identify the file later if the user re-picks
-    // a renamed copy.
-    var hasher = downloads.Hasher.init();
-    {
-        var f = std.Io.Dir.cwd().openFile(p.io, p.file_path, .{ .mode = .read_only }) catch {
-            fail(job, "OpenFailed");
-            return;
-        };
-        defer f.close(p.io);
-        var rd_buf: [64 * 1024]u8 = undefined;
-        var fr = f.reader(p.io, &rd_buf);
-        while (true) {
-            var chunk: [64 * 1024]u8 = undefined;
-            const got = fr.interface.readSliceShort(&chunk) catch {
-                fail(job, "ReadFailed");
-                return;
-            };
-            if (got == 0) break;
-            hasher.update(chunk[0..got]);
-        }
-    }
-    const sha_bytes = hasher.finalize();
+    // a renamed copy. Progress: bytes hashed / file size.
+    p.phase.store(0, .release);
+    const sha_bytes = downloads.hashFile(p.io, p.file_path, p.prog.sink()) catch |e| {
+        fail(job, if (e == error.FileNotFound) "OpenFailed" else "ReadFailed");
+        return;
+    };
     const sha_hex = std.fmt.bytesToHex(sha_bytes, .lower);
     @memcpy(p.archive_sha256_hex[0..], &sha_hex);
     p.archive_sha256_set = true;
 
-    // ---- extract ----
-    // Spawn the size-polling thread so the UI's "Installing —
-    // extracting" strip shows a moving %. Same trick as the
-    // post-install worker.
-    var poller_thread: ?std.Thread = null;
-    if (p.archive_size > 0) {
-        poller_thread = std.Thread.spawn(.{}, manualExtractProgressPoller, .{job}) catch null;
-    }
-    downloads.extract(job.alloc, p.io, p.file_path, p.dest_dir, .{ .strip = 0 }) catch {
-        if (poller_thread) |t| {
-            p.progress_stop.store(true, .release);
-            t.join();
-        }
+    // ---- extract ---- Progress: compressed bytes read / file size.
+    p.prog.reset();
+    p.phase.store(1, .release);
+    downloads.extract(job.alloc, p.io, p.file_path, p.dest_dir, .{ .strip = 0, .progress = p.prog.sink() }) catch {
         fail(job, "ExtractionFailed");
         return;
     };
-    if (poller_thread) |t| {
-        p.progress_stop.store(true, .release);
-        t.join();
-    }
-    p.progress_pct.store(100, .release);
 
     job.markDone();
-}
-
-/// Mirror of `extractProgressPoller` for manual installs. Polls
-/// `dest_dir` size against `archive_size * 2` (rough Ren'Py / RPGM
-/// compression ratio) and updates `progress_pct` so the UI can
-/// render a moving bar.
-fn manualExtractProgressPoller(job: *ManualInstallJob) void {
-    job_mod.lowerWorkerPriority();
-    const p = &job.payload;
-    const denom: u64 = @max(1, p.archive_size * 2);
-    const tick = std.Io.Duration.fromMilliseconds(250);
-    while (!p.progress_stop.load(.acquire)) {
-        const bytes = dirSizeBytes(p.io, p.dest_dir);
-        const pct_u64: u64 = @min(99, @divTrunc(bytes * 100, denom));
-        p.progress_pct.store(@intCast(pct_u64), .release);
-        job_mod.refreshDebounced(job.win, @src());
-        std.Io.sleep(p.io, tick, .awake) catch break;
-    }
 }
 
 /// UI-thread drain — runs each frame from `ui.runMainLoop`. Picks up

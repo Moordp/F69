@@ -23,12 +23,31 @@ pub const Error = error{
     OutOfMemory,
 };
 
+pub const ProgressFn = *const fn (ctx: ?*anyopaque, done: u64, total: u64) void;
+
 pub const ExtractOpts = struct {
     /// Drop this many leading path components from each archive
     /// entry's pathname before writing to disk. Mirrors `tar
     /// --strip-components=N`. 0 = preserve full archive structure.
     strip: u8 = 0,
+    /// Called after every entry header and data block with (compressed
+    /// bytes consumed so far, `progress_total`). `progress_total` is the
+    /// archive file size the caller measured; 0 when unknown.
+    progress_cb: ?ProgressFn = null,
+    progress_ctx: ?*anyopaque = null,
+    progress_total: u64 = 0,
 };
+
+/// Bytes libarchive has pulled from the file so far (filter -1 = the
+/// raw input).
+fn consumedBytes(a: ?*c.archive) u64 {
+    const n = c.archive_filter_bytes(a, -1);
+    return if (n > 0) @intCast(n) else 0;
+}
+
+fn reportProgress(a: ?*c.archive, opts: ExtractOpts) void {
+    if (opts.progress_cb) |cb| cb(opts.progress_ctx, consumedBytes(a), opts.progress_total);
+}
 
 /// Extract `archive_path` into `dest_dir`. Creates `dest_dir` if
 /// missing. Auto-detects the format + filter chain — libarchive's
@@ -115,22 +134,24 @@ pub fn extractFile(
             std.log.warn("libarchive: write header: {s}", .{c.archive_error_string(ext)});
             continue;
         }
+        reportProgress(a, opts);
         // Copy data blocks. Skipped for entries with no data
         // (directories, symlinks).
         if (c.archive_entry_size(entry) > 0) {
-            try copyData(a, ext);
+            try copyData(a, ext, opts);
         }
         if (c.archive_write_finish_entry(ext) < c.ARCHIVE_OK) {
             std.log.warn("libarchive: finish entry: {s}", .{c.archive_error_string(ext)});
         }
     }
+    reportProgress(a, opts);
 
     if (c.archive_read_close(a) != c.ARCHIVE_OK) {
         std.log.warn("libarchive: close: {s}", .{c.archive_error_string(a)});
     }
 }
 
-fn copyData(a: ?*c.archive, ext: ?*c.archive) Error!void {
+fn copyData(a: ?*c.archive, ext: ?*c.archive, opts: ExtractOpts) Error!void {
     while (true) {
         var block: ?*const anyopaque = null;
         var size: usize = 0;
@@ -145,6 +166,7 @@ fn copyData(a: ?*c.archive, ext: ?*c.archive) Error!void {
             std.log.warn("libarchive: write block: {s}", .{c.archive_error_string(ext)});
             return Error.ExtractionFailed;
         }
+        reportProgress(a, opts);
     }
 }
 

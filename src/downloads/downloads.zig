@@ -18,6 +18,8 @@ pub const extract = arc.extract;
 
 pub const Hasher = ver.Hasher;
 pub const verifyFile = ver.verifyFile;
+pub const hashFile = ver.hashFile;
+pub const progress = @import("progress.zig");
 pub const hexDecode = ver.hexDecode;
 
 // RPDL is concrete (search + fetchTorrent → bytes → `Command.enqueue_torrent`).

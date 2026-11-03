@@ -17,6 +17,7 @@ const std = @import("std");
 const Io = std.Io;
 const log = std.log.scoped(.archive);
 const errs = @import("errors.zig");
+const progress = @import("progress.zig");
 const archive_lib = @import("util_archive");
 const util_proc = @import("util_proc");
 
@@ -40,6 +41,9 @@ pub const ExtractOpts = struct {
     ///      has no native strip), promoting the single top-level
     ///      directory's contents up one level per `strip` count.
     strip: u8 = 0,
+    /// Gets (compressed bytes read, archive file size) as the extract
+    /// runs; the last report is (size, size).
+    progress: progress.Sink = .none,
 };
 
 /// Extract `archive_path` into `dest_dir`, creating `dest_dir` if
@@ -55,12 +59,14 @@ pub fn extract(
     const fmt = detectFormat(archive_path);
 
     std.Io.Dir.cwd().createDirPath(io, dest_dir) catch return errs.Error.ExtractionFailed;
+    const total: u64 = if (std.Io.Dir.cwd().statFile(io, archive_path, .{})) |st| st.size else |_| 0;
+    opts.progress.report(0, total);
 
     switch (fmt) {
         .tar_gz => {
             var dest = std.Io.Dir.cwd().openDir(io, dest_dir, .{}) catch return errs.Error.ExtractionFailed;
             defer dest.close(io);
-            extractTarGz(alloc, io, archive_path, dest, opts.strip) catch |e| {
+            extractTarGz(alloc, io, archive_path, dest, opts.strip, total, opts.progress) catch |e| {
                 log.warn("tar.gz extract failed for {s}: {s}", .{ archive_path, @errorName(e) });
                 return errs.Error.ExtractionFailed;
             };
@@ -75,7 +81,12 @@ pub fn extract(
             // via its own write-disk pipeline; no Zig std.Io.Dir
             // needed. Pass dest_dir as a slice; the binding does the
             // C-string conversion.
-            archive_lib.extractFile(archive_path, dest_dir, .{ .strip = opts.strip }) catch |e| {
+            archive_lib.extractFile(archive_path, dest_dir, .{
+                .strip = opts.strip,
+                .progress_cb = opts.progress.cb,
+                .progress_ctx = opts.progress.ctx,
+                .progress_total = total,
+            }) catch |e| {
                 log.warn("{s} extract failed for {s}: {s}", .{ @tagName(fmt), archive_path, @errorName(e) });
                 return errs.Error.ExtractionFailed;
             };
@@ -85,8 +96,69 @@ pub fn extract(
             return errs.Error.ExtractionFailed;
         },
     }
+    opts.progress.report(total, total);
     log.info("extracted {s} → {s}", .{ archive_path, dest_dir });
 }
+
+/// A reader that counts the bytes it passes through and reports them
+/// to a `progress.Sink` (the tar.gz path has no hook of its own).
+const CountingReader = struct {
+    in: *std.Io.Reader,
+    seen: u64 = 0,
+    total: u64,
+    sink: progress.Sink,
+    reader: std.Io.Reader,
+
+    fn init(in: *std.Io.Reader, buffer: []u8, total: u64, sink: progress.Sink) CountingReader {
+        return .{
+            .in = in,
+            .total = total,
+            .sink = sink,
+            .reader = .{
+                .vtable = &.{ .stream = stream, .readVec = readVec, .discard = discard },
+                .buffer = buffer,
+                .end = 0,
+                .seek = 0,
+            },
+        };
+    }
+
+    fn count(this: *CountingReader, n: usize) void {
+        this.seen += n;
+        this.sink.report(this.seen, this.total);
+    }
+
+    fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+        const this: *CountingReader = @alignCast(@fieldParentPtr("reader", r));
+        const data = limit.slice(try w.writableSliceGreedy(1));
+        var vec: [1][]u8 = .{data};
+        const n = try this.in.readVec(&vec);
+        w.advance(n);
+        this.count(n);
+        return n;
+    }
+
+    fn readVec(r: *std.Io.Reader, data: [][]u8) std.Io.Reader.Error!usize {
+        const this: *CountingReader = @alignCast(@fieldParentPtr("reader", r));
+        var vecs: [8][]u8 = undefined;
+        const dest_n, const data_size = try r.writableVector(&vecs, data);
+        const n = try this.in.readVec(vecs[0..dest_n]);
+        this.count(n);
+        if (n > data_size) {
+            r.end += n - data_size;
+            return data_size;
+        }
+        return n;
+    }
+
+    fn discard(r: *std.Io.Reader, limit: std.Io.Limit) std.Io.Reader.Error!usize {
+        const this: *CountingReader = @alignCast(@fieldParentPtr("reader", r));
+        const peeked = limit.slice(try this.in.peekGreedy(1));
+        this.in.toss(peeked.len);
+        this.count(peeked.len);
+        return peeked.len;
+    }
+};
 
 fn extractZip(
     alloc: std.mem.Allocator,
@@ -181,17 +253,23 @@ fn extractTarGz(
     path: []const u8,
     dest: std.Io.Dir,
     strip: u8,
+    total: u64,
+    sink: progress.Sink,
 ) !void {
     var f = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only });
     defer f.close(io);
 
     var rd_buf: [64 * 1024]u8 = undefined;
     var fr = f.reader(io, &rd_buf);
+    // The gzip decoder peeks through this reader, so it needs a buffer
+    // of its own (an empty one cannot serve a peek).
+    var count_buf: [64 * 1024]u8 = undefined;
+    var counted = CountingReader.init(&fr.interface, &count_buf, total, sink);
 
     const window = try alloc.alloc(u8, std.compress.flate.max_window_len);
     defer alloc.free(window);
 
-    var dec = std.compress.flate.Decompress.init(&fr.interface, .gzip, window);
+    var dec = std.compress.flate.Decompress.init(&counted.reader, .gzip, window);
     try std.tar.extract(io, dest, &dec.reader, .{ .strip_components = strip });
 }
 
@@ -270,7 +348,8 @@ test "extract: real .tar.gz round-trip" {
     var out_dir_buf: [128]u8 = undefined;
     const out_dir = try std.fmt.bufPrint(&out_dir_buf, "{s}/out", .{scratch});
 
-    try extract(testing.allocator, io, tar_path, out_dir, .{});
+    var prog: progress.Atomic = .{};
+    try extract(testing.allocator, io, tar_path, out_dir, .{ .progress = prog.sink() });
 
     // Verify the extracted file matches.
     var out_file_buf: [256]u8 = undefined;
@@ -278,6 +357,67 @@ test "extract: real .tar.gz round-trip" {
     const got = try std.Io.Dir.cwd().readFileAlloc(io, out_file, testing.allocator, .limited(1024));
     defer testing.allocator.free(got);
     try testing.expectEqualStrings("hi from archive test\n", got);
+    // Progress ends at (archive size, archive size).
+    const st = try std.Io.Dir.cwd().statFile(io, tar_path, .{});
+    try testing.expect(st.size > 0);
+    try testing.expectEqual(progress.Atomic.Pair{ .done = st.size, .total = st.size }, prog.get());
+}
+
+test "extractTarGz: the counting reader reports every compressed byte" {
+    var tio = std.Io.Threaded.init(testing.allocator, .{});
+    defer tio.deinit();
+    const io = tio.io();
+
+    const scratch = "/tmp/f69-test-archive-targz-count";
+    std.Io.Dir.cwd().deleteTree(io, scratch) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, scratch) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, scratch);
+    var src_dir_buf: [128]u8 = undefined;
+    const src_dir = try std.fmt.bufPrint(&src_dir_buf, "{s}/src", .{scratch});
+    try std.Io.Dir.cwd().createDirPath(io, src_dir);
+    var big_buf: [256]u8 = undefined;
+    const big = try std.fmt.bufPrint(&big_buf, "{s}/big.bin", .{src_dir});
+    {
+        // 300 KB of noise so the gzip stream spans several reader buffers.
+        var f = try std.Io.Dir.cwd().createFile(io, big, .{ .truncate = true });
+        defer f.close(io);
+        var wbuf: [4096]u8 = undefined;
+        var w = f.writer(io, &wbuf);
+        var rng = std.Random.DefaultPrng.init(7);
+        var chunk: [1024]u8 = undefined;
+        var i: usize = 0;
+        while (i < 300) : (i += 1) {
+            rng.random().bytes(&chunk);
+            try w.interface.writeAll(&chunk);
+        }
+        try w.interface.flush();
+    }
+    var tar_path_buf: [256]u8 = undefined;
+    const tar_path = try std.fmt.bufPrint(&tar_path_buf, "{s}/big.tar.gz", .{scratch});
+    var cmd_buf: [512]u8 = undefined;
+    const cmd = try std.fmt.bufPrint(&cmd_buf, "tar czf {s} -C {s} big.bin", .{ tar_path, src_dir });
+    const result = util_proc.run(testing.allocator, io, &.{ "sh", "-c", cmd }, .{ .stderr = .ignore }) catch return error.SkipZigTest;
+    defer testing.allocator.free(result.stdout);
+    if (result.exit_code != 0) return error.SkipZigTest;
+
+    const Seen = struct {
+        var reports: u32 = 0;
+        var last_done: u64 = 0;
+        var monotonic = true;
+        fn cb(_: ?*anyopaque, done: u64, total: u64) void {
+            reports += 1;
+            if (done < last_done) monotonic = false;
+            if (done > total) monotonic = false;
+            last_done = done;
+        }
+    };
+    var out_dir_buf: [128]u8 = undefined;
+    const out_dir = try std.fmt.bufPrint(&out_dir_buf, "{s}/out", .{scratch});
+    try extract(testing.allocator, io, tar_path, out_dir, .{ .progress = .{ .cb = Seen.cb } });
+    const st = try std.Io.Dir.cwd().statFile(io, tar_path, .{});
+    try testing.expect(Seen.reports >= 3); // (0,total), ≥1 chunk, (total,total)
+    try testing.expect(Seen.monotonic);
+    try testing.expectEqual(st.size, Seen.last_done);
 }
 
 test "extract: real .zip round-trip" {
@@ -319,13 +459,18 @@ test "extract: real .zip round-trip" {
     var out_dir_buf: [128]u8 = undefined;
     const out_dir = try std.fmt.bufPrint(&out_dir_buf, "{s}/out", .{scratch});
 
-    try extract(testing.allocator, io, zip_path, out_dir, .{});
+    var prog: progress.Atomic = .{};
+    try extract(testing.allocator, io, zip_path, out_dir, .{ .progress = prog.sink() });
 
     var out_file_buf: [256]u8 = undefined;
     const out_file = try std.fmt.bufPrint(&out_file_buf, "{s}/hello.txt", .{out_dir});
     const got = try std.Io.Dir.cwd().readFileAlloc(io, out_file, testing.allocator, .limited(1024));
     defer testing.allocator.free(got);
     try testing.expectEqualStrings("hi from zip test\n", got);
+    // libarchive's consumed-bytes counter reaches the file size.
+    const st = try std.Io.Dir.cwd().statFile(io, zip_path, .{});
+    try testing.expect(st.size > 0);
+    try testing.expectEqual(progress.Atomic.Pair{ .done = st.size, .total = st.size }, prog.get());
 }
 
 test "fuzz: detectFormat survives arbitrary paths" {

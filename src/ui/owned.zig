@@ -604,21 +604,10 @@ pub const PostInstallPayload = struct {
     expected_sha256: ?[32]u8,
     /// Worker writes one of these on terminal phase. Drain logs it.
     err_name: ?[]const u8 = null,
-    /// Extract-progress estimate, 0..100. The poller thread walks the
-    /// destination dir every ~250ms while the worker is blocked in
-    /// `archive.extract` and writes its best guess here. The std.zip /
-    /// std.tar high-level extractors don't expose a per-entry hook, so
-    /// we estimate against the archive file size × 2 (uncompressed is
-    /// typically ~2× compressed for Ren'Py-style content). Capped at
-    /// 99 by the poller; the worker writes 100 once extract returns.
-    progress_pct: std.atomic.Value(u8) = .init(0),
-    /// Poller's stop flag. Worker flips this to true after extract
-    /// finishes (success or fail) so the poll loop exits and joins.
-    progress_stop: std.atomic.Value(bool) = .init(false),
-    /// Source archive size on disk, captured at startInstall time —
-    /// the denominator for the poller's pct estimate. 0 ⇒ stat failed
-    /// or unknown; poller bails and the UI sees indeterminate.
-    archive_size: u64 = 0,
+    /// Live progress of the worker: bytes moved (`move_file`) or files
+    /// applied (`apply_mod`, `prog_files` = true) against the total.
+    prog: downloads.progress.Atomic = .{},
+    prog_files: bool = false,
     /// Provenance for the eventual `installs` row. RPDL downloads
     /// (label starts with `rpdl:`) record `.rpdl`; everything else
     /// (DDL, mirror, recipe-driven HTTP) falls back to `.recipe`.
@@ -651,17 +640,11 @@ pub const ManualInstallPayload = struct {
     archive_sha256_hex: [64]u8 = @splat(0),
     archive_sha256_set: bool = false,
     err_name: ?[]const u8 = null,
-    /// Extract-progress estimate (0..100). Same shape as PostInstall:
-    /// the poller thread walks dest_dir size every ~250ms and writes
-    /// the best guess here so the UI can render a moving bar.
-    progress_pct: std.atomic.Value(u8) = .init(0),
-    /// Poller's stop flag — worker flips this to true after extract
-    /// returns so the poll loop exits and joins.
-    progress_stop: std.atomic.Value(bool) = .init(false),
-    /// Source archive size on disk, captured at startManualInstall
-    /// time. 0 ⇒ stat failed; poller bails and the UI shows
-    /// indeterminate animation.
-    archive_size: u64 = 0,
+    /// Live progress of the current phase in bytes of the archive: the
+    /// hash pass, then (`prog` reset) the extract.
+    prog: downloads.progress.Atomic = .{},
+    /// 0 = hashing, 1 = extracting.
+    phase: std.atomic.Value(u8) = .init(0),
 };
 pub const ManualInstallJob = Job(ManualInstallPayload);
 

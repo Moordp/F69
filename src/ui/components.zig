@@ -376,6 +376,70 @@ pub fn humanRate(buf: []u8, bytes_per_sec: u64) []const u8 {
     return std.fmt.bufPrint(buf, "{s}/s", .{human}) catch "?";
 }
 
+/// Format elapsed seconds → "12 s" / "3m 12s" / "1h 07m".
+pub fn humanElapsed(buf: []u8, seconds: u64) []const u8 {
+    if (seconds < 60) return std.fmt.bufPrint(buf, "{d} s", .{seconds}) catch "?";
+    if (seconds < 3600) return std.fmt.bufPrint(buf, "{d}m {d:0>2}s", .{ seconds / 60, seconds % 60 }) catch "?";
+    return std.fmt.bufPrint(buf, "{d}h {d:0>2}m", .{ seconds / 3600, (seconds % 3600) / 60 }) catch "?";
+}
+
+test "humanElapsed" {
+    var b: [24]u8 = undefined;
+    try std.testing.expectEqualStrings("12 s", humanElapsed(&b, 12));
+    try std.testing.expectEqualStrings("3m 05s", humanElapsed(&b, 185));
+    try std.testing.expectEqualStrings("1h 07m", humanElapsed(&b, 4020));
+}
+
+/// Where the sweep slug of an indeterminate bar sits (0..1 of the free
+/// width) at `now_ms`: one left-to-right pass every `period_ms`.
+pub fn sweepPhase(now_ms: i64, period_ms: i64) f32 {
+    const p = @mod(now_ms, period_ms);
+    return @as(f32, @floatFromInt(p)) / @as(f32, @floatFromInt(period_ms));
+}
+
+test "sweepPhase wraps" {
+    try std.testing.expectEqual(@as(f32, 0.0), sweepPhase(3200, 1600));
+    try std.testing.expectEqual(@as(f32, 0.5), sweepPhase(800, 1600));
+}
+
+/// An indeterminate ("busy") bar: a slug sweeping left to right once
+/// every 1.6 s. Same frame as `dvui.progress` so it can stand in the
+/// same slot. The caller must request frames (`dvui.refresh`) while it
+/// is visible.
+pub fn sweepBar(src: std.builtin.SourceLocation, io: std.Io, id: u64, accent: dvui.Color, opts: dvui.Options) void {
+    const defaults: dvui.Options = .{
+        .id_extra = @intCast(id),
+        .min_size_content = .{ .w = 1, .h = 10 },
+        .border = style.border_thin,
+        .corners = .all(2),
+        .color_border = .{ .color = style.borderColor() },
+        .background = true,
+        .color_fill = .{ .color = .{ .r = 0x16, .g = 0x0B, .b = 0x10 } },
+    };
+    var outer = dvui.box(src, .{ .dir = .horizontal }, defaults.override(opts));
+    defer outer.deinit();
+    // Last frame's width (0 on the first frame → a sane default).
+    const inner_w: f32 = blk: {
+        const w = outer.data().contentRect().w;
+        break :blk if (w > 8) w else 320;
+    };
+    const now_ms = std.Io.Clock.Timestamp.now(io, .real).raw.toMilliseconds();
+    const slug_w = @max(8.0, inner_w * 0.22);
+    const left = sweepPhase(now_ms, 1600) * (inner_w - slug_w);
+    if (left > 0) {
+        var pad = dvui.box(@src(), .{ .dir = .horizontal }, .{ .id_extra = @intCast(id), .min_size_content = .{ .w = left, .h = 8 } });
+        pad.deinit();
+    }
+    var slug = dvui.box(@src(), .{ .dir = .horizontal }, .{
+        .id_extra = @intCast(id),
+        .min_size_content = .{ .w = slug_w, .h = 8 },
+        .background = true,
+        .color_fill = .{ .color = accent },
+        .corners = .all(1),
+    });
+    slug.deinit();
+}
+
 // ============================================================
 //  Login popup — shown at startup when the user isn't logged into
 //  F95. Combines F95 + RPDL forms with a Skip button so the user

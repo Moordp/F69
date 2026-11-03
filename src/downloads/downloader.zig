@@ -17,6 +17,7 @@ const policy = @import("policy.zig");
 const engine_mod = @import("engine.zig");
 const verify = @import("verify.zig");
 const archive = @import("archive.zig");
+const progress = @import("progress.zig");
 const workers = @import("workers.zig");
 const resolve = @import("resolve.zig");
 const errs = @import("errors.zig");
@@ -44,6 +45,24 @@ const MOD_ARCHIVE = "Mod archive — installed by the mod manager";
 const EXTRACT_MARKER = ".f69-extracting";
 /// Detail while another job's extract writes into the same folder.
 const EXTRACT_WAIT = "Waiting for another extraction into the same folder";
+const ENGINE_WAIT = "Waiting for the download engine to come back";
+
+/// "Waiting for a free slot (3 of 3 file downloads busy)".
+fn slotWaitDetail(buf: []u8, s: policy.Settings, a: policy.ActiveCounts, e: model.EngineKind) []const u8 {
+    const files = policy.isFileEngine(e);
+    const busy: u32 = if (files) a.files_downloading else a.torrents_downloading;
+    const slots: u32 = if (files) s.slots_files else s.slots_torrents;
+    const what: []const u8 = if (files) "file downloads" else "torrents";
+    return std.fmt.bufPrint(buf, "Waiting for a free slot ({d} of {d} {s} busy)", .{ busy, slots, what }) catch "Waiting for a free slot";
+}
+
+test "slotWaitDetail: names the class and the counts" {
+    var buf: [96]u8 = undefined;
+    const s: policy.Settings = .{ .slots_files = 3, .slots_torrents = 2 };
+    const a: policy.ActiveCounts = .{ .files_downloading = 3, .torrents_downloading = 1, .any_downloading = true };
+    try std.testing.expectEqualStrings("Waiting for a free slot (3 of 3 file downloads busy)", slotWaitDetail(&buf, s, a, .aria2_http));
+    try std.testing.expectEqualStrings("Waiting for a free slot (1 of 2 torrents busy)", slotWaitDetail(&buf, s, a, .aria2_torrent));
+}
 /// Donor DDL link refused (expired signed URL / cookie).
 const LINK_EXPIRED = "Link expired — click Download again";
 /// `deinit` waits at most this long for running workers, then lets them go.
@@ -165,7 +184,6 @@ pub const JobView = struct {
     /// Strings are snapshot-arena copies; `resolved_headers` is always empty
     /// (cookies never leave the downloader).
     job: model.Job,
-    extract_pct: u8 = 0,
     /// Stage 3.
     awaiting_prompt: ?[]const u8 = null,
 };
@@ -228,15 +246,18 @@ const PostWorker = struct {
     /// `<dest>/.f69-extracting`, removed when the extract succeeds.
     marker: []const u8 = &.{},
     sha: [32]u8 = @splat(0),
+    /// (bytes done, bytes total) of the run; the tick copies it onto the
+    /// job (`pollWorkerProgress`).
+    prog: progress.Atomic = .{},
 
     fn run(pw: *PostWorker) ?model.FailReason {
         switch (pw.kind) {
             .verify => {
-                verify.verifyFile(pw.io, pw.src, pw.sha) catch return .checksum_mismatch;
+                verify.verifyFile(pw.io, pw.src, pw.sha, pw.prog.sink()) catch return .checksum_mismatch;
                 return null;
             },
             .extract => {
-                archive.extract(pw.alloc, pw.io, pw.src, pw.dest, .{}) catch |e| {
+                archive.extract(pw.alloc, pw.io, pw.src, pw.dest, .{ .progress = pw.prog.sink() }) catch |e| {
                     log.warn("extract '{s}' failed: {s}", .{ pw.src, @errorName(e) });
                     return if (e == error.DiskFull) .disk_full else .bad_archive;
                 };
@@ -586,9 +607,11 @@ pub const Downloader = struct {
         defer self.alloc.free(jobs);
         var i: usize = 0;
         errdefer for (jobs[i..]) |*j| freeJobStrings(self.alloc, j);
+        const now = self.nowSeconds();
         while (i < jobs.len) : (i += 1) {
             const r = try self.alloc.create(Rec);
             r.* = .{ .job = jobs[i] };
+            r.job.step_since = now;
             self.recs.append(self.alloc, r) catch {
                 self.alloc.destroy(r);
                 return error.OutOfMemory;
@@ -613,6 +636,7 @@ pub const Downloader = struct {
         self.drainCommands(now);
         self.schedule(now);
         self.pollEngines(now);
+        self.pollWorkerProgress();
         self.reapWorkers(now);
         self.retryWaitingExtracts(now);
         self.reapResolves(now);
@@ -944,11 +968,29 @@ pub const Downloader = struct {
         var counts = self.activeCounts();
         for (self.recs.items) |r| {
             if (r.job.step != .queued) continue;
-            if (!policy.hasSlot(self.settings, counts, r.job.engine)) continue;
-            if (self.engineGated(r.job.engine, now)) continue;
+            if (!policy.hasSlot(self.settings, counts, r.job.engine)) {
+                var buf: [96]u8 = undefined;
+                self.apply(r, .{ .step = .queued, .detail = slotWaitDetail(&buf, self.settings, counts, r.job.engine), .attempts = r.job.attempts }, now);
+                continue;
+            }
+            if (self.engineGated(r.job.engine, now)) {
+                self.apply(r, .{ .step = .queued, .detail = ENGINE_WAIT, .attempts = r.job.attempts }, now);
+                continue;
+            }
             self.transition(r, .slot_free, now, null);
             if (r.job.step == .resolving) self.startResolve(r, now);
             counts = self.activeCounts();
+        }
+    }
+
+    /// Copy each running verify/extract worker's progress onto its job so
+    /// the next snapshot carries it.
+    fn pollWorkerProgress(self: *Downloader) void {
+        for (self.recs.items) |r| {
+            const pw = r.worker orelse continue;
+            const p = pw.prog.get();
+            r.job.step_done = p.done;
+            r.job.step_total = p.total;
         }
     }
 
@@ -1238,6 +1280,11 @@ pub const Downloader = struct {
         if (step_changed and j.step == .awaiting_user) self.clearPending(r);
 
         if (detail_changed) self.setStr(&j.step_detail, t.detail);
+        if (step_changed) {
+            j.step_since = now;
+            j.step_done = 0;
+            j.step_total = 0;
+        }
         j.step = t.step;
         j.fail = t.fail;
         j.next_retry_at = t.next_retry_at;

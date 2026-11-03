@@ -528,17 +528,33 @@ pub fn hasActiveDownloadForGame(frame: *Frame, thread_id: u64) bool {
     return false;
 }
 
+/// True iff a failed job is counting down to an automatic retry (the
+/// History row's countdown needs frames while it does).
+pub fn anyRetryPending(dl: *downloads.Downloader) bool {
+    const snap = dl.snapshot();
+    defer dl.releaseSnapshot();
+    for (snap.jobs) |v| {
+        if (v.job.step == .failed and v.job.next_retry_at != null) return true;
+    }
+    return false;
+}
+
 /// Progress numbers of one download, copied out of the snapshot.
 pub const DlProgress = struct {
     id: u64,
+    step: downloads.model.Step,
     bytes_done: u64,
     bytes_total: ?u64,
     dl_speed: u64,
+    /// Verify / extract progress (see `Job.step_done`).
+    step_done: u64,
+    step_total: u64,
 };
 
-/// The first job of this game that is still fetching bytes (queued up
-/// to verifying). Seeding is skipped: the payload is complete. Null when
-/// nothing is in flight.
+/// The first job of this game that is still on its way to the library
+/// (queued up to extracting). Seeding is skipped: the payload is
+/// complete; installing is the UI-side worker's (`installActivityForGame`).
+/// Null when nothing is in flight.
 pub fn findLeechingJobForGame(frame: *Frame, thread_id: u64) ?DlProgress {
     const snap = frame.dl.snapshot();
     defer frame.dl.releaseSnapshot();
@@ -546,11 +562,14 @@ pub fn findLeechingJobForGame(frame: *Frame, thread_id: u64) ?DlProgress {
         const j = &v.job;
         if (j.game_thread_id != thread_id) continue;
         switch (j.step) {
-            .queued, .resolving, .fetching_metadata, .finding_peers, .downloading, .verifying => return .{
+            .queued, .resolving, .fetching_metadata, .finding_peers, .downloading, .verifying, .extracting => return .{
                 .id = j.id,
+                .step = j.step,
                 .bytes_done = j.bytes_done,
                 .bytes_total = j.bytes_total,
                 .dl_speed = j.dl_speed,
+                .step_done = j.step_done,
+                .step_total = j.step_total,
             },
             else => {},
         }

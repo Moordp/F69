@@ -172,10 +172,115 @@ pub const RowAction = union(enum) {
     accept: struct { id: u64, ok: bool },
 };
 
+/// What the UI-side install worker of a job is doing right now (the
+/// downloader hands the file over for the Install step). `files` = the
+/// counts are files applied (a mod), else bytes moved.
+pub const LiveInstall = struct {
+    running: bool = false,
+    done: u64 = 0,
+    total: u64 = 0,
+    files: bool = false,
+};
+
+/// One measured bar: `done / total` with a short label.
+pub const BarSpec = struct {
+    label: []const u8,
+    done: u64,
+    total: u64,
+    files: bool = false,
+
+    pub fn frac(self: BarSpec) f32 {
+        if (self.total == 0) return 0;
+        const d: f64 = @floatFromInt(self.done);
+        const t: f64 = @floatFromInt(self.total);
+        return @floatCast(@min(d / t, 1.0));
+    }
+
+    pub fn pct(self: BarSpec) u8 {
+        return downloads.progress.percent(self.done, self.total);
+    }
+};
+
+/// The measured bar of the job's current step, or null when the step
+/// has nothing to measure yet (then `isBusy` decides whether a sweep
+/// shows instead).
+pub fn stepBar(job: *const Job, live: LiveInstall) ?BarSpec {
+    return switch (job.step) {
+        .downloading, .paused, .fetching_metadata, .finding_peers => blk: {
+            const total = job.bytes_total orelse 0;
+            if (total == 0) break :blk null;
+            break :blk .{ .label = "Download", .done = job.bytes_done, .total = total };
+        },
+        .verifying => if (job.step_total > 0) .{ .label = "Verify", .done = job.step_done, .total = job.step_total } else null,
+        .extracting => if (job.step_total > 0) .{ .label = "Extract", .done = job.step_done, .total = job.step_total } else null,
+        .installing => if (live.running and live.total > 0) .{
+            .label = if (live.files) "Apply" else "Install",
+            .done = live.done,
+            .total = live.total,
+            .files = live.files,
+        } else null,
+        .queued, .resolving, .awaiting_user, .seeding, .done, .failed, .cancelled => null,
+    };
+}
+
+/// A step that is working with nothing to measure: shows the sweep bar.
+pub fn isBusy(step: Step) bool {
+    return switch (step) {
+        .queued, .resolving, .awaiting_user, .fetching_metadata, .finding_peers, .downloading, .verifying, .extracting, .installing => true,
+        .paused, .seeding, .done, .failed, .cancelled => false,
+    };
+}
+
+/// Seconds since `since` (0 when unknown or in the future).
+pub fn elapsedSeconds(now: i64, since: i64) u64 {
+    if (since <= 0 or now < since) return 0;
+    return @intCast(now - since);
+}
+
+test "stepBar: download needs a size; verify/extract use the step counters; install uses the live worker; busy steps sweep" {
+    var j: Job = .{ .id = 1, .group_id = 1, .kind = .game, .game_thread_id = 0, .source_href = "x", .engine = .aria2_http, .step = .downloading, .dest_dir = "" };
+    try std.testing.expect(stepBar(&j, .{}) == null);
+    try std.testing.expect(isBusy(j.step));
+    j.bytes_total = 200;
+    j.bytes_done = 50;
+    const dl = stepBar(&j, .{}).?;
+    try std.testing.expectEqualStrings("Download", dl.label);
+    try std.testing.expectEqual(@as(u8, 25), dl.pct());
+    try std.testing.expectEqual(@as(f32, 0.25), dl.frac());
+
+    j.step = .verifying;
+    try std.testing.expect(stepBar(&j, .{}) == null);
+    j.step_done = 30;
+    j.step_total = 40;
+    try std.testing.expectEqualStrings("Verify", stepBar(&j, .{}).?.label);
+    try std.testing.expectEqual(@as(u8, 75), stepBar(&j, .{}).?.pct());
+    j.step = .extracting;
+    try std.testing.expectEqualStrings("Extract", stepBar(&j, .{}).?.label);
+
+    j.step = .installing;
+    try std.testing.expect(stepBar(&j, .{}) == null);
+    try std.testing.expectEqualStrings("Install", stepBar(&j, .{ .running = true, .done = 1, .total = 4 }).?.label);
+    const ap = stepBar(&j, .{ .running = true, .done = 48, .total = 212, .files = true }).?;
+    try std.testing.expectEqualStrings("Apply", ap.label);
+    try std.testing.expect(ap.files);
+
+    j.step = .paused;
+    try std.testing.expect(!isBusy(j.step));
+    try std.testing.expectEqualStrings("Download", stepBar(&j, .{}).?.label);
+    j.step = .queued;
+    try std.testing.expect(stepBar(&j, .{}) == null);
+    try std.testing.expect(isBusy(j.step));
+    j.step = .done;
+    try std.testing.expect(!isBusy(j.step));
+
+    try std.testing.expectEqual(@as(u64, 0), elapsedSeconds(100, 0));
+    try std.testing.expectEqual(@as(u64, 0), elapsedSeconds(100, 200));
+    try std.testing.expectEqual(@as(u64, 42), elapsedSeconds(142, 100));
+}
+
 /// Display label + chip color for a download job's step (Design B chips).
 /// Labels come from `Step.label()`.
-pub fn statusChipSpec(step: Step, extracting: bool) struct { label: []const u8, color: tokens.Color } {
-    if (extracting) return .{ .label = Step.extracting.label(), .color = .{ .r = 0xC0, .g = 0x84, .b = 0x1F, .a = 0xff } };
+pub fn statusChipSpec(step: Step) struct { label: []const u8, color: tokens.Color } {
     const color: tokens.Color = switch (step) {
         .queued, .resolving, .fetching_metadata, .finding_peers => .{ .r = 0x55, .g = 0x6A, .b = 0x8A, .a = 0xff },
         .awaiting_user => .{ .r = 0xC0, .g = 0x84, .b = 0x1F, .a = 0xff },
@@ -244,12 +349,11 @@ pub fn renderJobRow(
     frame: *Frame,
     view: *const JobView,
     title: []const u8,
-    extracting: bool,
+    live: LiveInstall,
     ratio_target: f32,
     mode: RowMode,
     tagged: bool,
 ) RowAction {
-    _ = frame;
     const job = &view.job;
     const tg = struct {
         fn f(on: bool, name: []const u8) ?[]const u8 {
@@ -257,11 +361,10 @@ pub fn renderJobRow(
         }
     }.f;
     var action: RowAction = .none;
-    // An install worker still moving the file shows "Extracting" even
-    // while the stored step says "installing".
-    const shown_step: Step = if (extracting and job.step == .installing) .extracting else job.step;
+    const now = std.Io.Clock.Timestamp.now(frame.io, .real).raw.toSeconds();
+    const bar = stepBar(job, live);
     var trail_buf: [8]TrailChip = undefined;
-    const trail = trailFor(job.engine, shown_step, job.fail, &trail_buf);
+    const trail = trailFor(job.engine, job.step, job.fail, &trail_buf);
     var row = dvui.box(@src(), .{ .dir = .vertical }, .{
         .id_extra = job.id,
         .expand = .horizontal,
@@ -285,9 +388,17 @@ pub fn renderJobRow(
         // coloured status chip.
         const own_chip: ?usize = if (mode != .full and job.step != .paused) currentChip(trail) else null;
         if (own_chip) |ci| {
-            trailChip(trail[ci], job.id ^ @as(u64, @intCast(ci + 1)));
+            // The drawer chip carries the percentage: "Extract 52%".
+            var chip = trail[ci];
+            var lbl_buf: [32]u8 = undefined;
+            if (bar) |b| {
+                if (b.total > 0 and chip.state == .current) {
+                    chip.label = std.fmt.bufPrint(&lbl_buf, "{s} {d}%", .{ chip.label, b.pct() }) catch chip.label;
+                }
+            }
+            trailChip(chip, job.id ^ @as(u64, @intCast(ci + 1)));
         } else {
-            const spec = statusChipSpec(job.step, extracting);
+            const spec = statusChipSpec(job.step);
             comp.chip(@src(), .{
                 .label = spec.label,
                 .fill = spec.color,
@@ -417,30 +528,36 @@ pub fn renderJobRow(
 
     // History rows: one meta line, then done.
     if (mode == .history) {
-        renderHistoryLine(job, tagged);
+        renderHistoryLine(job, tagged, now);
         return action;
     }
 
-    // Download-progress bar — shown for jobs that haven't finished
-    // pulling bytes yet. Seeding rows skip this since the payload is
-    // already complete.
-    if (job.step != .seeding) {
-        renderProgressBar(.download, job, ratio_target);
+    // The current step's bar: measured when the step has a total
+    // (download, verify, extract, install), a sweep while it is working
+    // on something that has no measure (resolving, finding peers, …).
+    // Seeding rows skip it: the payload is complete.
+    if (bar) |b| {
+        renderBar(b.label, b.frac(), stepFill(job.step), job.id);
+    } else if (isBusy(job.step)) {
+        renderSweep(frame.io, job.step, job.id);
     }
 
     // Seed-ratio bar — shown for torrents (any status). Lets the user
-    // see how close we are to the 2.0× target both while leeching
+    // see how close we are to the ratio target both while leeching
     // (early progress) and while seeding (the finish line).
     if (isTorrent(job)) {
-        renderProgressBar(.ratio, job, ratio_target);
+        const total = job.bytes_total orelse 0;
+        const denom: f64 = @as(f64, @floatFromInt(total)) * ratio_target;
+        const frac: f32 = if (denom == 0) 0 else @floatCast(@min(@as(f64, @floatFromInt(job.bytes_uploaded)) / denom, 1.0));
+        renderBar("Seed", frac, .{ .r = 0x6D, .g = 0xC0, .b = 0x8B }, job.id ^ 0x5EED);
     }
 
-    // Live counters line — peers, speeds, ETA. Compact, single line.
+    // Live counters line — what the step is doing, how far, how long.
     {
         var info = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
         defer info.deinit();
         var line_buf: [256]u8 = undefined;
-        const line = composeStatsLine(&line_buf, job, ratio_target) catch "";
+        const line = composeStatsLine(&line_buf, job, bar, ratio_target, now) catch "";
         if (line.len > 0) {
             dvui.labelNoFmt(@src(), line, .{}, .{
                 .gravity_y = 0.5,
@@ -462,7 +579,7 @@ pub fn renderJobRow(
 
 /// "host · engine · size · duration" + " · " + the fail reason, the
 /// reason in its own label (tag `dl-history-reason` on the tagged row).
-fn renderHistoryLine(job: *const Job, tagged: bool) void {
+fn renderHistoryLine(job: *const Job, tagged: bool, now: i64) void {
     var line = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
     defer line.deinit();
     var meta_buf: [192]u8 = undefined;
@@ -471,6 +588,33 @@ fn renderHistoryLine(job: *const Job, tagged: bool) void {
         dvui.labelNoFmt(@src(), " \u{00B7} ", .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = style.labelDim() } });
         dvui.labelNoFmt(@src(), reason, .{}, .{ .gravity_y = 0.5, .style = .err, .tag = if (tagged) "dl-history-reason" else null });
     }
+    // An automatic retry is pending: count it down live.
+    var retry_buf: [48]u8 = undefined;
+    if (retryCountdown(&retry_buf, job, now)) |txt| {
+        dvui.labelNoFmt(@src(), " \u{00B7} ", .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = style.labelDim() } });
+        dvui.labelNoFmt(@src(), txt, .{}, .{ .gravity_y = 0.5, .color_text = .{ .color = tokens.toDvui(tokens.active.acc, dvui.Color) } });
+    }
+}
+
+/// "retrying in 23 s" / "retrying now" for a failed job with an automatic
+/// retry pending; null otherwise.
+pub fn retryCountdown(buf: []u8, job: *const Job, now: i64) ?[]const u8 {
+    if (job.step != .failed) return null;
+    const at = job.next_retry_at orelse return null;
+    if (at <= now) return "retrying now";
+    var e_buf: [24]u8 = undefined;
+    return std.fmt.bufPrint(buf, "retrying in {s}", .{components.humanElapsed(&e_buf, @intCast(at - now))}) catch null;
+}
+
+test "retryCountdown: only failed jobs with a retry pending" {
+    var j: Job = .{ .id = 1, .group_id = 1, .kind = .game, .game_thread_id = 0, .source_href = "x", .engine = .aria2_http, .step = .failed, .dest_dir = "" };
+    var buf: [48]u8 = undefined;
+    try std.testing.expect(retryCountdown(&buf, &j, 100) == null);
+    j.next_retry_at = 123;
+    try std.testing.expectEqualStrings("retrying in 23 s", retryCountdown(&buf, &j, 100).?);
+    try std.testing.expectEqualStrings("retrying now", retryCountdown(&buf, &j, 130).?);
+    j.step = .done;
+    try std.testing.expect(retryCountdown(&buf, &j, 100) == null);
 }
 
 /// Short label of the engine that ran a job.
@@ -547,59 +691,30 @@ test "history line: meta parts, duration, and the fail reason (message first, th
     try std.testing.expect(failReasonText(&j) == null);
 }
 
-const BarKind = enum { download, ratio };
+/// Fill colour of a step's bar (matches its status chip).
+fn stepFill(step: Step) dvui.Color {
+    return tokens.toDvui(statusChipSpec(step).color, dvui.Color);
+}
 
-/// Render one labelled progress bar. `kind = .download` fills against
-/// `bytes_done / bytes_total`; `kind = .ratio` fills against
-/// `bytes_uploaded / (target * bytes_total)`.
-///
-/// Uses dvui's built-in `progress` widget so the fill follows the
-/// parent's actual width (the prior hand-rolled bar fixed inner width
-/// at `pct * 4px`, which capped visually at ~400px wide — so on a
-/// wider Downloads pane the bar appeared to "stop at half" even when
-/// the job was past 50%).
-fn renderProgressBar(kind: BarKind, job: *const Job, ratio_target: f32) void {
-    const total = job.bytes_total orelse 0;
-    const frac: f32 = blk: switch (kind) {
-        .download => {
-            if (total == 0) break :blk 0.0;
-            const done_f: f64 = @floatFromInt(job.bytes_done);
-            const total_f: f64 = @floatFromInt(total);
-            break :blk @floatCast(@min(done_f / total_f, 1.0));
-        },
-        .ratio => {
-            if (total == 0) break :blk 0.0;
-            const denom: f64 = @as(f64, @floatFromInt(total)) * ratio_target;
-            if (denom == 0) break :blk 0.0;
-            const up_f: f64 = @floatFromInt(job.bytes_uploaded);
-            break :blk @floatCast(@min(up_f / denom, 1.0));
-        },
-    };
+const BAR_LABEL_W: f32 = 58;
 
+/// One labelled bar: `label` on the left, the fill on the right. Uses
+/// dvui's `progress` so the fill follows the parent's actual width.
+pub fn renderBar(label: []const u8, frac: f32, fill: dvui.Color, id: u64) void {
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
-        .id_extra = @intFromEnum(kind),
+        .id_extra = @intCast(id),
         .expand = .horizontal,
         .padding = .{ .x = 0, .y = 2, .w = 0, .h = 2 },
     });
     defer row.deinit();
-
-    const tag_text: []const u8 = switch (kind) {
-        .download => "DL ",
-        .ratio => "UP ",
-    };
-    dvui.labelNoFmt(@src(), tag_text, .{}, .{
-        .id_extra = @intFromEnum(kind),
-        .min_size_content = .{ .w = 30, .h = 14 },
+    dvui.labelNoFmt(@src(), label, .{}, .{
+        .id_extra = @intCast(id),
+        .min_size_content = .{ .w = BAR_LABEL_W, .h = 14 },
         .gravity_y = 0.5,
         .color_text = .{ .color = style.labelDim() },
     });
-
-    const fill_color: dvui.Color = switch (kind) {
-        .download => tokens.toDvui(tokens.active.acc, dvui.Color),
-        .ratio => .{ .r = 0x6D, .g = 0xC0, .b = 0x8B }, // green — "giving back"
-    };
-    dvui.progress(@src(), .{ .percent = frac, .color = fill_color }, .{
-        .id_extra = @intFromEnum(kind),
+    dvui.progress(@src(), .{ .percent = frac, .color = fill }, .{
+        .id_extra = @intCast(id),
         .expand = .horizontal,
         .min_size_content = .{ .w = 1, .h = 10 },
         .gravity_y = 0.5,
@@ -611,20 +726,86 @@ fn renderProgressBar(kind: BarKind, job: *const Job, ratio_target: f32) void {
     });
 }
 
-/// Format a one-line stats summary for a job. Adapts to plain HTTP vs
-/// torrent and to active vs idle.
-fn composeStatsLine(buf: []u8, job: *const Job, ratio_target: f32) ![]const u8 {
+/// The busy bar of a step with nothing to measure: the step's trail
+/// label on the left, a sweep on the right.
+fn renderSweep(io: std.Io, step: Step, id: u64) void {
+    renderSweepBar(io, busyLabel(step), stepFill(step), id);
+}
+
+/// A labelled sweep ("busy") bar in the same slot as `renderBar`.
+pub fn renderSweepBar(io: std.Io, label: []const u8, fill: dvui.Color, id: u64) void {
+    var row = dvui.box(@src(), .{ .dir = .horizontal }, .{
+        .id_extra = @intCast(id),
+        .expand = .horizontal,
+        .padding = .{ .x = 0, .y = 2, .w = 0, .h = 2 },
+    });
+    defer row.deinit();
+    dvui.labelNoFmt(@src(), label, .{}, .{
+        .id_extra = @intCast(id),
+        .min_size_content = .{ .w = BAR_LABEL_W, .h = 14 },
+        .gravity_y = 0.5,
+        .color_text = .{ .color = style.labelDim() },
+    });
+    components.sweepBar(@src(), io, id, fill, .{ .expand = .horizontal, .gravity_y = 0.5 });
+}
+
+/// Short bar label of a busy step.
+fn busyLabel(step: Step) []const u8 {
+    return switch (step) {
+        .queued => "Queued",
+        .resolving => "Resolve",
+        .awaiting_user => "Browser",
+        .fetching_metadata => "Metadata",
+        .finding_peers => "Peers",
+        .downloading => "Download",
+        .verifying => "Verify",
+        .extracting => "Extract",
+        .installing => "Install",
+        else => "",
+    };
+}
+
+/// Format a one-line stats summary for a job. Adapts to the step: bytes
+/// and speed while downloading, "done / total (pct) · elapsed" for the
+/// post-transfer steps, "step · elapsed" while waiting on something.
+fn composeStatsLine(buf: []u8, job: *const Job, bar: ?BarSpec, ratio_target: f32, now: i64) ![]const u8 {
     const total = job.bytes_total orelse 0;
     var dl_buf: [24]u8 = undefined;
     var up_buf: [24]u8 = undefined;
     var done_buf: [24]u8 = undefined;
     var total_buf: [24]u8 = undefined;
     var up_total_buf: [24]u8 = undefined;
+    var el_buf: [24]u8 = undefined;
     const dl_s = components.humanRate(&dl_buf, job.dl_speed);
     const up_s = components.humanRate(&up_buf, job.ul_speed);
     const done_s = components.humanBytes(&done_buf, job.bytes_done);
     const total_s = if (total > 0) components.humanBytes(&total_buf, total) else "?";
     const up_total_s = components.humanBytes(&up_total_buf, job.bytes_uploaded);
+    const elapsed = components.humanElapsed(&el_buf, elapsedSeconds(now, job.step_since));
+
+    // Post-transfer steps: what, how far, how long.
+    switch (job.step) {
+        .verifying, .extracting, .installing => {
+            const verb: []const u8 = switch (job.step) {
+                .verifying => "Checking the file",
+                .extracting => "Extracting",
+                else => if (bar != null and bar.?.files) "Applying the mod" else "Moving into the library",
+            };
+            if (bar) |b| {
+                if (b.files) return std.fmt.bufPrint(buf, "{s} \u{00B7} file {d} / {d} ({d}%) \u{00B7} {s}", .{ verb, b.done, b.total, b.pct(), elapsed });
+                var bd: [24]u8 = undefined;
+                var bt: [24]u8 = undefined;
+                return std.fmt.bufPrint(buf, "{s} \u{00B7} {s} / {s} ({d}%) \u{00B7} {s}", .{ verb, components.humanBytes(&bd, b.done), components.humanBytes(&bt, b.total), b.pct(), elapsed });
+            }
+            return std.fmt.bufPrint(buf, "{s} \u{00B7} {s}", .{ verb, elapsed });
+        },
+        .queued, .resolving, .awaiting_user => return std.fmt.bufPrint(buf, "{s} \u{00B7} {s}", .{ job.step.label(), elapsed }),
+        .fetching_metadata, .finding_peers => {
+            if (isTorrent(job)) return std.fmt.bufPrint(buf, "{s} \u{00B7} seeders {d}/{d} \u{00B7} {s}", .{ job.step.label(), job.seeders, job.peers, elapsed });
+            return std.fmt.bufPrint(buf, "{s} \u{00B7} {s}", .{ job.step.label(), elapsed });
+        },
+        else => {},
+    }
 
     if (isTorrent(job)) {
         const ratio: f32 = if (total == 0) 0 else @as(f32, @floatFromInt(job.bytes_uploaded)) / @as(f32, @floatFromInt(total));

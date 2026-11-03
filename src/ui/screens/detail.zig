@@ -403,10 +403,13 @@ fn renderHeroUpdate(frame: *Frame, game: *const library.Game) void {
     var buf: [48]u8 = undefined;
     const lbl = std.fmt.bufPrint(&buf, "Update to {s}", .{newer}) catch "Update";
     if (components.iconButton(@src(), lbl, entypo.cloud, .{ .gravity_y = 0.5, .tag = "hero-update" })) {
+        // A recipe with a fetchable source downloads at once; otherwise
+        // the Downloads tab lists the thread's links so the user picks
+        // one (Install from file stays in the Download menu).
         if (actions.hasAutoFetchableSource(frame, game.f95_thread_id)) {
             _ = actions.doDownloadGame(frame, game);
         } else {
-            actions.openManualInstallForUpdate(frame.state, newer);
+            openDownloadsTab(frame.state);
         }
     }
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
@@ -2796,18 +2799,14 @@ fn renderDetailStatusLine(frame: *Frame, game: *const library.Game) void {
         return;
     }
 
-    if (actions.isInstallingForGame(frame, game.f95_thread_id)) {
-        const pct_opt = actions.extractProgressForGame(frame, game.f95_thread_id);
-        var msg_buf: [96]u8 = undefined;
-        const msg: []const u8 = if (pct_opt) |p|
-            (std.fmt.bufPrint(&msg_buf, "Installing — extracting archive ({d}%).", .{p}) catch "Installing — extracting archive.")
-        else
-            "Installing — extracting archive in the background.";
+    if (actions.installActivityForGame(frame, game.f95_thread_id)) |act| {
+        var msg_buf: [160]u8 = undefined;
+        const msg: []const u8 = installActivityText(&msg_buf, act);
         renderStatusStrip(frame, .{
             .id = @intCast(game.f95_thread_id),
             .text = msg,
             .accent = tokens.toDvui(tokens.active.acc, dvui.Color),
-            .progress = if (pct_opt) |p| @as(u32, p) else null,
+            .progress = if (act.pct()) |p| @as(u32, p) else null,
             .view_link = false,
         });
         return;
@@ -2828,9 +2827,9 @@ fn renderDetailStatusLine(frame: *Frame, game: *const library.Game) void {
             } else if (has_auto) {
                 break :blk std.fmt.bufPrint(&msg_buf, "Update available: {s} — click Update to fetch.", .{newer}) catch "Update available.";
             } else if (auto_on) {
-                break :blk std.fmt.bufPrint(&msg_buf, "Update available: {s} — pick the new archive via Update. \u{00B7} auto-updates on", .{newer}) catch "Update available.";
+                break :blk std.fmt.bufPrint(&msg_buf, "Update available: {s} — click Update to choose a link. \u{00B7} auto-update needs a recipe for this game", .{newer}) catch "Update available.";
             } else {
-                break :blk std.fmt.bufPrint(&msg_buf, "Update available: {s} — pick the new archive via Update.", .{newer}) catch "Update available.";
+                break :blk std.fmt.bufPrint(&msg_buf, "Update available: {s} — click Update to choose a link.", .{newer}) catch "Update available.";
             }
         };
         renderIdleHint(game.f95_thread_id ^ 0xB1, msg);
@@ -2928,44 +2927,60 @@ fn renderStatusStrip(frame: *Frame, args: StatusStripArgs) void {
     });
     defer bar_outer.deinit();
 
-    {
-        const now_s = std.Io.Clock.Timestamp.now(frame.io, .real).raw.toSeconds();
-        const period_s: i64 = 2;
-        const phase = @rem(now_s, period_s);
-        const sweep_frac: f32 = @as(f32, @floatFromInt(phase)) / @as(f32, @floatFromInt(period_s));
-        const slug_w_frac: f32 = 0.25;
-        const left_pad_frac: f32 = sweep_frac * (1.0 - slug_w_frac);
-        if (left_pad_frac > 0) {
-            var pad = dvui.box(@src(), .{ .dir = .horizontal }, .{
-                .id_extra = args.id ^ 0x9001,
-                .min_size_content = .{ .w = @max(0.0, left_pad_frac * 400.0), .h = 8 },
-            });
-            pad.deinit();
-        }
-        var slug = dvui.box(@src(), .{ .dir = .horizontal }, .{
-            .id_extra = args.id ^ 0x9002,
-            .min_size_content = .{ .w = @max(8.0, slug_w_frac * 400.0), .h = 8 },
-            .background = true,
-            .color_fill = .{ .color = args.accent },
-            .corners = .all(1),
-        });
-        slug.deinit();
-    }
+    components.sweepBar(@src(), frame.io, args.id, args.accent, .{ .expand = .horizontal });
 }
 
-fn downloadProgressPct(job: actions.DlProgress) ?u32 {
+/// "Installing — extracting the archive (52%)." / "Installing — applying
+/// the mod (file 48 / 212)." / "Installing — moving the file into the
+/// library." (no measure yet).
+pub fn installActivityText(buf: []u8, act: actions.InstallActivity) []const u8 {
+    if (act.pct()) |p| {
+        if (act.files) return std.fmt.bufPrint(buf, "Installing \u{2014} {s} (file {d} / {d}).", .{ act.verb, act.done, act.total }) catch "Installing.";
+        return std.fmt.bufPrint(buf, "Installing \u{2014} {s} ({d}%).", .{ act.verb, p }) catch "Installing.";
+    }
+    return std.fmt.bufPrint(buf, "Installing \u{2014} {s}.", .{act.verb}) catch "Installing.";
+}
+
+test "installActivityText" {
+    var buf: [160]u8 = undefined;
+    try std.testing.expectEqualStrings("Installing \u{2014} extracting the archive (52%).", installActivityText(&buf, .{ .verb = "extracting the archive", .done = 52, .total = 100, .files = false }));
+    try std.testing.expectEqualStrings("Installing \u{2014} applying the mod (file 48 / 212).", installActivityText(&buf, .{ .verb = "applying the mod", .done = 48, .total = 212, .files = true }));
+    try std.testing.expectEqualStrings("Installing \u{2014} moving the file into the library.", installActivityText(&buf, .{ .verb = "moving the file into the library", .done = 0, .total = 0, .files = false }));
+}
+
+/// Whole percent of the step the job is on: bytes while downloading,
+/// the verify / extract counters after; null when there is no measure.
+pub fn downloadProgressPct(job: actions.DlProgress) ?u32 {
+    switch (job.step) {
+        .verifying, .extracting => {
+            if (job.step_total == 0) return null;
+            return downloads.progress.percent(job.step_done, job.step_total);
+        },
+        else => {},
+    }
     const total = job.bytes_total orelse 0;
     if (total == 0) return null;
     return @intCast(@min(@divTrunc(job.bytes_done * 100, total), 100));
 }
 
-fn downloadStatusText(job: actions.DlProgress) []const u8 {
+pub fn downloadStatusText(job: actions.DlProgress) []const u8 {
     const tmp = struct {
         var buf: [192]u8 = undefined;
     };
     var dl_buf: [24]u8 = undefined;
     var done_buf: [24]u8 = undefined;
     var total_buf: [24]u8 = undefined;
+    switch (job.step) {
+        .queued, .resolving, .fetching_metadata, .finding_peers => return std.fmt.bufPrint(&tmp.buf, "{s}\u{2026}", .{job.step.label()}) catch "Starting",
+        .verifying, .extracting => {
+            const verb: []const u8 = if (job.step == .verifying) "Checking the file" else "Extracting";
+            if (job.step_total == 0) return std.fmt.bufPrint(&tmp.buf, "{s}\u{2026}", .{verb}) catch "Working";
+            const d = components.humanBytes(&done_buf, job.step_done);
+            const t = components.humanBytes(&total_buf, job.step_total);
+            return std.fmt.bufPrint(&tmp.buf, "{s} {d}% \u{00B7} {s} / {s}", .{ verb, downloads.progress.percent(job.step_done, job.step_total), d, t }) catch verb;
+        },
+        else => {},
+    }
     const total = job.bytes_total orelse 0;
     const dl_s = components.humanRate(&dl_buf, job.dl_speed);
     const done_s = components.humanBytes(&done_buf, job.bytes_done);
@@ -2975,6 +2990,22 @@ fn downloadStatusText(job: actions.DlProgress) []const u8 {
         return std.fmt.bufPrint(&tmp.buf, "Downloading {d}% · ↓ {s} · {s} / {s}", .{ pct, dl_s, done_s, total_s }) catch "Downloading";
     }
     return std.fmt.bufPrint(&tmp.buf, "Downloading · ↓ {s} · {s}", .{ dl_s, done_s }) catch "Downloading";
+}
+
+test "downloadStatusText / downloadProgressPct follow the step" {
+    const base: actions.DlProgress = .{ .id = 1, .step = .downloading, .bytes_done = 50, .bytes_total = 200, .dl_speed = 0, .step_done = 0, .step_total = 0 };
+    try std.testing.expectEqual(@as(?u32, 25), downloadProgressPct(base));
+    var v = base;
+    v.step = .verifying;
+    try std.testing.expect(downloadProgressPct(v) == null);
+    try std.testing.expectEqualStrings("Checking the file\u{2026}", downloadStatusText(v));
+    v.step_done = 3;
+    v.step_total = 4;
+    try std.testing.expectEqual(@as(?u32, 75), downloadProgressPct(v));
+    v.step = .extracting;
+    try std.testing.expectEqualStrings("Extracting 75% \u{00B7} 3 B / 4 B", downloadStatusText(v));
+    v.step = .finding_peers;
+    try std.testing.expectEqualStrings("Finding peers\u{2026}", downloadStatusText(v));
 }
 
 // ============================================================
