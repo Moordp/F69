@@ -142,12 +142,13 @@ pub fn drainThreads(frame: *Frame) void {
             .toast => |t| frame.state.pushToast(kindMap(t.kind), t.msg),
             .work_done => |w| handleWorkDone(frame, w.activity_id, w.outcome),
             .io => |r| {
-                // Task 15 routes replies to the file cache. Until then
-                // nothing waits on a ticket: free the reply here.
-                // TODO(Task 15): a `done` reply for a copy/delete that
-                // carried an Activity must `book.finish` it, including
-                // "Stopped." and "Stopped before it started.".
-                threads.io_thread.freeReply(frame.events.alloc, r);
+                // The file cache takes the replies of its own reads and
+                // listings (and owns their bytes from then on). Nothing
+                // else waits on a ticket yet: free every other reply.
+                // TODO: a `done` reply for a copy/delete that carried an
+                // Activity must `book.finish` it, including "Stopped."
+                // and "Stopped before it started.".
+                if (!frame.files.onReply(r)) threads.io_thread.freeReply(frame.events.alloc, r);
                 continue;
             },
             .wake => {},

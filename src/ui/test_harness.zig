@@ -70,6 +70,8 @@ pub const Harness = struct {
     ui_events: threads.Events,
     book: threads.Book,
     io_thread: threads.IoThread,
+    /// The frame's file cache over `io_thread`.
+    files: types.FileCache,
     worker: threads.Worker,
     /// Submits every mod-queue enqueue to `worker` (as `runMainLoop`).
     mod_queue_hook: threads.ModQueueHook,
@@ -212,6 +214,8 @@ pub const Harness = struct {
             .data_root = self.info.data_root,
         });
         errdefer self.io_thread.deinit();
+        self.files = types.FileCache.init(gpa, &self.io_thread);
+        errdefer self.files.deinit();
         self.worker = threads.Worker.init(gpa, io, &self.book, &self.ui_events, .{
             .alloc = gpa,
             .io = io,
@@ -309,7 +313,7 @@ pub const Harness = struct {
         actions.freeSlideCache(&self.state, lib_alloc);
         actions.invalidatePresetCache(&self.state);
         actions.freeTestInstallJob(&self.state, self.io);
-        actions.freeThumbCache(&self.state, lib_alloc);
+        actions.freeRecipeSourceCache(&self.state);
         actions.freePostInstalled(&self.state, lib_alloc);
         actions.freeInstalledSet(&self.state, lib_alloc);
         actions.freePostInstallJobs(&self.state, lib_alloc);
@@ -331,6 +335,7 @@ pub const Harness = struct {
         // both, so leak them rather than free memory a live thread uses.
         const worker_detached = self.worker.detached;
         self.worker.deinit();
+        self.files.deinit();
         const io_detached = self.io_thread.detached;
         self.io_thread.deinit();
         if (!worker_detached and !io_detached) {
@@ -373,6 +378,7 @@ pub const Harness = struct {
             .book = &self.book,
             .work = &self.worker,
             .io_thread = &self.io_thread,
+            .files = &self.files,
             .events = &self.ui_events,
             .info = self.info,
         };

@@ -919,10 +919,26 @@ pub fn readMkxpZoom(io: Io, install_dir: []const u8) ?f32 {
     defer f.close(io);
     var buf: [32]u8 = undefined;
     const got = f.readPositionalAll(io, &buf, 0) catch return null;
-    if (got == 0) return null;
-    const text = std.mem.trim(u8, buf[0..got], " \t\r\n");
+    return parseMkxpZoom(buf[0..got]);
+}
+
+/// Parse the text of a `.mkxp-zoom` file (only its first 32 bytes, as
+/// `readMkxpZoom` reads). Null when empty or not a number; out-of-range
+/// values are clamped.
+pub fn parseMkxpZoom(bytes: []const u8) ?f32 {
+    const head = bytes[0..@min(bytes.len, 32)];
+    const text = std.mem.trim(u8, head, " \t\r\n");
+    if (text.len == 0) return null;
     const v = std.fmt.parseFloat(f32, text) catch return null;
     return std.math.clamp(v, MKXP_ZOOM_MIN, MKXP_ZOOM_MAX);
+}
+
+test "parseMkxpZoom: number, clamp, junk" {
+    try std.testing.expectEqual(@as(?f32, 1.5), parseMkxpZoom("1.50\n"));
+    try std.testing.expectEqual(@as(?f32, MKXP_ZOOM_MAX), parseMkxpZoom("9"));
+    try std.testing.expectEqual(@as(?f32, MKXP_ZOOM_MIN), parseMkxpZoom("0.1"));
+    try std.testing.expectEqual(@as(?f32, null), parseMkxpZoom(""));
+    try std.testing.expectEqual(@as(?f32, null), parseMkxpZoom("abc"));
 }
 
 /// Write the zoom override. Clamps the value to the allowed range

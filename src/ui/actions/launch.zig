@@ -1223,10 +1223,24 @@ pub fn shouldAutoUpdate(state: *const State, game: *const library.Game) bool {
 
 /// True iff a recipe exists for `game_id` AND it carries at least one
 /// auto-fetchable source (RPDL torrent or DDL URL). Mirror entries
-/// are link-lists, not auto-fetchable. Hits disk via the recipe
-/// repo — keep call sites gated on a cheap pre-check (e.g. only
-/// inside the recap-push branch, where version bumps are rare).
+/// are link-lists, not auto-fetchable. The result is cached per game in
+/// `State.recipe_source_cache`, so the recipe lookup (a file read and a
+/// ZON parse, on the UI thread) runs once per game, not once per frame.
+/// `invalidateRecipeSource` drops the entry when the recipe is saved.
+/// Stage C moves the one remaining lookup off the UI thread.
 pub fn hasAutoFetchableSource(frame: *Frame, game_id: u64) bool {
+    const state = frame.state;
+    if (state.recipe_source_cache) |*m| {
+        if (m.get(game_id)) |v| return v;
+    }
+    const v = lookupAutoFetchableSource(frame, game_id);
+    if (state.recipe_source_cache == null) state.recipe_source_cache = std.AutoHashMap(u64, bool).init(frame.lib.alloc);
+    // Out of memory: not cached, looked up again next call.
+    state.recipe_source_cache.?.put(game_id, v) catch {};
+    return v;
+}
+
+fn lookupAutoFetchableSource(frame: *Frame, game_id: u64) bool {
     const parsed_opt = frame.recipe_repo.findGameByThread(game_id) catch return false;
     var parsed = parsed_opt orelse return false;
     defer parsed.deinit();
@@ -1235,6 +1249,17 @@ pub fn hasAutoFetchableSource(frame: *Frame, game_id: u64) bool {
         .mirror => continue,
     };
     return false;
+}
+
+/// Drops the cached `hasAutoFetchableSource` result of one game (its
+/// recipe was just written).
+pub fn invalidateRecipeSource(state: *State, game_id: u64) void {
+    if (state.recipe_source_cache) |*m| _ = m.remove(game_id);
+}
+
+pub fn freeRecipeSourceCache(state: *State) void {
+    if (state.recipe_source_cache) |*m| m.deinit();
+    state.recipe_source_cache = null;
 }
 
 /// Auto-update readiness for a single game. Bundles two disk-hitting

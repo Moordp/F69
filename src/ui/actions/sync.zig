@@ -770,8 +770,8 @@ fn fetchAndWriteCover(job: *SyncJob, cover_url: []const u8) !void {
     const path = try coverPath(&path_buf, p.covers_dir, p.thread_id);
     try writeAtomic(p.io, path, ready);
 
-    // Also write the thumbnail. Failure here is non-fatal — the lazy
-    // path in `thumbBytes` will regenerate from the full-size file.
+    // Also write the thumbnail. Failure here is non-fatal: the strip
+    // shows a placeholder until the next sync writes it.
     writeThumbBeside(job.alloc, p.io, path, ready) catch |e| {
         std.log.scoped(.ui_actions).warn("cover thumb gen failed: {s}", .{@errorName(e)});
     };
@@ -1135,58 +1135,31 @@ pub fn freeSlideCache(state: *State, alloc: std.mem.Allocator) void {
     state.slide_cache_thread = null;
 }
 
-/// Return cached bytes for the thumbnail-strip slot at `idx` for the
-/// given thread. Slide 0 is the cover; 1..N are screenshots. Bytes
-/// are loaded lazily on first call per slot and stay cached for the
-/// lifetime of the user's stay on this game's detail page. Returns
-/// null when the file is missing on disk.
-pub fn thumbBytes(frame: *Frame, thread_id: u64, idx: usize) ?[]const u8 {
-    const state = frame.state;
-
-    if (state.thumb_cache_thread != thread_id) {
-        // Different game — drop the entire strip and reset.
-        for (&state.thumb_cache_bytes) |*slot| {
-            if (slot.*) |b| frame.lib.alloc.free(b);
-            slot.* = null;
-        }
-        state.thumb_cache_thread = thread_id;
-    }
-
-    if (idx >= state.thumb_cache_bytes.len) return null;
-
-    if (state.thumb_cache_bytes[idx] == null) {
-        // All image work happens at sync time — `.t` files are
-        // written alongside the full-size cover/screenshots by
-        // `writeThumbBeside`. If the thumb is missing here, the
-        // game was synced before the thumb pipeline existed; the
-        // renderer shows a placeholder. Re-sync (or a future
-        // "Fix images" button) regenerates everything.
-        var thumb_buf: [256]u8 = undefined;
-        const thumb_path = if (idx == 0)
-            (std.fmt.bufPrint(&thumb_buf, "{s}/{d}.t", .{ frame.info.covers_dir, thread_id }) catch return null)
-        else
-            (std.fmt.bufPrint(&thumb_buf, "{s}/{d}.s{d}.t", .{ frame.info.covers_dir, thread_id, idx }) catch return null);
-        state.thumb_cache_bytes[idx] = std.Io.Dir.cwd().readFileAlloc(
-            frame.io,
-            thumb_path,
-            frame.lib.alloc,
-            .limited(2 * 1024 * 1024),
-        ) catch null;
-    }
-    return state.thumb_cache_bytes[idx];
+/// Path of the thumbnail for strip slot `idx` of a game: slot 0 is the
+/// cover thumb `<covers>/<tid>.t`, slot n the screenshot thumb
+/// `<covers>/<tid>.s<n>.t` (written beside the full image by
+/// `writeThumbBeside`).
+pub fn thumbPath(buf: []u8, covers_dir: []const u8, thread_id: u64, idx: usize) ![]const u8 {
+    if (idx == 0) return std.fmt.bufPrint(buf, "{s}/{d}.t", .{ covers_dir, thread_id });
+    return std.fmt.bufPrint(buf, "{s}/{d}.s{d}.t", .{ covers_dir, thread_id, idx });
 }
 
-/// Drop the thumb-strip cache. Call on detail-page exit, when
-/// switching games (`thumbBytes` does this automatically), and on
-/// Sync (the on-disk bytes just got rewritten).
-pub fn freeThumbCache(state: *State, alloc: std.mem.Allocator) void {
-    for (&state.thumb_cache_bytes) |*slot| {
-        if (slot.*) |b| {
-            alloc.free(b);
-            slot.* = null;
-        }
-    }
-    state.thumb_cache_thread = null;
+/// Bytes of the thumbnail for strip slot `idx` (see `thumbPath`), from
+/// the frame's file cache. Null while the I/O thread reads it, and when
+/// the file is missing (a game synced before the thumb pipeline: the
+/// renderer shows a placeholder until a re-sync writes it).
+pub fn thumbBytes(frame: *Frame, thread_id: u64, idx: usize) ?[]const u8 {
+    var buf: [320]u8 = undefined;
+    const path = thumbPath(&buf, frame.info.covers_dir, thread_id, idx) catch return null;
+    return frame.files.get(path);
+}
+
+/// Forgets every cached thumb of one game (cover and screenshots), so
+/// the next frame reads the files a sync or image job just wrote.
+pub fn invalidateThumbs(frame: *Frame, thread_id: u64) void {
+    var buf: [320]u8 = undefined;
+    const prefix = std.fmt.bufPrint(&buf, "{s}/{d}.", .{ frame.info.covers_dir, thread_id }) catch return;
+    frame.files.invalidatePrefix(prefix);
 }
 
 /// Called once per frame. Iterates every parallel sync slot; for each
@@ -1231,9 +1204,8 @@ fn invalidateCachesForJob(frame: *Frame, job: *SyncJob) void {
     if (state.slide_cache_thread == p.thread_id) {
         freeSlideCache(state, frame.lib.alloc);
     }
-    if (state.thumb_cache_thread == p.thread_id) {
-        freeThumbCache(state, frame.lib.alloc);
-    }
+    // The sync may have rewritten this game's cover / screenshot thumbs.
+    invalidateThumbs(frame, p.thread_id);
     // The sync rewrote this game's download_sources rows.
     downloads_mod.invalidateCatalogue(state, p.thread_id);
 }
@@ -1984,9 +1956,7 @@ pub fn drainImageQueue(frame: *Frame) void {
         if (state.slide_cache_thread == p.thread_id) {
             freeSlideCache(state, frame.lib.alloc);
         }
-        if (state.thumb_cache_thread == p.thread_id) {
-            freeThumbCache(state, frame.lib.alloc);
-        }
+        invalidateThumbs(frame, p.thread_id);
 
         // Free payload-owned memory. `name` may be the empty literal
         // fallback when dupe failed — skip the free in that case.
@@ -2479,69 +2449,6 @@ fn prewarmWorker(job: *PrewarmJob) void {
             path,
             job.alloc,
             .limited(8 * 1024 * 1024),
-        ) catch continue;
-        job.alloc.free(bytes);
-    }
-}
-
-// ============================================================
-//  thumb pre-warmer — same trick, run on detail-page entry
-// ============================================================
-//
-// First frame of the detail page calls `thumbBytes` for every slot
-// in the ribbon strip — 20+ synchronous `readFileAlloc` calls. We
-// can't fill the in-memory cache from a worker (UI thread owns it),
-// but reading the files off-thread populates the OS page cache so
-// the UI-thread reads land in memory.
-
-const ThumbPrewarmJob = struct {
-    alloc: std.mem.Allocator,
-    io: std.Io,
-    covers_dir: []u8,
-    thread_id: u64,
-    count: usize,
-};
-
-/// Spawn a detached worker that reads every thumbnail file for the
-/// given game (slots 1..count). Slot 0 (the cover thumb) is already
-/// covered by `spawnCoverPrewarm` / `cover_cache`.
-pub fn spawnThumbPrewarm(
-    alloc: std.mem.Allocator,
-    io: std.Io,
-    covers_dir: []const u8,
-    thread_id: u64,
-    count: usize,
-) void {
-    if (count == 0) return;
-    const job = alloc.create(ThumbPrewarmJob) catch return;
-    const dir_owned = alloc.dupe(u8, covers_dir) catch {
-        alloc.destroy(job);
-        return;
-    };
-    job.* = .{ .alloc = alloc, .io = io, .covers_dir = dir_owned, .thread_id = thread_id, .count = count };
-    const thr = std.Thread.spawn(.{}, thumbPrewarmWorker, .{job}) catch {
-        alloc.free(dir_owned);
-        alloc.destroy(job);
-        return;
-    };
-    thr.detach();
-}
-
-fn thumbPrewarmWorker(job: *ThumbPrewarmJob) void {
-    job_mod.lowerWorkerPriority();
-    defer {
-        job.alloc.free(job.covers_dir);
-        job.alloc.destroy(job);
-    }
-    var buf: [256]u8 = undefined;
-    var i: usize = 1;
-    while (i <= job.count) : (i += 1) {
-        const path = std.fmt.bufPrint(&buf, "{s}/{d}.s{d}.t", .{ job.covers_dir, job.thread_id, i }) catch continue;
-        const bytes = std.Io.Dir.cwd().readFileAlloc(
-            job.io,
-            path,
-            job.alloc,
-            .limited(2 * 1024 * 1024),
         ) catch continue;
         job.alloc.free(bytes);
     }

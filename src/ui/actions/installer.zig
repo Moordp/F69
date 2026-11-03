@@ -543,7 +543,11 @@ pub fn drainModJobs(frame: *Frame) void {
     // failure) may have mutated the install tracker — drop the
     // mods-page render cache so the next frame reads fresh installed/
     // load_index state.
-    if (toast_n > 0) mods_act.freeModsPageCacheState(state, frame.lib.alloc);
+    if (toast_n > 0) {
+        mods_act.freeModsPageCacheState(state, frame.lib.alloc);
+        // Same for the cached tracker bytes the Diagnostics screen shows.
+        frame.files.invalidateSuffix("/.f69-mods.json");
+    }
 
     frame.mod_jobs.drainFinished();
 }

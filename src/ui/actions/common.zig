@@ -369,6 +369,8 @@ pub fn addGuideForGame(frame: *Frame, thread_id: u64) void {
     const dst_path = uniqueGuidePath(alloc, frame.io, guides_dir, base) catch return;
     defer alloc.free(dst_path);
 
+    // A failed copy may still leave a partial file: list the dir again.
+    defer frame.files.invalidate(guides_dir);
     copyFile(frame.io, src_path, dst_path) catch |e| {
         var buf: [256]u8 = undefined;
         const m = std.fmt.bufPrint(&buf, "Guide copy failed: {s}", .{@errorName(e)}) catch "Guide copy failed";
@@ -397,6 +399,7 @@ pub fn removeGuide(frame: *Frame, thread_id: u64, filename: []const u8) void {
     defer alloc.free(guides_dir);
     const full = std.fmt.allocPrint(alloc, "{s}/{s}", .{ guides_dir, filename }) catch return;
     defer alloc.free(full);
+    defer frame.files.invalidate(guides_dir);
     std.Io.Dir.cwd().deleteFile(frame.io, full) catch |e| {
         var buf: [192]u8 = undefined;
         const m = std.fmt.bufPrint(&buf, "Guide delete failed: {s}", .{@errorName(e)}) catch "Guide delete failed";
@@ -469,30 +472,32 @@ pub const GuideEntry = struct {
     name: []const u8,
 };
 
-/// Walk the guides dir for `thread_id` and collect every file
-/// found. Caller frees via `freeGuides`. Missing dir → empty list,
-/// not an error (guides are optional per game).
-pub fn listGuides(frame: *Frame, thread_id: u64) ![]GuideEntry {
+/// Every file in the guides dir of `thread_id`, from the frame's file
+/// cache (the I/O thread lists the folder). Null while the listing is
+/// pending. Missing dir → empty list, not an error (guides are optional
+/// per game). The names are copies: caller frees via `freeGuides`, and
+/// they stay valid when a click in the same frame invalidates the dir.
+pub fn listGuides(frame: *Frame, thread_id: u64) !?[]GuideEntry {
     const alloc = frame.lib.alloc;
     const guides_dir = try guidesDirFor(alloc, frame.info.library_root, thread_id);
     defer alloc.free(guides_dir);
 
-    var dir = std.Io.Dir.cwd().openDir(frame.io, guides_dir, .{ .iterate = true }) catch return &.{};
-    defer dir.close(frame.io);
+    const entries = frame.files.getDir(guides_dir) orelse return null;
 
     var out: std.ArrayList(GuideEntry) = .empty;
     errdefer {
         for (out.items) |g| alloc.free(g.name);
         out.deinit(alloc);
     }
-
-    var it = dir.iterate();
-    while (it.next(frame.io) catch null) |entry| {
+    for (entries) |entry| {
         if (entry.kind != .file and entry.kind != .unknown) continue;
         const dup = try alloc.dupe(u8, entry.name);
-        try out.append(alloc, .{ .name = dup });
+        out.append(alloc, .{ .name = dup }) catch |e| {
+            alloc.free(dup);
+            return e;
+        };
     }
-    return out.toOwnedSlice(alloc);
+    return try out.toOwnedSlice(alloc);
 }
 
 pub fn freeGuides(alloc: std.mem.Allocator, guides: []GuideEntry) void {

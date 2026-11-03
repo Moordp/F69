@@ -26,6 +26,7 @@ const state_mod = @import("../state.zig");
 const owned_types = @import("../owned.zig");
 const common = @import("common.zig");
 const threads_act = @import("threads.zig");
+const launch_act = @import("launch.zig");
 const reanalyse_job = @import("../threads/jobs/reanalyse.zig");
 
 const Frame = types.Frame;
@@ -1316,6 +1317,7 @@ pub fn ensureGameRecipeOnDisk(frame: *Frame, game: *const library.Game) !void {
         .engine_version = null,
     });
     try frame.recipe_repo.saveGame(&derived);
+    launch_act.invalidateRecipeSource(frame.state, game.f95_thread_id);
     log.info("auto-saved game recipe for thread {d}", .{game.f95_thread_id});
 }
 

@@ -106,7 +106,13 @@ pub const Tracker = struct {
             else => return errs.Error.FileWriteFailed,
         };
         defer alloc.free(bytes);
+        return parse(alloc, bytes);
+    }
 
+    /// Parse tracker bytes (one JSON entry per line) as `load` does.
+    /// Bad lines are skipped. `entries` is allocator-owned (caller
+    /// invokes `InstallLog.deinit`); `bytes` is not kept.
+    pub fn parse(alloc: std.mem.Allocator, bytes: []const u8) errs.Error!dom.InstallLog {
         var entries: std.ArrayList(dom.InstallLog.Entry) = .empty;
         errdefer {
             for (entries.items) |e| {

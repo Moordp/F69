@@ -26,6 +26,8 @@ const dvui = @import("dvui");
 const state_mod = @import("state.zig");
 const mod_job_queue = @import("mod_job_queue.zig");
 pub const threads = @import("threads/threads.zig");
+pub const file_cache = @import("file_cache.zig");
+pub const FileCache = file_cache.FileCache;
 
 pub const State = state_mod.State;
 
@@ -116,6 +118,11 @@ pub const Frame = struct {
     /// The I/O thread. `send` an `IoRequest` with a ticket; the reply
     /// arrives as `.io` on `events`.
     io_thread: *threads.IoThread,
+    /// Files and folder listings read by the I/O thread. A frame reads
+    /// small files (thumbs, guides, trackers, `.mkxp-zoom`) through this,
+    /// never from disk itself. Code that writes such a file invalidates
+    /// its path.
+    files: *FileCache,
     /// Worker-to-UI event mailbox, drained first in every frame by
     /// `actions.drainThreads`.
     events: *threads.Events,

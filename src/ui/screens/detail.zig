@@ -297,12 +297,11 @@ fn renderBannerHero(frame: *Frame, game: *const library.Game) void {
     const t = tokens.active;
     const HERO_H: f32 = 346; // +20% taller banner
 
-    // Per-game gallery reset + thumbnail prewarm (mirrors the old carousel).
+    // Per-game gallery reset (mirrors the old carousel).
     if (state.carousel_for_thread != game.f95_thread_id) {
         state.carousel_index = 0;
         state.carousel_for_thread = game.f95_thread_id;
         actions.freeSlideCache(state, frame.lib.alloc);
-        actions.spawnThumbPrewarm(frame.lib.alloc, frame.io, frame.info.covers_dir, game.f95_thread_id, game.screenshots.len);
     }
     const total: usize = 1 + game.screenshots.len; // slot 0 = cover, 1.. = screenshots
     const idx = @min(state.carousel_index, total - 1);
@@ -1516,7 +1515,7 @@ fn renderImagePopup(frame: *Frame, game: *const library.Game) void {
         var i: usize = 0;
         while (i < total) : (i += 1) {
             const tb = actions.thumbBytes(frame, game.f95_thread_id, i);
-            if (renderRibbonThumb(tb, i, i == idx, game.f95_thread_id)) state.carousel_index = i;
+            if (renderRibbonThumb(tb, i, i == idx, game.f95_thread_id, null)) state.carousel_index = i;
         }
     }
 }
@@ -2229,8 +2228,8 @@ fn renderPartOffer(frame: *Frame, game: *const library.Game) void {
 // Files live under `<library_root>/<thread_id>/guides/`. No DB row —
 // the directory IS the source of truth. Crud actions live in
 // `actions/common.zig` (`addGuideForGame`, `openGuide`, `removeGuide`,
-// `listGuides`). The tab lists every file in that dir each render
-// (small N, cheap walk) and lets the user open files in their own
+// `listGuides`). The tab lists every file in that dir (the listing is
+// cached in `frame.files`, read by the I/O thread) and lets the user open files in their own
 // PDF/EPUB/HTML viewer via xdg-open (reuses `openExternalUrl`).
 fn renderGuidesTab(frame: *Frame, game: *const library.Game) void {
     const alloc = frame.lib.alloc;
@@ -2250,12 +2249,13 @@ fn renderGuidesTab(frame: *Frame, game: *const library.Game) void {
     }
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 8 } });
 
-    // List of guides — re-walked every frame. Cheap because guides
-    // dirs hold a handful of files at most.
-    const guides = actions.listGuides(frame, game.f95_thread_id) catch {
+    // List of guides, from the file cache (the I/O thread lists the
+    // folder). Nothing shows until the first listing arrives.
+    const guides_opt = actions.listGuides(frame, game.f95_thread_id) catch {
         dvui.label(@src(), "Couldn't read the guides directory.", .{}, .{ .color_text = .{ .color = helpTextColor() } });
         return;
     };
+    const guides = guides_opt orelse return;
     defer actions.freeGuides(alloc, guides);
 
     if (guides.len == 0) {
@@ -2576,7 +2576,12 @@ fn renderMkxpZSettingsRow(frame: *Frame, game: *library.Game) void {
     dvui.label(@src(), "Window zoom (mkxp-z):", .{}, .{ .gravity_y = 0.5 });
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 8, .h = 1 } });
 
-    const current_zoom = convert_mod.rpgm.readMkxpZoom(frame.io, install.install_path) orelse convert_mod.rpgm.MKXP_ZOOM_DEFAULT;
+    // `.mkxp-zoom` comes from the file cache (read by the I/O thread);
+    // until it arrives, and when there is none, the default shows.
+    var zoom_buf: [640]u8 = undefined;
+    const zoom_path = std.fmt.bufPrint(&zoom_buf, "{s}/{s}", .{ install.install_path, convert_mod.rpgm.MKXP_ZOOM_STATE_FILE }) catch return;
+    const zoom_bytes = frame.files.getMax(zoom_path, 4096);
+    const current_zoom = (if (zoom_bytes) |b| convert_mod.rpgm.parseMkxpZoom(b) else null) orelse convert_mod.rpgm.MKXP_ZOOM_DEFAULT;
     var picked: usize = zoomToStepIdx(current_zoom);
     const before = picked;
     if (style.dropdown(@src(), MKXP_ZOOM_LABELS[0..], .{ .choice = &picked }, .{}, .{
@@ -2588,6 +2593,7 @@ fn renderMkxpZSettingsRow(frame: *Frame, game: *library.Game) void {
             convert_mod.rpgm.writeMkxpZoom(frame.io, install.install_path, new_zoom) catch |e| {
                 std.log.scoped(.ui_detail).warn("mkxp zoom: write .mkxp-zoom failed: {s}", .{@errorName(e)});
             };
+            frame.files.invalidate(zoom_path);
             // Reuse the existing Convert dispatch — for mkxp-z that's
             // a cheap operation (relinks, re-writes launcher/json) so
             // doing the full Convert on a dropdown change is fine.
@@ -3183,13 +3189,15 @@ fn renderRibbon(frame: *Frame, game: *const library.Game) void {
     while (i < total) : (i += 1) {
         const bytes = actions.thumbBytes(frame, game.f95_thread_id, i);
         const is_active = (state.carousel_index == i);
-        if (renderRibbonThumb(bytes, i, is_active, game.f95_thread_id)) {
+        if (renderRibbonThumb(bytes, i, is_active, game.f95_thread_id, if (i == 0) "detail-ribbon-thumb" else null)) {
             state.carousel_index = i;
         }
     }
 }
 
-fn renderRibbonThumb(bytes_opt: ?[]const u8, idx: usize, is_active: bool, thread_id: u64) bool {
+/// `tag` (tests) goes on the image only, so it is visible once the
+/// thumb's bytes have arrived, not on the placeholder.
+fn renderRibbonThumb(bytes_opt: ?[]const u8, idx: usize, is_active: bool, thread_id: u64, tag: ?[]const u8) bool {
     const id_extra: usize = (@as(usize, @intCast(thread_id)) << 8) | (idx & 0xff) | 0x10000000_0000_0000;
     const border = if (is_active)
         tokens.toDvui(tokens.active.acc, dvui.Color)
@@ -3201,9 +3209,9 @@ fn renderRibbonThumb(bytes_opt: ?[]const u8, idx: usize, is_active: bool, thread
             .imageFile = .{
                 .bytes = bytes,
                 .name = "ribbon-thumb",
-                // Thumb-strip slots are freed when switching games; the
-                // allocator may hand back the same pointer for the new
-                // game's thumbs. Hash bytes so dvui detects the change.
+                // Cached thumbs are freed on invalidation / eviction; the
+                // allocator may hand back the same pointer for other
+                // bytes. Hash bytes so dvui detects the change.
                 .invalidation = .bytes,
             },
         };
@@ -3214,6 +3222,7 @@ fn renderRibbonThumb(bytes_opt: ?[]const u8, idx: usize, is_active: bool, thread
             .shrink = .ratio,
         }, .{
             .id_extra = id_extra,
+            .tag = tag,
             .min_size_content = aspect_min,
             .max_size_content = .{ .w = RIBBON_THUMB_W, .h = RIBBON_THUMB_H },
             .expand = .ratio,
@@ -3248,18 +3257,8 @@ fn renderCarousel(frame: *Frame, game: *const library.Game) void {
         state.carousel_index = 0;
         state.carousel_for_thread = game.f95_thread_id;
         actions.freeSlideCache(state, frame.lib.alloc);
-        // Warm the OS page cache for every thumbnail of this game so
-        // the ribbon-strip's first paint doesn't burn 20+ sync reads
-        // on the UI thread. The cover thumb itself goes through
-        // `cover_cache` and is already warm if the user came from the
-        // library grid.
-        actions.spawnThumbPrewarm(
-            frame.lib.alloc,
-            frame.io,
-            frame.info.covers_dir,
-            game.f95_thread_id,
-            game.screenshots.len,
-        );
+        // Thumbnails come from `frame.files` (read by the I/O thread),
+        // so the strip's first paint does no disk reads.
     }
 
     const total: usize = 1 + game.screenshots.len;

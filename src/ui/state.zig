@@ -460,12 +460,6 @@ pub const COVER_PREWARM: usize = 96;
 /// Concurrent async cover-thumbnail loaders. A small pool: enough to
 /// fill a fresh viewport over a few frames without flooding the FS.
 pub const COVER_LOAD_WORKERS: usize = 6;
-/// Capacity of the per-game thumbnail-strip cache. Cover (idx 0) +
-/// up to ~127 screenshots. Some games (Max's Life: 23, popular RPGs:
-/// 27+) ship enough preview images that the old 21-slot cap silently
-/// returned null for thumbs past index 20, even though `.s<N>.t` was
-/// on disk. 128 slots costs 1 KB of pointers in State — trivial.
-pub const THUMB_CACHE_CAP: usize = 128;
 /// Capacity of the per-game full-resolution slide cache. Slot 0 holds
 /// the cover; 1..N hold screenshots. Capped at 32 — comfortably covers
 /// the typical 0..20-screenshot range with margin, and bounds the
@@ -743,13 +737,11 @@ pub const State = struct {
     /// for sequential carousel navigation, and keeps the UI thread off
     /// the read syscall.
     slide_load_job: ?*owned.SlideLoadJob = null,
-    /// Thumb-strip cache. Holds bytes for every slide of the active
-    /// game so the ribbon under the carousel doesn't re-read 21 files
-    /// per frame. Fixed-size array keyed by slide idx (0 = cover,
-    /// 1..N = screenshots). Filled lazily on first paint, freed on
-    /// thread change / detail-page exit.
-    thumb_cache_thread: ?u64 = null,
-    thumb_cache_bytes: [THUMB_CACHE_CAP]?[]u8 = @splat(null),
+    /// `actions.hasAutoFetchableSource` per game (thread id → result),
+    /// so the Tools status line does not parse the recipe ZON every
+    /// frame. Filled on first use; an entry is dropped when that game's
+    /// recipe is saved. Freed by `actions.freeRecipeSourceCache`.
+    recipe_source_cache: ?std.AutoHashMap(u64, bool) = null,
     /// Active tab inside the detail screen.
     detail_tab: Tab = .overview,
     /// The Downloads tab's classified link catalogue for

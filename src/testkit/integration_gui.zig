@@ -254,6 +254,62 @@ test "layer2: detail screen renders + tab click switches tab (F0 interaction)" {
     tlog("L2-detail: OK", .{});
 }
 
+test "layer2: detail ribbon thumbs arrive through the file cache, never read in a frame" {
+    tlog("START: L2-ribbon-thumbs", .{});
+    // The old per-game thumb array (read synchronously with
+    // `readFileAlloc` inside `thumbBytes`) is gone; thumbs come from
+    // `frame.files`, which only the I/O thread fills.
+    comptime std.debug.assert(!@hasField(ui.State, "thumb_cache_bytes"));
+    comptime std.debug.assert(!@hasField(ui.State, "thumb_cache_thread"));
+    const gpa = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(8) });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var env = try TestEnv.init(gpa, "layer2-ribbon-thumbs");
+    defer env.deinit();
+    var t = try dvui.testing.init(.{ .allocator = gpa, .io = io, .window_size = .{ .w = 1280, .h = 1200 } });
+    defer t.deinit();
+    ui.registerBundledFonts(t.window);
+    var h = try ui.Harness.init(gpa, io, t.window, env.root);
+    defer h.deinit();
+
+    const tid: u64 = 9;
+    const shots = [_][]const u8{"https://example.invalid/s1.jpg"};
+    _ = try h.lib.insertIfMissing(&.{ .f95_thread_id = tid, .name = "Ribbon Game", .developer = "Dev", .engine = .renpy, .screenshots = &shots });
+    try h.reloadGames();
+    // The `.t` thumbs a sync writes beside the cover and screenshot.
+    var pbuf: [512]u8 = undefined;
+    const png = @embedFile("testdata/cover.png");
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try ui.thumbPath(&pbuf, h.info.covers_dir, tid, 0), .data = png });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try ui.thumbPath(&pbuf, h.info.covers_dir, tid, 1), .data = png });
+
+    var fr = h.frame();
+    g_frame = &fr;
+    defer g_frame = null;
+    h.state.selected_thread = tid;
+    h.state.screen = .detail;
+
+    // First frame: the cache only sent the reads, so the strip shows
+    // placeholders (a synchronous read would have drawn the thumb now).
+    _ = try dvui.testing.step(renderFrame);
+    try std.testing.expect(dvui.tagGet("detail-ribbon-thumb") == null);
+
+    var seen_at: ?usize = null;
+    var i: usize = 1;
+    while (i <= 20) : (i += 1) {
+        io.sleep(std.Io.Duration.fromMilliseconds(20), .real) catch {};
+        _ = try dvui.testing.step(renderFrame);
+        if (dvui.tagGet("detail-ribbon-thumb")) |d| if (d.visible) {
+            seen_at = i;
+            break;
+        };
+    }
+    tlog("L2-ribbon-thumbs: thumb visible after {?d} frames", .{seen_at});
+    try std.testing.expect(seen_at != null);
+    try std.testing.expectEqualStrings(png, h.files.get(try ui.thumbPath(&pbuf, h.info.covers_dir, tid, 0)).?);
+    tlog("L2-ribbon-thumbs: OK", .{});
+}
+
 test "layer2: universal mods screen renders + add slide-over opens" {
     tlog("START: L2-mods", .{});
     const gpa = std.testing.allocator;

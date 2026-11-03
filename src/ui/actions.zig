@@ -95,7 +95,8 @@ pub const applySetThreadUrl = sync.applySetThreadUrl;
 pub const slideBytes = sync.slideBytes;
 pub const freeSlideCache = sync.freeSlideCache;
 pub const thumbBytes = sync.thumbBytes;
-pub const freeThumbCache = sync.freeThumbCache;
+pub const thumbPath = sync.thumbPath;
+pub const invalidateThumbs = sync.invalidateThumbs;
 pub const drainSync = sync.drainSync;
 pub const drainFastCheck = sync.drainFastCheck;
 pub const setImageCpuLimit = sync.setImageCpuLimit;
@@ -121,7 +122,6 @@ pub const coverFullBytes = sync.coverFullBytes;
 pub const freeCoverCache = sync.freeCoverCache;
 pub const freeCoverLoads = sync.freeCoverLoads;
 pub const spawnCoverPrewarm = sync.spawnCoverPrewarm;
-pub const spawnThumbPrewarm = sync.spawnThumbPrewarm;
 
 // ---- Update check + importers ----
 pub const startUpdateCheck = imports.startUpdateCheck;
@@ -276,6 +276,8 @@ pub const applyCompatFix = launch.applyCompatFix;
 pub const startCompatFix = launch.startCompatFix;
 pub const shouldAutoUpdate = launch.shouldAutoUpdate;
 pub const hasAutoFetchableSource = launch.hasAutoFetchableSource;
+pub const freeRecipeSourceCache = launch.freeRecipeSourceCache;
+pub const invalidateRecipeSource = launch.invalidateRecipeSource;
 pub const lookupVersionFromArchiveSha = launch.lookupVersionFromArchiveSha;
 pub const openManualInstallForUpdate = launch.openManualInstallForUpdate;
 pub const doConvertGame = launch.doConvertGame;

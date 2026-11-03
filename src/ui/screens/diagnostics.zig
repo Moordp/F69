@@ -163,7 +163,10 @@ pub fn diagnosticsScreen(frame: *Frame) !bool {
         if (inst_opt) |inst| {
             var tracker_path_buf: [768]u8 = undefined;
             const tracker_path = std.fmt.bufPrint(&tracker_path_buf, "{s}/.f69-mods.json", .{inst.install_path}) catch return false;
-            var log_obj = installer_mod.Tracker.load(frame.lib.alloc, frame.io, tracker_path) catch installer_mod.InstallLog{ .entries = &.{} };
+            // Bytes from the file cache (read by the I/O thread); empty
+            // until they arrive and when the tracker file is missing.
+            const tracker_bytes = frame.files.get(tracker_path) orelse "";
+            var log_obj = installer_mod.Tracker.parse(frame.lib.alloc, tracker_bytes) catch installer_mod.InstallLog{ .entries = &.{} };
             defer log_obj.deinit(frame.lib.alloc);
 
             var hb: [128]u8 = undefined;

@@ -47,6 +47,7 @@ test {
     _ = @import("threads/events.zig");
     _ = @import("threads/work_thread.zig");
     _ = @import("threads/io_thread.zig");
+    _ = @import("file_cache.zig");
     _ = @import("threads/threads.zig");
     _ = @import("threads/jobs/convert.zig");
     _ = @import("threads/jobs/decrypt.zig");
@@ -77,6 +78,8 @@ pub const Filters = state_mod.Filters;
 pub const Screen = state_mod.Screen;
 /// Thread pieces (activity views/status) for the integration tests.
 pub const threads = types.threads;
+pub const FileCache = types.FileCache;
+pub const thumbPath = actions.thumbPath;
 pub const recoverModJobsFromDisk = actions.recoverModJobsFromDisk;
 pub const startSyncAll = actions.startSyncAll;
 pub const syncGame = actions.syncGame;
@@ -310,7 +313,7 @@ pub fn runMainLoop(
         actions.freeSlideCache(&state, lib.alloc);
         actions.invalidatePresetCache(&state);
         actions.freeTestInstallJob(&state, io);
-        actions.freeThumbCache(&state, lib.alloc);
+        actions.freeRecipeSourceCache(&state);
         actions.freePostInstalled(&state, lib.alloc);
         actions.freeInstalledSet(&state, lib.alloc);
         actions.freePostInstallJobs(&state, lib.alloc);
@@ -370,6 +373,11 @@ pub fn runMainLoop(
         }
         io_thread.deinit();
     }
+    // UI-side file cache over the I/O thread. Freed before the I/O
+    // thread stops (defers run in reverse); replies still queued after
+    // that are freed by `ui_events.deinit`.
+    var files = types.FileCache.init(gpa, &io_thread);
+    defer files.deinit();
     var worker = threads.Worker.init(gpa, io, &book, &ui_events, .{
         .alloc = gpa,
         .io = io,
@@ -508,6 +516,7 @@ pub fn runMainLoop(
                 .book = &book,
                 .work = &worker,
                 .io_thread = &io_thread,
+                .files = &files,
                 .events = &ui_events,
                 .info = info,
             };
@@ -579,6 +588,7 @@ pub fn runMainLoop(
             .book = &book,
             .work = &worker,
             .io_thread = &io_thread,
+            .files = &files,
             .events = &ui_events,
             .info = info,
         };
