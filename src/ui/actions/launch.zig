@@ -918,8 +918,9 @@ fn freeOverridesList(alloc: std.mem.Allocator, list: *std.ArrayList(sandbox_mod.
 //
 // Callable from any UI button. The result of `scanCompatForInstall`
 // is owned by the caller and freed via the matching free helper.
-// `applyCompatFix` and `undoCompatFix` persist their changes to the
-// library DB so subsequent launches consult the updated state.
+// The apply/undo file work runs on the compute thread
+// (`startCompatFix`, `threads/jobs/*.zig`); `recordCompatFix` writes the
+// DB row on the UI thread so later launches see the updated state.
 
 /// Scan an install's tree against every loaded compat recipe.
 /// Returned slice is owned by the caller; free with
@@ -1004,119 +1005,6 @@ pub fn startCompatFix(
     return true;
 }
 
-/// Result of `autoApplyCompatAfterConvert`. `applied` counts both
-/// fresh applications and sha-mismatch re-applications. `failed` is
-/// best-effort — individual recipe failures are logged but never
-/// surface as a hard error to the Convert path; we'd rather complete
-/// the Convert with partial compat than abort.
-pub const AutoApplyCompatResult = struct {
-    applied: u32 = 0,
-    reapplied: u32 = 0,
-    failed: u32 = 0,
-};
-
-/// After a successful Convert, scan the install against every compat
-/// recipe and apply each that is .unfixed. Also re-apply any .fixed
-/// recipe whose bundled sha has changed since the original apply —
-/// this covers the case where f69 ships a recipe upgrade and the
-/// user's install still has the old fix recorded.
-///
-/// Gated by `state.auto_apply_compat`. Caller should consult that
-/// before invoking. Returns counts for status reporting.
-pub fn autoApplyCompatAfterConvert(
-    frame: *Frame,
-    install_id: *const [36]u8,
-    install_root: []const u8,
-) AutoApplyCompatResult {
-    var res = AutoApplyCompatResult{};
-
-    const id_slice: []const u8 = install_id[0..];
-    const applied = frame.lib.listAppliedCompat(id_slice) catch |e| {
-        log.warn("auto-apply-compat: list applied failed: {s}", .{@errorName(e)});
-        return res;
-    };
-    defer frame.lib.freeAppliedCompatList(applied);
-
-    var applied_ids: std.ArrayList([]const u8) = .empty;
-    defer applied_ids.deinit(frame.lib.alloc);
-    for (applied) |row| {
-        applied_ids.append(frame.lib.alloc, row.recipe_id) catch return res;
-    }
-
-    const issues = frame.compat_svc.scan(install_root, applied_ids.items) catch |e| {
-        log.warn("auto-apply-compat: scan failed: {s}", .{@errorName(e)});
-        return res;
-    };
-    defer frame.compat_svc.freeIssues(issues);
-
-    for (issues) |is| {
-        // Decide whether to apply: .unfixed → yes. .fixed → only when
-        // the bundled recipe's sha has moved on (recipe was upgraded
-        // since the install was originally fixed).
-        var needs_reapply = false;
-        if (is.status == .fixed) {
-            const entry = frame.compat_svc.repo.byId(is.recipe_id) orelse continue;
-            for (applied) |row| {
-                if (!std.mem.eql(u8, row.recipe_id, is.recipe_id)) continue;
-                if (!std.mem.eql(u8, row.recipe_sha256, entry.source_sha256)) {
-                    needs_reapply = true;
-                    log.info("auto-apply-compat: {s} sha drifted ({s} → {s}) — re-applying", .{
-                        is.recipe_id, row.recipe_sha256[0..@min(8, row.recipe_sha256.len)], entry.source_sha256[0..@min(8, entry.source_sha256.len)],
-                    });
-                }
-                break;
-            }
-        }
-        if (is.status != .unfixed and !needs_reapply) continue;
-
-        // If we're re-applying due to sha drift, undo the old fix
-        // first so its backups get restored and the row's slate is
-        // clean before the new apply writes a fresh row.
-        if (needs_reapply) {
-            undoCompatFix(frame, install_id, install_root, is.recipe_id) catch |e| {
-                log.warn("auto-apply-compat: stale-sha undo of {s} failed: {s}", .{ is.recipe_id, @errorName(e) });
-                res.failed += 1;
-                continue;
-            };
-        }
-
-        applyCompatFix(frame, install_id, install_root, is.recipe_id) catch |e| {
-            log.warn("auto-apply-compat: {s} failed: {s}", .{ is.recipe_id, @errorName(e) });
-            res.failed += 1;
-            continue;
-        };
-        if (needs_reapply) res.reapplied += 1 else res.applied += 1;
-        log.info("auto-apply-compat: applied {s}", .{is.recipe_id});
-    }
-
-    return res;
-}
-
-/// Apply one fix and persist the FixRecord, both on the calling thread.
-/// Used by the post-install auto-apply path; the Fix Compat button runs
-/// the file part on the compute thread instead (`startCompatFix`).
-/// Errors propagate from the service (resource missing, snapshot
-/// failure, etc.). Caller is responsible for surfacing the error
-/// message in the UI.
-pub fn applyCompatFix(
-    frame: *Frame,
-    install_id: *const [36]u8,
-    install_root: []const u8,
-    recipe_id: []const u8,
-) !void {
-    const alloc = frame.lib.alloc;
-    const entry = frame.compat_svc.repo.byId(recipe_id) orelse return error.RecipeNotFound;
-    const id_slice: []const u8 = install_id[0..];
-    const fix = try frame.compat_svc.apply(id_slice, install_root, entry);
-    defer {
-        alloc.free(fix.recipe_id);
-        alloc.free(fix.recipe_sha256);
-        for (fix.backups) |b| frame.compat_svc.backups.freeRecord(b);
-        if (fix.backups.len > 0) alloc.free(fix.backups);
-    }
-    try recordCompatFix(frame, id_slice, fix);
-}
-
 /// DB part of a compat fix (UI thread): writes the FixRecord the file
 /// part returned. Does not free `fix`; the caller owns it.
 pub fn recordCompatFix(frame: *Frame, install_id: []const u8, fix: compat_mod.FixRecord) !void {
@@ -1124,43 +1012,6 @@ pub fn recordCompatFix(frame: *Frame, install_id: []const u8, fix: compat_mod.Fi
     const backups_json = try compat_mod.serializeBackups(alloc, fix.backups);
     defer alloc.free(backups_json);
     try frame.lib.upsertAppliedCompat(install_id, fix.recipe_id, fix.recipe_sha256, fix.applied_at, backups_json);
-}
-
-/// Reverse an applied fix and remove its row from the DB. Errors
-/// propagate from restore. A failed restore leaves the FixRecord
-/// row in place so the user can retry.
-pub fn undoCompatFix(
-    frame: *Frame,
-    install_id: *const [36]u8,
-    install_root: []const u8,
-    recipe_id: []const u8,
-) !void {
-    const id_slice: []const u8 = install_id[0..];
-    const applied = try frame.lib.listAppliedCompat(id_slice);
-    defer frame.lib.freeAppliedCompatList(applied);
-    var match_idx: ?usize = null;
-    for (applied, 0..) |row, i| if (std.mem.eql(u8, row.recipe_id, recipe_id)) {
-        match_idx = i;
-        break;
-    };
-    const row = applied[match_idx orelse return error.NotApplied];
-    const backups = try compat_mod.deserializeBackups(frame.lib.alloc, row.backups_json);
-    defer {
-        for (backups) |b| {
-            frame.lib.alloc.free(b.sha256);
-            frame.lib.alloc.free(b.relpath);
-            if (b.symlink_target) |t| frame.lib.alloc.free(t);
-        }
-        if (backups.len > 0) frame.lib.alloc.free(backups);
-    }
-    const fix_record = compat_mod.FixRecord{
-        .recipe_id = row.recipe_id,
-        .recipe_sha256 = row.recipe_sha256,
-        .applied_at = row.applied_at,
-        .backups = backups,
-    };
-    try frame.compat_svc.undo(id_slice, install_root, fix_record);
-    try frame.lib.deleteAppliedCompat(id_slice, recipe_id);
 }
 
 /// Pick a one-line "what to try next" hint for the most common launch

@@ -2554,16 +2554,25 @@ fn zoomToStepIdx(zoom: f32) usize {
 /// `<install>/.mkxp-zoom` AND triggers a re-Convert via the standard
 /// `doConvertGame` action — the convert step reads the file and
 /// regenerates `mkxp.json` with the new `defScreenW/H` values.
+/// The launcher Convert writes for an mkxp-z game. Its presence is what
+/// shows the zoom row; `actions/threads.zig` invalidates every
+/// "/run-mkxp-z.sh" entry after a Convert (keep the two names in step).
+const MKXP_LAUNCHER_FILE = "run-mkxp-z.sh";
+/// The launcher is a small shell script; a larger file reads as missing.
+const MKXP_LAUNCHER_PROBE_MAX: usize = 64 * 1024;
+
 fn renderMkxpZSettingsRow(frame: *Frame, game: *library.Game) void {
     const inst_opt = frame.lib.latestInstallForGame(game.f95_thread_id) catch null;
     defer if (inst_opt) |i| frame.lib.freeInstall(i);
     const install = inst_opt orelse return;
 
-    // Probe for the launcher we write. No file → game isn't on the
-    // mkxp-z path → don't render the dropdown.
+    // Probe for the launcher we write, through the file cache (the I/O
+    // thread reads it once). No file → game isn't on the mkxp-z path →
+    // don't render the dropdown. Until the read answers, it stays hidden.
+    // A Convert invalidates the path when it finishes (`applyConvertOutcome`).
     var probe_buf: [640]u8 = undefined;
-    const sh_path = std.fmt.bufPrint(&probe_buf, "{s}/run-mkxp-z.sh", .{install.install_path}) catch return;
-    std.Io.Dir.cwd().access(frame.io, sh_path, .{}) catch return;
+    const sh_path = std.fmt.bufPrint(&probe_buf, "{s}/{s}", .{ install.install_path, MKXP_LAUNCHER_FILE }) catch return;
+    if (frame.files.getMax(sh_path, MKXP_LAUNCHER_PROBE_MAX) == null) return;
 
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 6 } });
 

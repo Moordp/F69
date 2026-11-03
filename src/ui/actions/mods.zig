@@ -1212,6 +1212,32 @@ pub fn invalidatePresetCache(state: *State) void {
     }
 }
 
+/// Cached convert-strategy preset bundle for Settings → Presets, loaded
+/// on first use (directory read + ZON parse) instead of every frame.
+/// Same memory model as `getMergedPresets`: the bundle's arena owns the
+/// outer struct too. Null when the load fails.
+pub fn getConvertPresets(frame: *Frame) ?*convert_mod.MergedPresetSet {
+    const state = frame.state;
+    if (state.convert_preset_cache) |bundle_ptr| return bundle_ptr;
+    var bundle = convert_mod.loadMergedPresets(frame.lib.alloc, frame.io, frame.info.convert_presets_dir) catch return null;
+    const bundle_ptr = bundle.arena.allocator().create(convert_mod.MergedPresetSet) catch {
+        bundle.deinit();
+        return null;
+    };
+    bundle_ptr.* = bundle;
+    state.convert_preset_cache = bundle_ptr;
+    return bundle_ptr;
+}
+
+/// Drops the cached convert-preset bundle; the next `getConvertPresets`
+/// reads `<data_root>/convert-presets/` again.
+pub fn invalidateConvertPresetCache(state: *State) void {
+    if (state.convert_preset_cache) |bundle_ptr| {
+        bundle_ptr.deinit(); // arena dies → bundle_ptr's memory dies too
+        state.convert_preset_cache = null;
+    }
+}
+
 /// Set / clear the preset attribution on a modfile. Pass `null` for
 /// `preset_id` to clear (e.g. user picked "None" in the row dropdown).
 /// Surfaces a toast only on failure — happy-path is silent because

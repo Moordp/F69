@@ -275,7 +275,7 @@ pub fn run(deps: work_thread.Deps, job: ConvertJob, a: *Activity, buf: []u8) any
 const CompatCounts = struct { applied: u32 = 0, reapplied: u32 = 0, failed: u32 = 0 };
 
 /// File part of the post-convert compat step (scan, undo stale, apply).
-/// Mirrors `launch.autoApplyCompatAfterConvert`, with the DB rows taken
+/// The former UI-thread auto-apply after Convert, with the DB rows taken
 /// from `job.applied` and the new records handed back in `out`.
 fn applyCompat(
     svc: *compat_mod.Service,
@@ -362,7 +362,7 @@ fn applyCompat(
     return res;
 }
 
-/// Restores the backups of one recorded fix (file part of `undoCompatFix`).
+/// Restores the backups of one recorded fix (the file part of an undo).
 fn undoOnDisk(svc: *compat_mod.Service, install_id: []const u8, install_root: []const u8, row: AppliedRow) !void {
     const alloc = svc.alloc;
     const backups = try compat_mod.deserializeBackups(alloc, row.backups_json);

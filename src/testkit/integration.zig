@@ -2282,6 +2282,8 @@ fn launcherExists(io: std.Io, install_path: []const u8) bool {
 }
 
 test "threads: Tools-tab Convert runs on the compute thread, writes Game.sh and toasts" {
+    // Convert is Linux-only (writes a `.sh` launcher and sets exec bits).
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     tlog("START: threads-convert", .{});
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(8) });
@@ -2324,6 +2326,8 @@ test "threads: Tools-tab Convert runs on the compute thread, writes Game.sh and 
 }
 
 test "threads: Cancel stops a running Convert; a second Convert then completes" {
+    // Convert is Linux-only (writes a `.sh` launcher and sets exec bits).
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     tlog("START: threads-convert-cancel", .{});
     const gpa = std.testing.allocator;
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{ .async_limit = .limited(8) });
@@ -2438,7 +2442,11 @@ fn stepUntilScanDone(io: std.Io) !void {
     while (k < 2000) : (k += 1) {
         _ = try dvui.testing.step(threadsRender);
         const fr = threads_frame orelse return error.NoFrame;
-        if (!ui.folderScanInProgress(fr.state)) return;
+        if (!ui.folderScanInProgress(fr.state)) {
+            // One more frame so the screen draws the ended state (no Stop).
+            _ = try dvui.testing.step(threadsRender);
+            return;
+        }
         std.Io.sleep(io, .fromMilliseconds(5), .awake) catch {};
     }
     return error.ScanNeverEnded;
@@ -2668,6 +2676,8 @@ fn buildTarGz(gpa: std.mem.Allocator, files: []const struct { []const u8, []cons
 }
 
 test "threads: auto-convert after a downloaded install runs as a Convert activity and writes Game.sh" {
+    // Convert is Linux-only (writes a `.sh` launcher and sets exec bits).
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     tlog("START: dl-v2-auto-convert", .{});
     const gpa = std.testing.allocator;
     const downloads = @import("downloads");

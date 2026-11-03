@@ -1586,6 +1586,13 @@ pub const State = struct {
     /// after any write to `<data_root>/mod-presets/`. `null` = unloaded.
     preset_cache: ?*owned.MergedPresetSet = null,
 
+    /// Cached convert-strategy preset bundle (built-ins + the user's
+    /// `<data_root>/convert-presets/`) for Settings → Presets. Filled
+    /// lazily by `getConvertPresets`; dropped by
+    /// `invalidateConvertPresetCache` when the Presets category is opened
+    /// (the folder is edited out of band). `null` = unloaded.
+    convert_preset_cache: ?*owned.ConvertPresetSet = null,
+
     /// In-flight `TestInstallJob` for the wizard's Review-step "Test
     /// install (real)" button. `*anyopaque` for the same reason as
     /// `preset_cache` — keeps installer / recipe types out of state.zig.

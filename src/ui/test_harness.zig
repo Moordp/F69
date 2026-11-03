@@ -320,6 +320,7 @@ pub const Harness = struct {
         actions.freeSnapshotCache(&self.state, lib_alloc);
         actions.freeSlideCache(&self.state, lib_alloc);
         actions.invalidatePresetCache(&self.state);
+        actions.invalidateConvertPresetCache(&self.state);
         actions.freeTestInstallJob(&self.state, self.io);
         actions.freeRecipeSourceCache(&self.state);
         actions.freePostInstalled(&self.state, lib_alloc);

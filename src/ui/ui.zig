@@ -322,6 +322,7 @@ pub fn runMainLoop(
         actions.freeSnapshotCache(&state, lib.alloc);
         actions.freeSlideCache(&state, lib.alloc);
         actions.invalidatePresetCache(&state);
+        actions.invalidateConvertPresetCache(&state);
         actions.freeTestInstallJob(&state, io);
         actions.freeRecipeSourceCache(&state);
         actions.freePostInstalled(&state, lib.alloc);
@@ -530,6 +531,11 @@ pub fn runMainLoop(
                 .events = &ui_events,
                 .info = info,
             };
+            // The worker is stopped: drain the outcomes it queued (and the
+            // partial records a cancelled Convert / Fix Compat returned on
+            // stop) so their DB writes happen before `Events.deinit` frees
+            // them.
+            actions.drainThreads(&shutdown_frame);
             // Wait up to ~6 seconds. The forum rate-limit is 1.5 s
             // per request, so a worker that's mid-sleep needs at
             // least one full rate-limit cycle to come out and notice
@@ -537,6 +543,7 @@ pub fn runMainLoop(
             var spin: u32 = 0;
             const SHUTDOWN_DRAIN_TICKS: u32 = 120; // × 50ms = 6 s
             while (actions.workersBusy(&state) and spin < SHUTDOWN_DRAIN_TICKS) : (spin += 1) {
+                actions.drainThreads(&shutdown_frame);
                 actions.drainSync(&shutdown_frame);
                 actions.drainFastCheck(&shutdown_frame);
                 actions.drainImageQueue(&shutdown_frame);

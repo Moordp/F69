@@ -220,10 +220,14 @@ fn handleWorkDone(frame: *Frame, activity_id: u64, outcome: threads.work_thread.
 }
 
 /// DB part of the post-convert compat step: drop the rows of fixes the
-/// job undid, write the new ones (same as `launch.applyCompatFix`), then
+/// job undid, write the new ones (with `launch.recordCompatFix`), then
 /// refresh the installed set.
 fn applyConvertOutcome(frame: *Frame, c: threads.work_thread.ConvertOutcome) void {
     defer convert_job.freeOutcome(frame.compat_svc, c);
+    // The Tools tab shows the mkxp-z zoom row when the cache has the
+    // launcher. A Convert (done, failed or stopped) may have written or
+    // replaced it: forget every cached probe so the next frame reads again.
+    frame.files.invalidateSuffix("/run-mkxp-z.sh");
     if (c.install_id) |*id| {
         const id_slice: []const u8 = id[0..];
         for (c.compat_undone) |rid| {

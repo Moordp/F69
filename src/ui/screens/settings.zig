@@ -140,7 +140,12 @@ fn catItem(state: *State, label: []const u8, cat: state_mod.SettingsTab) void {
         .gravity_y = 0.5,
         .color_text = .{ .color = dcol(if (on) t.acc else t.ink2) },
     });
-    if (dvui.clicked(row.data(), .{})) state.settings_tab = cat;
+    if (dvui.clicked(row.data(), .{})) {
+        // The convert-preset folder is edited out of band: re-read it
+        // when the user opens the Presets category.
+        if (cat == .presets) actions.invalidateConvertPresetCache(state);
+        state.settings_tab = cat;
+    }
 }
 
 /// Design-B labelled toggle: title + switch on one row, optional wrapping
@@ -1375,12 +1380,12 @@ fn renderSettingsConvertPresets(frame: *Frame) void {
     );
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .w = 1, .h = 10 } });
 
-    const convert_mod = @import("convert");
-    var bundle = convert_mod.loadMergedPresets(frame.lib.alloc, frame.io, frame.info.convert_presets_dir) catch {
+    // Cached in State (read once, not every frame); opening the Presets
+    // category drops the cache so files added out of band show up.
+    const bundle = actions.getConvertPresets(frame) orelse {
         dvui.label(@src(), "Failed to load convert preset bundle.", .{}, .{ .style = .err });
         return;
     };
-    defer bundle.deinit();
 
     if (bundle.presets.len == 0) {
         dvui.label(@src(), "No presets loaded.", .{}, .{});

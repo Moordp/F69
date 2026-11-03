@@ -345,8 +345,11 @@ pub const Worker = struct {
         freeJob(e.job);
         const a = e.activity;
         a.cancel.store(true, .release);
+        // Copy the id first: once finished, a Remove or "Clear finished"
+        // on the UI thread may free the Activity.
+        const id = a.id;
         self.book.finish(a, .warn, "Stopped before it started.", nowSeconds(self.io));
-        self.events.push(.{ .work_done = .{ .activity_id = a.id, .outcome = .none } });
+        self.events.push(.{ .work_done = .{ .activity_id = id, .outcome = .none } });
     }
 
     fn threadMain(self: *Worker) void {
@@ -362,11 +365,8 @@ pub const Worker = struct {
             self.current = e.activity;
             self.lock.unlock(self.io);
 
+            // `runOne` clears `current` before it finishes the activity.
             self.runOne(e);
-
-            self.lock.lockUncancelable(self.io);
-            self.current = null;
-            self.lock.unlock(self.io);
         }
     }
 
@@ -376,14 +376,26 @@ pub const Worker = struct {
         a.markRunning(nowSeconds(self.io));
         var buf: [192]u8 = undefined;
         var outcome: WorkOutcome = .none;
+        var kind: ResultKind = undefined;
+        var msg: []const u8 = undefined;
         if (run(self.deps, e.job, a, &buf)) |d| {
             outcome = d.outcome;
-            self.book.finish(a, d.kind, d.msg, nowSeconds(self.io));
+            kind = d.kind;
+            msg = d.msg;
         } else |err| {
             const res = errorResult(err);
-            self.book.finish(a, res.kind, res.msg, nowSeconds(self.io));
+            kind = res.kind;
+            msg = res.msg;
         }
-        self.events.push(.{ .work_done = .{ .activity_id = a.id, .outcome = outcome } });
+        // Once finished, a Remove or "Clear finished" on the UI thread may
+        // free the Activity. So: copy the id, and clear `current` under the
+        // lock first, so `stop()` cannot store to `a.cancel` after that.
+        const id = a.id;
+        self.lock.lockUncancelable(self.io);
+        self.current = null;
+        self.lock.unlock(self.io);
+        self.book.finish(a, kind, msg, nowSeconds(self.io));
+        self.events.push(.{ .work_done = .{ .activity_id = id, .outcome = outcome } });
     }
 };
 
@@ -535,6 +547,70 @@ test "Worker: stop detaches a job that ignores cancel; deinit leaves the state i
     defer left.deinit(alloc);
     ev.drain(alloc, &left);
     for (left.items) |e| events_mod.freeEvent(alloc, e);
+}
+
+const Remover = struct {
+    book: *Book,
+    ids: []const u64,
+    quit: std.atomic.Value(bool) = .init(false),
+
+    /// Models the UI thread's Remove / "Clear finished": frees each
+    /// activity the moment it is finished, over and over.
+    fn loop(self: *Remover) void {
+        while (!self.quit.load(.acquire)) {
+            for (self.ids) |id| self.book.remove(id);
+            std.Thread.yield() catch {};
+        }
+    }
+};
+
+test "Worker: Remove racing finish never frees an activity the worker still reads (50 jobs)" {
+    const alloc = std.testing.allocator;
+    const io = std.testing.io;
+    var book = Book.init(alloc, io);
+    defer book.deinit();
+    var ev = Events.init(alloc, io, null);
+    defer ev.deinit();
+    var w = Worker.init(alloc, io, &book, &ev, .{ .alloc = alloc, .io = io });
+    defer w.deinit();
+    try w.start();
+
+    const n = 50;
+    var ids: [n]u64 = undefined;
+    var acts: [n]*Activity = undefined;
+    for (&ids, &acts) |*id, *a| {
+        a.* = try book.start(.hash, 1, "race");
+        id.* = a.*.id;
+    }
+    var remover: Remover = .{ .book = &book, .ids = &ids };
+    const rt = try std.Thread.spawn(.{}, Remover.loop, .{&remover});
+    defer {
+        remover.quit.store(true, .release);
+        rt.join();
+    }
+    // The activities may be freed from here on: use only the ids.
+    for (acts) |a| try w.submit(.{ .fake = .{ .steps = 1, .sleep_ms = 0 } }, a);
+
+    var seen: [n]bool = @splat(false);
+    var got: usize = 0;
+    var spins: usize = 0;
+    while (got < n and spins < 10_000) : (spins += 1) {
+        const e = ev.mb.popWait() orelse return error.TestUnexpectedResult;
+        switch (e) {
+            .work_done => |d| {
+                // A stale read of a freed Activity would give a wrong id.
+                const idx = std.mem.indexOfScalar(u64, &ids, d.activity_id) orelse return error.TestUnexpectedResult;
+                try std.testing.expect(!seen[idx]);
+                seen[idx] = true;
+                got += 1;
+                book.remove(d.activity_id);
+            },
+            else => {},
+        }
+        events_mod.freeEvent(alloc, e);
+    }
+    try std.testing.expectEqual(@as(usize, n), got);
+    w.stop();
 }
 
 test "errorResult: both cancel spellings are a warning \"Stopped.\"; others are errors" {

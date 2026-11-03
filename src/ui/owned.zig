@@ -26,6 +26,7 @@
 const std = @import("std");
 const installer_mod = @import("installer");
 const recipe = @import("recipe");
+const convert_mod = @import("convert");
 const library = @import("library");
 const f95 = @import("f95");
 const f95_indexer = @import("f95_indexer");
@@ -113,6 +114,10 @@ pub const ModsPageCache = struct {
 /// import (and so the field type lives in the same module as the
 /// other heap-state slots).
 pub const MergedPresetSet = recipe.MergedPresetSet;
+
+/// Re-export of `convert.MergedPresetSet` for `state.convert_preset_cache`
+/// (same reason as `MergedPresetSet`).
+pub const ConvertPresetSet = convert_mod.MergedPresetSet;
 
 // ---- R4c: job structs ------------------------------------------
 

@@ -400,6 +400,8 @@ fn renderScanProgress(frame: *Frame) void {
     // Normally `.work_done` ends the session; this catches a job that was
     // dropped before it started or ended with an error.
     actions.checkFolderScanEnded(frame, found);
+    // The check may have ended the session: never draw Stop after that.
+    if (!actions.folderScanInProgress(frame.state)) return;
     var row = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal });
     defer row.deinit();
     {
